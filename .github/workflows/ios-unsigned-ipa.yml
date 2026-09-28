@@ -1,0 +1,96 @@
+name: iOS Unsigned IPA
+# Builds an unsigned IPA for sideloading (for example with Feather, which
+# signs it on the device). No Apple signing credentials are involved.
+on:
+  push:
+    tags:
+      - 'omp-ios/v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing or new tag to attach the IPA to (leave empty for artifact only)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      IPA_NAME: ccpocket-unsigned.ipa
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read Flutter version from .mise.toml
+        id: mise
+        run: echo "flutter_version=$(grep 'flutter' .mise.toml | sed 's/.*= *\"//' | sed 's/\"//')" >> "$GITHUB_OUTPUT"
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ steps.mise.outputs.flutter_version }}
+          cache: true
+      - name: Setup Firebase config
+        env:
+          GOOGLE_SERVICE_INFO_PLIST_BASE64: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
+        run: |
+          if [ -z "$GOOGLE_SERVICE_INFO_PLIST_BASE64" ]; then
+            echo "::error::Secret GOOGLE_SERVICE_INFO_PLIST_BASE64 is missing; push notifications would not work"
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_SERVICE_INFO_PLIST_BASE64" | base64 -d > apps/mobile/ios/Runner/GoogleService-Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' apps/mobile/ios/Runner/GoogleService-Info.plist
+      - name: Use precompiled Rust artifacts
+        run: |
+          printf '%s\n' 'use_precompiled_binaries: true' > apps/mobile/cargokit_options.yaml
+      - run: flutter pub get
+        working-directory: apps/mobile
+      - name: Build iOS app without code signing
+        working-directory: apps/mobile
+        run: flutter build ios --release --no-codesign
+      - name: Package IPA
+        id: package
+        run: |
+          APP_DIR="apps/mobile/build/ios/iphoneos/Runner.app"
+          STAGE="$RUNNER_TEMP/ipa"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP_DIR" "$STAGE/Payload/"
+          (cd "$STAGE" && zip -qry "$IPA_NAME" Payload)
+          mv "$STAGE/$IPA_NAME" "$GITHUB_WORKSPACE/$IPA_NAME"
+          echo "ipa_path=$GITHUB_WORKSPACE/$IPA_NAME" >> "$GITHUB_OUTPUT"
+      - name: Verify IPA contents
+        run: |
+          CHECK="$RUNNER_TEMP/ipa-check"
+          rm -rf "$CHECK"
+          mkdir -p "$CHECK"
+          unzip -q "${{ steps.package.outputs.ipa_path }}" -d "$CHECK"
+          INFO="$CHECK/Payload/Runner.app/Info.plist"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO")
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO")
+          echo "bundle=$BUNDLE_ID version=$VERSION build=$BUILD"
+          test "$BUNDLE_ID" = "com.k9i.ccpocket"
+          FIREBASE_APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :GOOGLE_APP_ID' "$CHECK/Payload/Runner.app/GoogleService-Info.plist")
+          case "$FIREBASE_APP_ID" in
+            1:000000000000:*) echo "::error::Dummy Firebase config embedded"; exit 1 ;;
+          esac
+          shasum -a 256 "${{ steps.package.outputs.ipa_path }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ccpocket-unsigned-ipa
+          path: ${{ steps.package.outputs.ipa_path }}
+          retention-days: 30
+      - name: Attach IPA to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.package.outputs.ipa_path }}" --clobber
+          else
+            gh release create "$TAG" "${{ steps.package.outputs.ipa_path }}" \
+              --title "ccpocket iOS (unsigned) ${TAG#omp-ios/}" \
+              --notes "Unsigned IPA for sideloading. Sign and install it on the device, for example with Feather." \
+              --prerelease
+          fi
