@@ -1,0 +1,9 @@
+{
+  "type": "system",
+  "subtype": "omp_settings",
+  "sessionId": "3f9c2a1b",
+  "provider": "omp",
+  "model": "baseten/MiniMaxAI/MiniMax-M3",
+  "thinkingLevel": "off",
+  "thinkingLevels": ["off"]
+}

@@ -1,0 +1,11 @@
+{
+  "type": "start",
+  "projectPath": "/home/user/project",
+  "provider": "omp",
+  "permissionMode": "acceptEdits",
+  "executionMode": "acceptEdits",
+  "model": "baseten/zai-org/GLM-5.3-Fast",
+  "thinkingLevel": "high",
+  "autoRename": true,
+  "requestId": "pending_1790447032742"
+}

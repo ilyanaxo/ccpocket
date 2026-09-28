@@ -1,0 +1,29 @@
+[
+  {
+    "type": "system",
+    "subtype": "session_created",
+    "sessionId": "3f9c2a1b",
+    "provider": "omp",
+    "projectPath": "/home/user/project",
+    "permissionMode": "acceptEdits",
+    "executionMode": "acceptEdits",
+    "planMode": false,
+    "model": "baseten/zai-org/GLM-5.3-Fast",
+    "thinkingLevel": "high",
+    "requestId": "pending_1790447032742"
+  },
+  {
+    "type": "system",
+    "subtype": "session_created",
+    "sessionId": "7d41e0c5",
+    "provider": "omp",
+    "projectPath": "/home/user/project-worktrees/fix-login",
+    "permissionMode": "acceptEdits",
+    "executionMode": "acceptEdits",
+    "planMode": false,
+    "claudeSessionId": "01a0e960-d626-7359-b8e8-44ce5c598088",
+    "model": "baseten/zai-org/GLM-5.3-Fast",
+    "thinkingLevel": "high",
+    "resumeRequestId": "session-list:01a0e960-d626-7359-b8e8-44ce5c598088:1790447140120000"
+  }
+]

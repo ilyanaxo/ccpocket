@@ -1,0 +1,13 @@
+{
+  "type": "resume_session",
+  "sessionId": "01a0e960-d626-7359-b8e8-44ce5c598088",
+  "projectPath": "/home/user/project-worktrees/fix-login",
+  "permissionMode": "plan",
+  "executionMode": "default",
+  "planMode": true,
+  "effort": "high",
+  "provider": "omp",
+  "sandboxMode": "on",
+  "model": "claude-opus-4-7",
+  "resumeRequestId": "session-list:01a0e960-d626-7359-b8e8-44ce5c598088:1790447140120000"
+}
