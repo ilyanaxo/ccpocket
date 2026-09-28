@@ -203,11 +203,24 @@ class CodexGoal {
 
 enum Provider {
   claude('claude', 'Claude'),
-  codex('codex', 'Codex');
+  codex('codex', 'Codex'),
+  omp('omp', 'omp');
 
   final String value;
   final String label;
   const Provider(this.value, this.label);
+}
+
+/// Resolves a wire-format provider value (`claude`, `codex`, `omp`).
+///
+/// Returns null for a missing or unknown value, so each caller chooses its
+/// own fallback explicitly instead of silently treating it as Claude.
+Provider? providerFromValue(String? raw) {
+  if (raw == null) return null;
+  for (final provider in Provider.values) {
+    if (provider.value == raw) return provider;
+  }
+  return null;
 }
 
 String? sanitizeCodexModelName(String? model) {

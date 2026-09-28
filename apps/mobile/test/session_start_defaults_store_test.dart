@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:ccpocket/features/session_list/services/session_start_defaults_store.dart';
 import 'package:ccpocket/models/messages.dart';
-import 'package:ccpocket/widgets/new_session_sheet.dart';
+import 'package:ccpocket/models/new_session_params.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 

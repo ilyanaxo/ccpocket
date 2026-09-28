@@ -6,7 +6,8 @@ import 'messages.dart';
 /// Tabs available in the new session sheet.
 enum NewSessionTab {
   codex('codex', 'Codex'),
-  claude('claude', 'Claude');
+  claude('claude', 'Claude'),
+  omp('omp', 'omp');
 
   final String value;
   final String label;
@@ -16,6 +17,7 @@ enum NewSessionTab {
   Provider toProvider() => switch (this) {
     NewSessionTab.claude => Provider.claude,
     NewSessionTab.codex => Provider.codex,
+    NewSessionTab.omp => Provider.omp,
   };
 
   /// Look up a tab by its wire-format value.
@@ -33,6 +35,8 @@ extension NewSessionTabL10n on NewSessionTab {
   String localizedLabel(AppLocalizations l) => switch (this) {
     NewSessionTab.codex => l.newSessionTabCodex,
     NewSessionTab.claude => l.newSessionTabClaudeCode,
+    // Brand name, not translated (like newSessionTabCodex).
+    NewSessionTab.omp => NewSessionTab.omp.label,
   };
 }
 

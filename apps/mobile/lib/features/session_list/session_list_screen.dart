@@ -13,6 +13,7 @@ import '../../utils/platform_helper.dart';
 
 import '../../models/messages.dart';
 import '../../models/machine.dart';
+import '../../models/new_session_params.dart';
 import '../../models/offline_pending_action.dart';
 import '../../models/protocol_version.dart';
 import '../../providers/bridge_cubits.dart';
@@ -108,6 +109,8 @@ bool autoRenameForProvider(SettingsState settings, Provider provider) {
   return switch (provider) {
     Provider.codex => settings.autoRenameCodexSessions,
     Provider.claude => settings.autoRenameClaudeSessions,
+    // omp: replaced in WP4 (autoRenameOmpSessions).
+    Provider.omp => settings.autoRenameClaudeSessions,
   };
 }
 
@@ -1439,6 +1442,8 @@ class _SessionListScreenState extends State<SessionListScreen>
         initialApprovalsReviewer: approvalsReviewer,
         pendingSessionCreated: pendingNotifier,
       ),
+      // omp: replaced in WP4 (OmpSessionRoute); until then Provider.omp
+      // opens the Claude route through this wildcard.
       _ => ClaudeSessionRoute(
         sessionId: sessionId,
         projectPath: projectPath,

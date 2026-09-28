@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ccpocket/models/messages.dart';
+import 'package:ccpocket/models/new_session_params.dart';
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/services/bridge_service.dart';
 import 'package:ccpocket/widgets/new_session_sheet.dart';

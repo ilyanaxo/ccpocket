@@ -1110,6 +1110,8 @@ class _WorkspaceContentHost extends StatelessWidget {
             shell?.clearSelectedSession(entry: sessionEntry),
         hideSessionBackButton: !(shell?.isSinglePane ?? true),
       ),
+      // omp: replaced in WP4 (OmpSessionScreen); until then Provider.omp
+      // opens the Claude screen through this wildcard.
       _ => ClaudeSessionScreen(
         key: ValueKey('workspace_claude_${selection.sessionId}'),
         sessionId: selection.sessionId,

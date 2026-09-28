@@ -420,6 +420,7 @@ class SessionListCubit extends Cubit<SessionListState> {
     ProviderFilter.all => null,
     ProviderFilter.claude => 'claude',
     ProviderFilter.codex => 'codex',
+    ProviderFilter.omp => 'omp',
   };
 
   @override

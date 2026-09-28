@@ -269,6 +269,37 @@ void main() {
     expect(codexSpeedFromRaw('standard'), CodexSpeed.standard);
   });
 
+  group('providerFromValue', () {
+    test('resolves every wire provider value', () {
+      expect(providerFromValue('claude'), Provider.claude);
+      expect(providerFromValue('codex'), Provider.codex);
+      expect(providerFromValue('omp'), Provider.omp);
+    });
+
+    test('round-trips every Provider through its value', () {
+      for (final provider in Provider.values) {
+        expect(providerFromValue(provider.value), provider);
+      }
+    });
+
+    test('returns null for missing or unknown values', () {
+      expect(providerFromValue(null), isNull);
+      expect(providerFromValue(''), isNull);
+      expect(providerFromValue('gemini'), isNull);
+    });
+
+    test('matches the exact wire value only', () {
+      expect(providerFromValue('OMP'), isNull);
+      expect(providerFromValue(' omp'), isNull);
+      expect(providerFromValue('Codex'), isNull);
+    });
+
+    test('omp uses its brand name as label', () {
+      expect(Provider.omp.value, 'omp');
+      expect(Provider.omp.label, 'omp');
+    });
+  });
+
   group('pathBasename', () {
     test('handles POSIX and Windows path separators', () {
       expect(pathBasename('/Users/me/project-a'), 'project-a');

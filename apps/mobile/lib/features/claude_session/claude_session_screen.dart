@@ -14,6 +14,8 @@ import '../../hooks/use_app_resume_callback.dart';
 import '../../hooks/use_scroll_tracking.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/messages.dart';
+import '../../models/new_session_params.dart'
+    show permissionModeFromRaw, sandboxModeFromRaw;
 import '../../providers/bridge_cubits.dart';
 import '../../providers/machine_manager_cubit.dart';
 import '../../router/app_router.dart';
@@ -34,8 +36,6 @@ import '../settings/state/settings_cubit.dart';
 import '../../widgets/approval_bar.dart';
 import '../../widgets/bubbles/ask_user_question_widget.dart';
 import '../../widgets/message_bubble.dart';
-import '../../widgets/new_session_sheet.dart'
-    show permissionModeFromRaw, sandboxModeFromRaw;
 import '../../widgets/plan_detail_sheet.dart';
 import '../../widgets/rename_session_dialog.dart';
 import '../../widgets/screenshot_sheet.dart';
