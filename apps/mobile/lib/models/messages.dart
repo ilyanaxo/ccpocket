@@ -211,6 +211,10 @@ enum Provider {
   const Provider(this.value, this.label);
 }
 
+/// Providers this app can display, declared to the Bridge in
+/// `client_capabilities.supportedProviders`.
+const appSupportedProviders = <String>['claude', 'codex', 'omp'];
+
 /// Resolves a wire-format provider value (`claude`, `codex`, `omp`).
 ///
 /// Returns null for a missing or unknown value, so each caller chooses its
@@ -221,6 +225,103 @@ Provider? providerFromValue(String? raw) {
     if (provider.value == raw) return provider;
   }
   return null;
+}
+
+// ---- omp ----
+
+/// omp thinking levels in the order omp lists them. The wire value is the
+/// enum name.
+enum OmpThinkingLevel {
+  off,
+  minimal,
+  low,
+  medium,
+  high,
+  xhigh,
+  max;
+
+  String get value => name;
+}
+
+OmpThinkingLevel? ompThinkingLevelFromValue(String? raw) {
+  if (raw == null) return null;
+  for (final level in OmpThinkingLevel.values) {
+    if (level.value == raw) return level;
+  }
+  return null;
+}
+
+/// Whether the Bridge found omp and at least one usable model.
+enum OmpAvailability {
+  available('available'),
+  notInstalled('not_installed'),
+  noModels('no_models');
+
+  final String value;
+  const OmpAvailability(this.value);
+}
+
+/// Whether the connected Bridge supports omp (`provider_omp_v1`).
+///
+/// [unknown] until the first `session_list` of a connection has arrived (and
+/// no earlier value for the same Bridge target is known in this app run).
+enum OmpSupport { unknown, supported, unsupported }
+
+OmpAvailability? ompAvailabilityFromValue(String? raw) {
+  if (raw == null) return null;
+  for (final availability in OmpAvailability.values) {
+    if (availability.value == raw) return availability;
+  }
+  return null;
+}
+
+/// One entry of the Bridge's omp model catalogue (`session_list.ompModels`).
+class OmpModelInfo {
+  /// Exact `<provider>/<id>` selector omp accepts for `--model`.
+  final String selector;
+  final String provider;
+  final String name;
+
+  /// Wire values of [OmpThinkingLevel] this model offers; always contains
+  /// `off`.
+  final List<String> thinkingLevels;
+
+  /// Input kinds, e.g. `text`, `image`.
+  final List<String> input;
+
+  const OmpModelInfo({
+    required this.selector,
+    required this.provider,
+    required this.name,
+    this.thinkingLevels = const [],
+    this.input = const [],
+  });
+
+  factory OmpModelInfo.fromJson(Map<String, dynamic> json) {
+    final selector = json['selector'] as String? ?? '';
+    return OmpModelInfo(
+      selector: selector,
+      provider: json['provider'] as String? ?? '',
+      name: _nonEmptyString(json['name']) ?? selector,
+      thinkingLevels: _stringList(json['thinkingLevels'])
+          .where((level) => ompThinkingLevelFromValue(level) != null)
+          .toList(),
+      input: _stringList(json['input']),
+    );
+  }
+}
+
+/// Thinking levels the catalogue offers for [selector], or an empty list when
+/// the model is unknown.
+List<String> ompThinkingLevelsForModel(
+  Iterable<OmpModelInfo> models,
+  String? selector,
+) {
+  if (selector == null || selector.isEmpty) return const [];
+  for (final model in models) {
+    if (model.selector == selector) return model.thinkingLevels;
+  }
+  return const [];
 }
 
 String? sanitizeCodexModelName(String? model) {
@@ -452,11 +553,14 @@ ExecutionMode deriveExecutionMode({
     return ExecutionMode.fullAccess;
   }
   if (permissionMode == PermissionMode.acceptEdits.value) {
-    return provider == Provider.codex.value
-        ? ExecutionMode.defaultMode
-        : ExecutionMode.acceptEdits;
+    return switch (providerFromValue(provider)) {
+      Provider.codex => ExecutionMode.defaultMode,
+      // omp uses Claude semantics: acceptEdits maps to omp's `write` mode.
+      Provider.claude || Provider.omp || null => ExecutionMode.acceptEdits,
+    };
   }
   if (approvalPolicy == 'never') return ExecutionMode.fullAccess;
+  // Includes `plan` and `auto`, which omp maps to `default` (always-ask).
   return ExecutionMode.defaultMode;
 }
 
@@ -476,12 +580,14 @@ PermissionMode legacyPermissionModeFromModes(
   required ExecutionMode executionMode,
   required bool planMode,
 }) {
-  if (planMode) return PermissionMode.plan;
+  // omp has no plan mode, so [planMode] never selects `plan` for it.
+  if (planMode && provider != Provider.omp) return PermissionMode.plan;
   switch (executionMode) {
     case ExecutionMode.defaultMode:
-      return provider == Provider.codex
-          ? PermissionMode.acceptEdits
-          : PermissionMode.defaultMode;
+      return switch (provider) {
+        Provider.codex => PermissionMode.acceptEdits,
+        Provider.claude || Provider.omp => PermissionMode.defaultMode,
+      };
     case ExecutionMode.acceptEdits:
       return PermissionMode.acceptEdits;
     case ExecutionMode.fullAccess:
@@ -791,6 +897,8 @@ sealed class ServerMessage {
         serviceTier: json['serviceTier'] as String?,
         networkAccessEnabled: json['networkAccessEnabled'] as bool?,
         webSearchMode: json['webSearchMode'] as String?,
+        thinkingLevel: json['thinkingLevel'] as String?,
+        thinkingLevels: _stringList(json['thinkingLevels']),
         slashCommands:
             (json['slashCommands'] as List?)
                 ?.map((e) => e as String)
@@ -1034,6 +1142,22 @@ sealed class ServerMessage {
                 ?.whereType<String>()
                 .toSet() ??
             const {},
+        ompModels: switch (json['ompModels']) {
+          final List models =>
+            models
+                .whereType<Map>()
+                .map(
+                  (model) =>
+                      OmpModelInfo.fromJson(Map<String, dynamic>.from(model)),
+                )
+                .where((model) => model.selector.isNotEmpty)
+                .toList(),
+          _ => null,
+        },
+        ompAvailability: ompAvailabilityFromValue(
+          json['ompAvailability'] as String?,
+        ),
+        ompModelsRevision: (json['ompModelsRevision'] as num?)?.toInt(),
       ),
       'recent_sessions' => RecentSessionsMessage(
         sessions: (json['sessions'] as List)
@@ -1650,6 +1774,13 @@ class SystemMessage implements ServerMessage {
   final String? serviceTier;
   final bool? networkAccessEnabled;
   final String? webSearchMode;
+
+  /// omp thinking level (`init`, `omp_settings`, `session_created`). Absent
+  /// means omp has no level set for the model.
+  final String? thinkingLevel;
+
+  /// omp thinking levels the current model offers.
+  final List<String> thinkingLevels;
   final List<String> slashCommands;
   final List<String> skills;
   final List<CodexSkillMetadata> skillMetadata;
@@ -1684,6 +1815,8 @@ class SystemMessage implements ServerMessage {
     this.serviceTier,
     this.networkAccessEnabled,
     this.webSearchMode,
+    this.thinkingLevel,
+    this.thinkingLevels = const [],
     this.slashCommands = const [],
     this.skills = const [],
     this.skillMetadata = const [],
@@ -2089,7 +2222,38 @@ class PermissionPresentation {
     this.secondaryDetails = const [],
   });
 
+  /// Builds the card for [message]. omp approvals carry omp's own approval
+  /// text in `input.approvalDetails`; those lines are appended to the
+  /// secondary details of every card kind, without the lines that only repeat
+  /// the summary or the primary target.
   factory PermissionPresentation.from(PermissionRequestMessage message) {
+    final base = PermissionPresentation._fromToolInput(message);
+    final approvalDetails = _approvalDetailLines(
+      message.input['approvalDetails'],
+      summary: base.summary,
+      primaryTarget: base.primaryTarget,
+    );
+    if (approvalDetails.isEmpty) return base;
+    return PermissionPresentation(
+      title: base.title,
+      summary: base.summary,
+      rawDetails: base.rawDetails,
+      riskBadge: base.riskBadge,
+      scopeLabel: base.scopeLabel,
+      primaryTargetLabel: base.primaryTargetLabel,
+      primaryTarget: base.primaryTarget,
+      secondaryDetails: [
+        ...base.secondaryDetails.where(
+          (line) => !approvalDetails.contains(line),
+        ),
+        ...approvalDetails,
+      ],
+    );
+  }
+
+  factory PermissionPresentation._fromToolInput(
+    PermissionRequestMessage message,
+  ) {
     final input = message.input;
     final rawDetails = const JsonEncoder.withIndent('  ').convert(input);
 
@@ -2266,6 +2430,32 @@ class PermissionPresentation {
         );
     }
   }
+}
+
+/// Lines of omp's approval text (`input.approvalDetails`) in their original
+/// order, without blank lines and without lines whose value only repeats the
+/// card's [summary] or [primaryTarget]. Repeated content lines are kept: they
+/// are part of what omp is about to run.
+List<String> _approvalDetailLines(
+  dynamic value, {
+  required String summary,
+  String? primaryTarget,
+}) {
+  if (value is! List) return const [];
+  final normalizedSummary = _normalizeDetailValue(summary);
+  final normalizedPrimary = _normalizeDetailValue(primaryTarget);
+  final lines = <String>[];
+  for (final entry in value) {
+    if (entry is! String || entry.trim().isEmpty) continue;
+    final normalizedValue = _normalizeDetailValue(_detailLineValue(entry));
+    if (normalizedValue != null &&
+        (normalizedValue == normalizedSummary ||
+            normalizedValue == normalizedPrimary)) {
+      continue;
+    }
+    lines.add(entry);
+  }
+  return lines;
 }
 
 List<String> _flattenPermissionValues(dynamic value, [String prefix = '']) {
@@ -2594,6 +2784,14 @@ class SessionListMessage implements ServerMessage {
   final int? protocolVersion;
   final int? minimumProtocolVersion;
   final Set<String> protocolCapabilities;
+
+  /// omp model catalogue. Null when the Bridge omitted it (not refreshed yet,
+  /// unchanged since the last broadcast, or omp undeclared); keep the cache.
+  final List<OmpModelInfo>? ompModels;
+
+  /// Null when absent; keep the cached value.
+  final OmpAvailability? ompAvailability;
+  final int? ompModelsRevision;
   const SessionListMessage({
     required this.sessions,
     this.allowedDirs = const [],
@@ -2609,6 +2807,9 @@ class SessionListMessage implements ServerMessage {
     this.protocolVersion,
     this.minimumProtocolVersion,
     this.protocolCapabilities = const {},
+    this.ompModels,
+    this.ompAvailability,
+    this.ompModelsRevision,
   });
 }
 
@@ -4079,6 +4280,12 @@ class RecentSession {
   final bool? codexNetworkAccessEnabled;
   final String? codexWebSearchMode;
   final List<String> codexAdditionalWritableRoots;
+
+  /// omp model selector recorded in the session file (`ompSettings.model`).
+  final String? ompModel;
+
+  /// omp thinking level recorded in the session file.
+  final String? ompThinkingLevel;
   final SessionWorkspaceInfo? workspace;
 
   const RecentSession({
@@ -4110,6 +4317,8 @@ class RecentSession {
     this.codexNetworkAccessEnabled,
     this.codexWebSearchMode,
     this.codexAdditionalWritableRoots = const [],
+    this.ompModel,
+    this.ompThinkingLevel,
     this.workspace,
   });
 
@@ -4123,7 +4332,7 @@ class RecentSession {
   bool get resolvedPlanMode => planMode;
 
   String get permissionMode => legacyPermissionModeFromModes(
-    provider == Provider.codex.value ? Provider.codex : Provider.claude,
+    providerFromValue(provider) ?? Provider.claude,
     executionMode: resolvedExecutionMode,
     planMode: resolvedPlanMode,
   ).value;
@@ -4134,6 +4343,7 @@ class RecentSession {
 
   factory RecentSession.fromJson(Map<String, dynamic> json) {
     final codexSettings = json['codexSettings'] as Map<String, dynamic>?;
+    final ompSettings = _stringKeyedMap(json['ompSettings']);
     return RecentSession(
       sessionId: json['sessionId'] as String,
       provider: json['provider'] as String?,
@@ -4179,6 +4389,8 @@ class RecentSession {
       codexAdditionalWritableRoots: _stringList(
         codexSettings?['additionalWritableRoots'],
       ),
+      ompModel: _nonEmptyString(ompSettings?['model']),
+      ompThinkingLevel: _nonEmptyString(ompSettings?['thinkingLevel']),
       workspace: switch (json['workspace']) {
         final Map workspace => SessionWorkspaceInfo.fromJson(
           Map<String, dynamic>.from(workspace),
@@ -4242,6 +4454,8 @@ class RecentSession {
       codexNetworkAccessEnabled: codexNetworkAccessEnabled,
       codexWebSearchMode: codexWebSearchMode,
       codexAdditionalWritableRoots: codexAdditionalWritableRoots,
+      ompModel: ompModel,
+      ompThinkingLevel: ompThinkingLevel,
       workspace: workspace,
     );
   }
@@ -4280,6 +4494,8 @@ class RecentSession {
       codexNetworkAccessEnabled: codexNetworkAccessEnabled,
       codexWebSearchMode: codexWebSearchMode,
       codexAdditionalWritableRoots: codexAdditionalWritableRoots,
+      ompModel: ompModel,
+      ompThinkingLevel: ompThinkingLevel,
       workspace: workspace,
     );
   }
@@ -4320,6 +4536,12 @@ class SessionInfo {
   final bool? codexNetworkAccessEnabled;
   final String? codexWebSearchMode;
   final List<String> codexAdditionalWritableRoots;
+
+  /// Live omp model selector (`ompSettings.model`).
+  final String? ompModel;
+
+  /// Live omp thinking level (`ompSettings.thinkingLevel`).
+  final String? ompThinkingLevel;
   final PermissionRequestMessage? pendingPermission;
   final QueuedInputItem? queuedInput;
   final SessionWorkspaceInfo? workspace;
@@ -4355,6 +4577,8 @@ class SessionInfo {
     this.codexNetworkAccessEnabled,
     this.codexWebSearchMode,
     this.codexAdditionalWritableRoots = const [],
+    this.ompModel,
+    this.ompThinkingLevel,
     this.pendingPermission,
     this.queuedInput,
     this.workspace,
@@ -4387,7 +4611,7 @@ class SessionInfo {
   String get effectivePermissionMode =>
       permissionMode ??
       legacyPermissionModeFromModes(
-        provider == Provider.codex.value ? Provider.codex : Provider.claude,
+        providerFromValue(provider) ?? Provider.claude,
         executionMode: resolvedExecutionMode,
         planMode: resolvedPlanMode,
       ).value;
@@ -4412,6 +4636,10 @@ class SessionInfo {
     bool? codexNetworkAccessEnabled,
     String? codexWebSearchMode,
     List<String>? codexAdditionalWritableRoots,
+    String? ompModel,
+    bool clearOmpModel = false,
+    String? ompThinkingLevel,
+    bool clearOmpThinkingLevel = false,
     PermissionRequestMessage? pendingPermission,
     bool clearPermission = false,
     QueuedInputItem? queuedInput,
@@ -4452,6 +4680,10 @@ class SessionInfo {
       codexWebSearchMode: codexWebSearchMode ?? this.codexWebSearchMode,
       codexAdditionalWritableRoots:
           codexAdditionalWritableRoots ?? this.codexAdditionalWritableRoots,
+      ompModel: clearOmpModel ? null : (ompModel ?? this.ompModel),
+      ompThinkingLevel: clearOmpThinkingLevel
+          ? null
+          : (ompThinkingLevel ?? this.ompThinkingLevel),
       pendingPermission: clearPermission
           ? null
           : (pendingPermission ?? this.pendingPermission),
@@ -4462,6 +4694,7 @@ class SessionInfo {
 
   factory SessionInfo.fromJson(Map<String, dynamic> json) {
     final codexSettings = json['codexSettings'] as Map<String, dynamic>?;
+    final ompSettings = _stringKeyedMap(json['ompSettings']);
     final permJson = json['pendingPermission'] as Map<String, dynamic>?;
     final queueJson = json['queuedInput'] as Map<String, dynamic>?;
     return SessionInfo(
@@ -4511,6 +4744,8 @@ class SessionInfo {
       codexAdditionalWritableRoots: _stringList(
         codexSettings?['additionalWritableRoots'],
       ),
+      ompModel: _nonEmptyString(ompSettings?['model']),
+      ompThinkingLevel: _nonEmptyString(ompSettings?['thinkingLevel']),
       pendingPermission: permJson != null
           ? PermissionRequestMessage(
               toolUseId: permJson['toolUseId'] as String,
@@ -4557,6 +4792,7 @@ class ClientMessage {
       'push_registration_result',
       'session_context',
     ],
+    List<String> supportedProviders = appSupportedProviders,
   }) {
     return ClientMessage._(<String, dynamic>{
       'type': 'client_capabilities',
@@ -4565,6 +4801,8 @@ class ClientMessage {
       'appVersion': ?appVersion,
       if (supportedServerMessages.isNotEmpty)
         'supportedServerMessages': supportedServerMessages,
+      if (supportedProviders.isNotEmpty)
+        'supportedProviders': supportedProviders,
     });
   }
 
@@ -4590,6 +4828,7 @@ class ClientMessage {
     String? existingWorktreePath,
     String? provider,
     String? model,
+    String? thinkingLevel,
     String? sandboxMode,
     String? modelReasoningEffort,
     String? serviceTier,
@@ -4626,6 +4865,7 @@ class ClientMessage {
       'existingWorktreePath': ?existingWorktreePath,
       'provider': ?provider,
       'model': ?model,
+      'thinkingLevel': ?thinkingLevel,
       'sandboxMode': ?sandboxMode,
       'modelReasoningEffort': ?modelReasoningEffort,
       'serviceTier': ?serviceTier,
@@ -4769,6 +5009,25 @@ class ClientMessage {
       'type': 'set_codex_speed',
       'serviceTier': serviceTier,
       'sessionId': ?sessionId,
+    });
+  }
+
+  /// Change the model and/or thinking level of a running omp session. At
+  /// least one of [model] or [thinkingLevel] is required.
+  factory ClientMessage.setOmpModel(
+    String sessionId, {
+    String? model,
+    String? thinkingLevel,
+  }) {
+    assert(
+      model != null || thinkingLevel != null,
+      'setOmpModel needs a model or a thinking level',
+    );
+    return ClientMessage._(<String, dynamic>{
+      'type': 'set_omp_model',
+      'sessionId': sessionId,
+      'model': ?model,
+      'thinkingLevel': ?thinkingLevel,
     });
   }
 
@@ -4931,9 +5190,14 @@ class ClientMessage {
     String? requestScope,
     String? requestId,
     String? provider,
+    List<String>? providers,
     bool? namedOnly,
     String? searchQuery,
   }) {
+    assert(
+      provider == null || providers == null,
+      'provider and providers are mutually exclusive',
+    );
     return ClientMessage._(<String, dynamic>{
       'type': 'list_recent_sessions',
       'limit': ?limit,
@@ -4944,6 +5208,7 @@ class ClientMessage {
       'requestScope': ?requestScope,
       'requestId': ?requestId,
       'provider': ?provider,
+      if (providers != null && providers.isNotEmpty) 'providers': providers,
       'namedOnly': ?namedOnly,
       'searchQuery': ?searchQuery,
     });
@@ -4968,6 +5233,7 @@ class ClientMessage {
     String? provider,
     String? sandboxMode,
     String? model,
+    String? thinkingLevel,
     String? modelReasoningEffort,
     String? serviceTier,
     bool? networkAccessEnabled,
@@ -4998,6 +5264,7 @@ class ClientMessage {
       'provider': ?provider,
       'sandboxMode': ?sandboxMode,
       'model': ?model,
+      'thinkingLevel': ?thinkingLevel,
       'modelReasoningEffort': ?modelReasoningEffort,
       'serviceTier': ?serviceTier,
       'networkAccessEnabled': ?networkAccessEnabled,

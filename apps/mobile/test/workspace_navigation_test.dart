@@ -35,6 +35,32 @@ void main() {
     expect(navigation.state.centerInFront, isTrue);
   });
 
+  test('an omp session is a different selection than the same id', () {
+    final navigation = WorkspaceNavigationCubit();
+    addTearDown(navigation.close);
+    navigation.selectSession(
+      const WorkspaceSessionSelection(
+        sessionId: 's1',
+        provider: Provider.codex,
+      ),
+    );
+    final codexEntry = navigation.state.sessionEntry;
+
+    navigation.selectSession(
+      const WorkspaceSessionSelection(sessionId: 's1', provider: Provider.omp),
+    );
+    expect(navigation.state.selection!.provider, Provider.omp);
+    expect(navigation.state.sessionEntry, codexEntry + 1);
+
+    navigation.openOverlay(WorkspaceCenterOverlay.settings);
+    navigation.selectSession(
+      const WorkspaceSessionSelection(sessionId: 's1', provider: Provider.omp),
+    );
+    // Re-selecting the live omp session only reveals it.
+    expect(navigation.state.sessionEntry, codexEntry + 1);
+    expect(navigation.state.overlay, WorkspaceCenterOverlay.none);
+  });
+
   test(
     'late removal of a replaced or reset route cannot close its successor',
     () {

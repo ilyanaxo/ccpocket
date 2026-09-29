@@ -10,6 +10,9 @@ import 'package:flutter_test/flutter_test.dart';
 class _SessionLinkBridge extends BridgeService {
   final controller = StreamController<ServerMessage>.broadcast();
   late SessionLinkResolveResult result;
+  final resolvedProviders = <String>[];
+  Completer<OmpSupport>? ompSupportAnswer;
+  int ompSupportWaits = 0;
 
   @override
   Stream<ServerMessage> get messages => controller.stream;
@@ -20,7 +23,16 @@ class _SessionLinkBridge extends BridgeService {
     String provider = 'claude',
     Duration timeout = const Duration(seconds: 10),
   }) async {
+    resolvedProviders.add(provider);
     return result;
+  }
+
+  @override
+  Future<OmpSupport> waitForConnectionOmpSupport({
+    Duration timeout = const Duration(seconds: 10),
+  }) {
+    ompSupportWaits++;
+    return (ompSupportAnswer ??= Completer<OmpSupport>()).future;
   }
 
   @override
@@ -99,6 +111,85 @@ void main() {
         provider: 'claude',
       ),
     );
+  });
+
+  group('omp links', () {
+    const liveOmp = SessionLinkResolveResult.resolved(
+      SessionLinkResolutionMessage(
+        requestId: 'request-1',
+        sourceSessionId: '01a0e960',
+        status: SessionLinkResolutionStatus.live,
+        bridgeSessionId: 'bridge-omp',
+        provider: 'omp',
+      ),
+    );
+
+    SessionLinkCubit ompCubit() {
+      final cubit = SessionLinkCubit(
+        bridge: bridge,
+        sourceSessionId: '01a0e960',
+        provider: 'omp',
+      );
+      addTearDown(cubit.close);
+      return cubit;
+    }
+
+    test('waits for the Bridge capabilities before resolving', () async {
+      bridge.result = liveOmp;
+      final cubit = ompCubit();
+
+      final resolving = cubit.resolve();
+      await Future<void>.delayed(Duration.zero);
+      expect(cubit.state, const SessionLinkState.resolving());
+      expect(bridge.resolvedProviders, isEmpty);
+
+      bridge.ompSupportAnswer!.complete(OmpSupport.supported);
+      await resolving;
+
+      expect(bridge.resolvedProviders, ['omp']);
+      expect(
+        cubit.state,
+        const SessionLinkState.openLive(
+          bridgeSessionId: 'bridge-omp',
+          provider: 'omp',
+        ),
+      );
+    });
+
+    test('asks for a Bridge update when omp is not supported', () async {
+      bridge.ompSupportAnswer = Completer()..complete(OmpSupport.unsupported);
+      final cubit = ompCubit();
+
+      await cubit.resolve();
+
+      expect(cubit.state, const SessionLinkState.bridgeUpdateRequired());
+      expect(bridge.resolvedProviders, isEmpty);
+    });
+
+    test('is unavailable when the capabilities never arrive', () async {
+      bridge.ompSupportAnswer = Completer()..complete(OmpSupport.unknown);
+      final cubit = ompCubit();
+
+      await cubit.resolve();
+
+      expect(cubit.state, const SessionLinkState.unavailable());
+      expect(bridge.resolvedProviders, isEmpty);
+    });
+
+    test('Claude links do not wait for omp capabilities', () async {
+      bridge.result = const SessionLinkResolveResult.unsupported();
+      final cubit = SessionLinkCubit(
+        bridge: bridge,
+        sourceSessionId: 'claude-uuid',
+        provider: 'claude',
+      );
+      addTearDown(cubit.close);
+
+      await cubit.resolve();
+
+      expect(bridge.ompSupportWaits, 0);
+      expect(bridge.resolvedProviders, ['claude']);
+    });
   });
 
   test('falls back to the legacy route for an older Bridge', () async {

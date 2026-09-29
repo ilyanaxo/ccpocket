@@ -1689,4 +1689,332 @@ void main() {
       expect(status.branch, 'main');
     });
   });
+
+  group('omp wire model', () {
+    Map<String, dynamic> encode(ClientMessage message) =>
+        jsonDecode(message.toJson()) as Map<String, dynamic>;
+
+    test('OmpThinkingLevel and OmpAvailability use the wire values', () {
+      expect(OmpThinkingLevel.values.map((level) => level.value), [
+        'off',
+        'minimal',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(ompThinkingLevelFromValue('xhigh'), OmpThinkingLevel.xhigh);
+      expect(ompThinkingLevelFromValue('none'), isNull);
+      expect(ompThinkingLevelFromValue(null), isNull);
+      expect(
+        ompAvailabilityFromValue('not_installed'),
+        OmpAvailability.notInstalled,
+      );
+      expect(ompAvailabilityFromValue('no_models'), OmpAvailability.noModels);
+      expect(ompAvailabilityFromValue('available'), OmpAvailability.available);
+      expect(ompAvailabilityFromValue('broken'), isNull);
+    });
+
+    test('session_list parses the omp model catalogue', () {
+      final message = ServerMessage.fromJson({
+        'type': 'session_list',
+        'sessions': const <Object>[],
+        'ompModels': [
+          {
+            'selector': 'baseten/zai-org/GLM-5.3-Fast',
+            'provider': 'baseten',
+            'name': 'GLM 5.3 Fast',
+            'thinkingLevels': ['off', 'high', 'turbo', 'max'],
+            'input': ['text', 'image'],
+          },
+          {'provider': 'broken'},
+        ],
+        'ompAvailability': 'available',
+        'ompModelsRevision': 3,
+      }) as SessionListMessage;
+
+      expect(message.ompModels, hasLength(1));
+      final model = message.ompModels!.single;
+      expect(model.selector, 'baseten/zai-org/GLM-5.3-Fast');
+      expect(model.provider, 'baseten');
+      expect(model.name, 'GLM 5.3 Fast');
+      // Unknown levels are dropped; the rest keep omp's order.
+      expect(model.thinkingLevels, ['off', 'high', 'max']);
+      expect(model.input, ['text', 'image']);
+      expect(message.ompAvailability, OmpAvailability.available);
+      expect(message.ompModelsRevision, 3);
+    });
+
+    test('session_list without omp fields leaves them absent', () {
+      final message = ServerMessage.fromJson({
+        'type': 'session_list',
+        'sessions': const <Object>[],
+      }) as SessionListMessage;
+
+      expect(message.ompModels, isNull);
+      expect(message.ompAvailability, isNull);
+      expect(message.ompModelsRevision, isNull);
+    });
+
+    test('ompThinkingLevelsForModel looks up the selector', () {
+      const models = [
+        OmpModelInfo(
+          selector: 'a/reasoning',
+          provider: 'a',
+          name: 'Reasoning',
+          thinkingLevels: ['off', 'high'],
+        ),
+        OmpModelInfo(
+          selector: 'a/plain',
+          provider: 'a',
+          name: 'Plain',
+          thinkingLevels: ['off'],
+        ),
+      ];
+      expect(ompThinkingLevelsForModel(models, 'a/reasoning'), ['off', 'high']);
+      expect(ompThinkingLevelsForModel(models, 'a/unknown'), isEmpty);
+      expect(ompThinkingLevelsForModel(models, null), isEmpty);
+    });
+
+    test('system messages carry the omp thinking level and levels', () {
+      final message = ServerMessage.fromJson({
+        'type': 'system',
+        'subtype': 'omp_settings',
+        'sessionId': '3f9c2a1b',
+        'provider': 'omp',
+        'model': 'baseten/MiniMaxAI/MiniMax-M3',
+        'thinkingLevel': 'off',
+        'thinkingLevels': ['off'],
+      }) as SystemMessage;
+
+      expect(message.provider, 'omp');
+      expect(message.model, 'baseten/MiniMaxAI/MiniMax-M3');
+      expect(message.thinkingLevel, 'off');
+      expect(message.thinkingLevels, ['off']);
+
+      final withoutLevel = ServerMessage.fromJson({
+        'type': 'system',
+        'subtype': 'init',
+      }) as SystemMessage;
+      expect(withoutLevel.thinkingLevel, isNull);
+      expect(withoutLevel.thinkingLevels, isEmpty);
+    });
+
+    test('recent and running sessions flatten ompSettings', () {
+      final recent = RecentSession.fromJson({
+        'sessionId': '01a0e960',
+        'provider': 'omp',
+        'firstPrompt': 'hi',
+        'ompSettings': {'model': 'a/b', 'thinkingLevel': 'high'},
+      });
+      expect(recent.ompModel, 'a/b');
+      expect(recent.ompThinkingLevel, 'high');
+      expect(recent.copyWithName(name: 'renamed').ompModel, 'a/b');
+      expect(recent.copyWithName(name: 'renamed').ompThinkingLevel, 'high');
+
+      final running = SessionInfo.fromJson({
+        'id': '3f9c2a1b',
+        'provider': 'omp',
+        'projectPath': '/p',
+        'ompSettings': {'model': 'a/b'},
+      });
+      expect(running.ompModel, 'a/b');
+      expect(running.ompThinkingLevel, isNull);
+      final patched = running.copyWith(ompThinkingLevel: 'max');
+      expect(patched.ompModel, 'a/b');
+      expect(patched.ompThinkingLevel, 'max');
+      expect(
+        patched.copyWith(clearOmpThinkingLevel: true).ompThinkingLevel,
+        isNull,
+      );
+    });
+
+    test('omp sessions derive modes with Claude semantics and no plan', () {
+      expect(
+        deriveExecutionMode(provider: 'omp', permissionMode: 'acceptEdits'),
+        ExecutionMode.acceptEdits,
+      );
+      expect(
+        deriveExecutionMode(
+          provider: 'omp',
+          permissionMode: 'bypassPermissions',
+        ),
+        ExecutionMode.fullAccess,
+      );
+      expect(
+        deriveExecutionMode(provider: 'omp', permissionMode: 'plan'),
+        ExecutionMode.defaultMode,
+      );
+      expect(
+        legacyPermissionModeFromModes(
+          Provider.omp,
+          executionMode: ExecutionMode.defaultMode,
+          planMode: true,
+        ),
+        PermissionMode.defaultMode,
+      );
+      expect(
+        legacyPermissionModeFromModes(
+          Provider.omp,
+          executionMode: ExecutionMode.fullAccess,
+          planMode: false,
+        ),
+        PermissionMode.bypassPermissions,
+      );
+
+      final running = SessionInfo.fromJson({
+        'id': '3f9c2a1b',
+        'provider': 'omp',
+        'projectPath': '/p',
+        'executionMode': 'fullAccess',
+      });
+      expect(running.effectivePermissionMode, 'bypassPermissions');
+      final recent = RecentSession.fromJson({
+        'sessionId': 'x',
+        'provider': 'omp',
+        'executionMode': 'acceptEdits',
+      });
+      expect(recent.permissionMode, 'acceptEdits');
+    });
+
+    test('client capabilities declare the supported providers', () {
+      final json = encode(ClientMessage.clientCapabilities());
+      expect(json['supportedProviders'], ['claude', 'codex', 'omp']);
+      expect(
+        appSupportedProviders,
+        Provider.values.map((provider) => provider.value).toList(),
+      );
+    });
+
+    test('start and resume carry thinkingLevel', () {
+      final start = encode(
+        ClientMessage.start(
+          '/p',
+          provider: 'omp',
+          model: 'a/b',
+          thinkingLevel: 'high',
+        ),
+      );
+      expect(start['thinkingLevel'], 'high');
+      expect(start['model'], 'a/b');
+
+      final resume = encode(
+        ClientMessage.resumeSession(
+          'omp-id',
+          '/p',
+          provider: 'omp',
+          thinkingLevel: 'low',
+        ),
+      );
+      expect(resume['thinkingLevel'], 'low');
+      expect(
+        encode(ClientMessage.start('/p')).containsKey('thinkingLevel'),
+        isFalse,
+      );
+    });
+
+    test('listRecentSessions sends providers only when given', () {
+      final withProviders = encode(
+        ClientMessage.listRecentSessions(providers: const ['claude', 'omp']),
+      );
+      expect(withProviders['providers'], ['claude', 'omp']);
+      expect(withProviders.containsKey('provider'), isFalse);
+
+      final empty = encode(ClientMessage.listRecentSessions(providers: []));
+      expect(empty.containsKey('providers'), isFalse);
+    });
+
+    test('setOmpModel serializes the requested fields only', () {
+      expect(
+        encode(ClientMessage.setOmpModel('3f9c2a1b', thinkingLevel: 'off')),
+        {
+          'type': 'set_omp_model',
+          'sessionId': '3f9c2a1b',
+          'thinkingLevel': 'off',
+        },
+      );
+      expect(encode(ClientMessage.setOmpModel('3f9c2a1b', model: 'a/b')), {
+        'type': 'set_omp_model',
+        'sessionId': '3f9c2a1b',
+        'model': 'a/b',
+      });
+    });
+
+    group('PermissionPresentation approvalDetails', () {
+      PermissionPresentation present(
+        String toolName,
+        Map<String, dynamic> input,
+      ) => PermissionRequestMessage(
+        toolUseId: 't1',
+        toolName: toolName,
+        input: input,
+      ).presentation;
+
+      test('bound Bash approval drops the line that repeats the command', () {
+        final presentation = present('Bash', {
+          'command': 'echo hi',
+          'approvalDetails': ['Command: echo hi'],
+        });
+        expect(presentation.primaryTarget, 'echo hi');
+        expect(presentation.secondaryDetails, isEmpty);
+      });
+
+      test('unbound approval shows omp text as details', () {
+        final presentation = present('Bash', {
+          'approvalDetails': ['Command: rm -rf build', 'Origin: eval'],
+        });
+        expect(presentation.primaryTarget, isNull);
+        expect(presentation.secondaryDetails, [
+          'Command: rm -rf build',
+          'Origin: eval',
+        ]);
+      });
+
+      test('reason line is not repeated next to the summary', () {
+        final presentation = present('Bash', {
+          'command': 'git push --force',
+          'reason': 'Force push rewrites history',
+          'approvalDetails': [
+            'Reason: Force push rewrites history',
+            'Command: git push --force',
+            'Provider safety checks:',
+            'destructive git command',
+          ],
+        });
+        expect(presentation.summary, 'Force push rewrites history');
+        expect(presentation.secondaryDetails, [
+          'Provider safety checks:',
+          'destructive git command',
+        ]);
+      });
+
+      test('write approval keeps content lines in order, repeats included', () {
+        final presentation = present('Write', {
+          'file_path': 'note.txt',
+          'content': 'a\na',
+          'approvalDetails': ['Path: note.txt', 'Content:', 'a', '', 'a'],
+        });
+        expect(presentation.primaryTarget, 'note.txt');
+        expect(presentation.secondaryDetails, ['Content:', 'a', 'a']);
+      });
+
+      test('FileChange approval appends the hashline patch', () {
+        final presentation = present('FileChange', {
+          'changes': [
+            {'path': 'lib/a.dart', 'kind': 'update', 'diff': '...'},
+          ],
+          'approvalDetails': ['File: lib/a.dart', 'Patch:', '[lib/a.dart#1]'],
+        });
+        expect(presentation.primaryTarget, 'lib/a.dart');
+        expect(presentation.secondaryDetails, ['Patch:', '[lib/a.dart#1]']);
+      });
+
+      test('cards without approvalDetails are unchanged', () {
+        final presentation = present('Bash', {'command': 'ls'});
+        expect(presentation.secondaryDetails, isEmpty);
+        expect(presentation.summary, 'Allow command execution');
+      });
+    });
+  });
 }

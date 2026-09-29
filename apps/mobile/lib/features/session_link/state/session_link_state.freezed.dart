@@ -56,7 +56,7 @@ extension SessionLinkStatePatterns on SessionLinkState {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( SessionLinkResolving value)?  resolving,TResult Function( SessionLinkResuming value)?  resuming,TResult Function( SessionLinkOpenLive value)?  openLive,TResult Function( SessionLinkOpenResumed value)?  openResumed,TResult Function( SessionLinkOpenLegacy value)?  openLegacy,TResult Function( SessionLinkUnavailable value)?  unavailable,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( SessionLinkResolving value)?  resolving,TResult Function( SessionLinkResuming value)?  resuming,TResult Function( SessionLinkOpenLive value)?  openLive,TResult Function( SessionLinkOpenResumed value)?  openResumed,TResult Function( SessionLinkOpenLegacy value)?  openLegacy,TResult Function( SessionLinkBridgeUpdateRequired value)?  bridgeUpdateRequired,TResult Function( SessionLinkUnavailable value)?  unavailable,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case SessionLinkResolving() when resolving != null:
@@ -64,7 +64,8 @@ return resolving(_that);case SessionLinkResuming() when resuming != null:
 return resuming(_that);case SessionLinkOpenLive() when openLive != null:
 return openLive(_that);case SessionLinkOpenResumed() when openResumed != null:
 return openResumed(_that);case SessionLinkOpenLegacy() when openLegacy != null:
-return openLegacy(_that);case SessionLinkUnavailable() when unavailable != null:
+return openLegacy(_that);case SessionLinkBridgeUpdateRequired() when bridgeUpdateRequired != null:
+return bridgeUpdateRequired(_that);case SessionLinkUnavailable() when unavailable != null:
 return unavailable(_that);case _:
   return orElse();
 
@@ -83,7 +84,7 @@ return unavailable(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( SessionLinkResolving value)  resolving,required TResult Function( SessionLinkResuming value)  resuming,required TResult Function( SessionLinkOpenLive value)  openLive,required TResult Function( SessionLinkOpenResumed value)  openResumed,required TResult Function( SessionLinkOpenLegacy value)  openLegacy,required TResult Function( SessionLinkUnavailable value)  unavailable,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( SessionLinkResolving value)  resolving,required TResult Function( SessionLinkResuming value)  resuming,required TResult Function( SessionLinkOpenLive value)  openLive,required TResult Function( SessionLinkOpenResumed value)  openResumed,required TResult Function( SessionLinkOpenLegacy value)  openLegacy,required TResult Function( SessionLinkBridgeUpdateRequired value)  bridgeUpdateRequired,required TResult Function( SessionLinkUnavailable value)  unavailable,}){
 final _that = this;
 switch (_that) {
 case SessionLinkResolving():
@@ -91,7 +92,8 @@ return resolving(_that);case SessionLinkResuming():
 return resuming(_that);case SessionLinkOpenLive():
 return openLive(_that);case SessionLinkOpenResumed():
 return openResumed(_that);case SessionLinkOpenLegacy():
-return openLegacy(_that);case SessionLinkUnavailable():
+return openLegacy(_that);case SessionLinkBridgeUpdateRequired():
+return bridgeUpdateRequired(_that);case SessionLinkUnavailable():
 return unavailable(_that);}
 }
 /// A variant of `map` that fallback to returning `null`.
@@ -106,7 +108,7 @@ return unavailable(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( SessionLinkResolving value)?  resolving,TResult? Function( SessionLinkResuming value)?  resuming,TResult? Function( SessionLinkOpenLive value)?  openLive,TResult? Function( SessionLinkOpenResumed value)?  openResumed,TResult? Function( SessionLinkOpenLegacy value)?  openLegacy,TResult? Function( SessionLinkUnavailable value)?  unavailable,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( SessionLinkResolving value)?  resolving,TResult? Function( SessionLinkResuming value)?  resuming,TResult? Function( SessionLinkOpenLive value)?  openLive,TResult? Function( SessionLinkOpenResumed value)?  openResumed,TResult? Function( SessionLinkOpenLegacy value)?  openLegacy,TResult? Function( SessionLinkBridgeUpdateRequired value)?  bridgeUpdateRequired,TResult? Function( SessionLinkUnavailable value)?  unavailable,}){
 final _that = this;
 switch (_that) {
 case SessionLinkResolving() when resolving != null:
@@ -114,7 +116,8 @@ return resolving(_that);case SessionLinkResuming() when resuming != null:
 return resuming(_that);case SessionLinkOpenLive() when openLive != null:
 return openLive(_that);case SessionLinkOpenResumed() when openResumed != null:
 return openResumed(_that);case SessionLinkOpenLegacy() when openLegacy != null:
-return openLegacy(_that);case SessionLinkUnavailable() when unavailable != null:
+return openLegacy(_that);case SessionLinkBridgeUpdateRequired() when bridgeUpdateRequired != null:
+return bridgeUpdateRequired(_that);case SessionLinkUnavailable() when unavailable != null:
 return unavailable(_that);case _:
   return null;
 
@@ -132,14 +135,15 @@ return unavailable(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  resolving,TResult Function()?  resuming,TResult Function( String bridgeSessionId,  String provider)?  openLive,TResult Function( SystemMessage session,  String? gitBranch)?  openResumed,TResult Function()?  openLegacy,TResult Function()?  unavailable,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  resolving,TResult Function()?  resuming,TResult Function( String bridgeSessionId,  String provider)?  openLive,TResult Function( SystemMessage session,  String? gitBranch)?  openResumed,TResult Function()?  openLegacy,TResult Function()?  bridgeUpdateRequired,TResult Function()?  unavailable,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case SessionLinkResolving() when resolving != null:
 return resolving();case SessionLinkResuming() when resuming != null:
 return resuming();case SessionLinkOpenLive() when openLive != null:
 return openLive(_that.bridgeSessionId,_that.provider);case SessionLinkOpenResumed() when openResumed != null:
 return openResumed(_that.session,_that.gitBranch);case SessionLinkOpenLegacy() when openLegacy != null:
-return openLegacy();case SessionLinkUnavailable() when unavailable != null:
+return openLegacy();case SessionLinkBridgeUpdateRequired() when bridgeUpdateRequired != null:
+return bridgeUpdateRequired();case SessionLinkUnavailable() when unavailable != null:
 return unavailable();case _:
   return orElse();
 
@@ -158,14 +162,15 @@ return unavailable();case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  resolving,required TResult Function()  resuming,required TResult Function( String bridgeSessionId,  String provider)  openLive,required TResult Function( SystemMessage session,  String? gitBranch)  openResumed,required TResult Function()  openLegacy,required TResult Function()  unavailable,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  resolving,required TResult Function()  resuming,required TResult Function( String bridgeSessionId,  String provider)  openLive,required TResult Function( SystemMessage session,  String? gitBranch)  openResumed,required TResult Function()  openLegacy,required TResult Function()  bridgeUpdateRequired,required TResult Function()  unavailable,}) {final _that = this;
 switch (_that) {
 case SessionLinkResolving():
 return resolving();case SessionLinkResuming():
 return resuming();case SessionLinkOpenLive():
 return openLive(_that.bridgeSessionId,_that.provider);case SessionLinkOpenResumed():
 return openResumed(_that.session,_that.gitBranch);case SessionLinkOpenLegacy():
-return openLegacy();case SessionLinkUnavailable():
+return openLegacy();case SessionLinkBridgeUpdateRequired():
+return bridgeUpdateRequired();case SessionLinkUnavailable():
 return unavailable();}
 }
 /// A variant of `when` that fallback to returning `null`
@@ -180,14 +185,15 @@ return unavailable();}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  resolving,TResult? Function()?  resuming,TResult? Function( String bridgeSessionId,  String provider)?  openLive,TResult? Function( SystemMessage session,  String? gitBranch)?  openResumed,TResult? Function()?  openLegacy,TResult? Function()?  unavailable,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  resolving,TResult? Function()?  resuming,TResult? Function( String bridgeSessionId,  String provider)?  openLive,TResult? Function( SystemMessage session,  String? gitBranch)?  openResumed,TResult? Function()?  openLegacy,TResult? Function()?  bridgeUpdateRequired,TResult? Function()?  unavailable,}) {final _that = this;
 switch (_that) {
 case SessionLinkResolving() when resolving != null:
 return resolving();case SessionLinkResuming() when resuming != null:
 return resuming();case SessionLinkOpenLive() when openLive != null:
 return openLive(_that.bridgeSessionId,_that.provider);case SessionLinkOpenResumed() when openResumed != null:
 return openResumed(_that.session,_that.gitBranch);case SessionLinkOpenLegacy() when openLegacy != null:
-return openLegacy();case SessionLinkUnavailable() when unavailable != null:
+return openLegacy();case SessionLinkBridgeUpdateRequired() when bridgeUpdateRequired != null:
+return bridgeUpdateRequired();case SessionLinkUnavailable() when unavailable != null:
 return unavailable();case _:
   return null;
 
@@ -201,7 +207,7 @@ return unavailable();case _:
 
 class SessionLinkResolving implements SessionLinkState {
   const SessionLinkResolving();
-
+  
 
 
 
@@ -233,7 +239,7 @@ String toString() {
 
 class SessionLinkResuming implements SessionLinkState {
   const SessionLinkResuming();
-
+  
 
 
 
@@ -265,7 +271,7 @@ String toString() {
 
 class SessionLinkOpenLive implements SessionLinkState {
   const SessionLinkOpenLive({required this.bridgeSessionId, required this.provider});
-
+  
 
  final  String bridgeSessionId;
  final  String provider;
@@ -333,7 +339,7 @@ as String,
 
 class SessionLinkOpenResumed implements SessionLinkState {
   const SessionLinkOpenResumed({required this.session, this.gitBranch});
-
+  
 
  final  SystemMessage session;
  final  String? gitBranch;
@@ -401,7 +407,7 @@ as String?,
 
 class SessionLinkOpenLegacy implements SessionLinkState {
   const SessionLinkOpenLegacy();
-
+  
 
 
 
@@ -431,9 +437,41 @@ String toString() {
 /// @nodoc
 
 
+class SessionLinkBridgeUpdateRequired implements SessionLinkState {
+  const SessionLinkBridgeUpdateRequired();
+  
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is SessionLinkBridgeUpdateRequired);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'SessionLinkState.bridgeUpdateRequired()';
+}
+
+
+}
+
+
+
+
+/// @nodoc
+
+
 class SessionLinkUnavailable implements SessionLinkState {
   const SessionLinkUnavailable();
-
+  
 
 
 

@@ -16,6 +16,8 @@ import '../utils/network_endpoint.dart';
 import 'bridge_service_base.dart';
 import 'session_runtime_store.dart';
 
+export '../models/messages.dart' show OmpSupport;
+
 enum SessionLinkResolveSupport { resolved, unsupported, unavailable }
 
 class SessionLinkResolveResult {
@@ -150,6 +152,24 @@ class BridgeService implements BridgeServiceBase {
   List<String> _codexProfiles = [];
   String? _defaultCodexProfile;
   bool _codexAutoReviewDisabled = false;
+  List<OmpModelInfo> _ompModels = const [];
+  OmpAvailability? _ompAvailability;
+  int? _ompModelsRevision;
+
+  /// omp support announced by the current connection's `session_list`; null
+  /// until it arrives.
+  OmpSupport? _connectionOmpSupport;
+
+  /// Last omp support seen per Bridge target in this app run (memory only).
+  final Map<String, OmpSupport> _lastOmpSupportByTarget = {};
+  OmpSupport _publishedOmpSupport = OmpSupport.unknown;
+  final _ompSupportController = StreamController<OmpSupport>.broadcast();
+  final _connectionOmpSupportController =
+      StreamController<OmpSupport>.broadcast();
+
+  /// `requestId`s of omp starts written to the socket, to catch a
+  /// `session_created` for a different provider.
+  final Set<String> _sentOmpStartRequestIds = {};
   String? _bridgeVersion;
   ProtocolCompatibility? _protocolCompatibility;
   Set<String> _protocolCapabilities = const {};
@@ -188,6 +208,74 @@ class BridgeService implements BridgeServiceBase {
 
   bool get supportsSessionContext =>
       _protocolCapabilities.contains('session_context_v1');
+
+  /// Capability a Bridge advertises when it accepts `provider: "omp"`.
+  static const ompProviderCapability = 'provider_omp_v1';
+
+  bool get _connectedBridgeSupportsOmp =>
+      _protocolCapabilities.contains(ompProviderCapability);
+
+  /// Whether the Bridge supports omp: from the current connection's
+  /// `session_list`; before that (or while disconnected) the last value seen
+  /// for the same Bridge target in this app run; otherwise
+  /// [OmpSupport.unknown].
+  OmpSupport get ompSupport {
+    final current = _connectionOmpSupport;
+    if (current != null) return current;
+    final url = _lastUrl;
+    if (url == null) return OmpSupport.unknown;
+    return _lastOmpSupportByTarget[_bridgeTargetKeyForUrl(url)] ??
+        OmpSupport.unknown;
+  }
+
+  /// Emits [ompSupport] whenever it changes.
+  Stream<OmpSupport> get ompSupportStream => _ompSupportController.stream;
+
+  List<OmpModelInfo> get ompModels => _ompModels;
+  OmpAvailability? get ompAvailability => _ompAvailability;
+  int? get ompModelsRevision => _ompModelsRevision;
+
+  /// Waits until the current connection has announced whether it supports
+  /// omp (connected and first `session_list`), reconnecting a backed-off
+  /// socket at once. Returns [OmpSupport.unknown] when that does not happen
+  /// within [timeout] or the Bridge was disconnected on purpose.
+  Future<OmpSupport> waitForConnectionOmpSupport({
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final known = _connectionOmpSupport;
+    if (known != null) return known;
+    if (!_prepareSessionLinkConnection()) return OmpSupport.unknown;
+    final announced = _connectionOmpSupportController.stream.first;
+    final afterPrepare = _connectionOmpSupport;
+    if (afterPrepare != null) return afterPrepare;
+    try {
+      return await announced.timeout(timeout);
+    } on TimeoutException {
+      return OmpSupport.unknown;
+    } on StateError {
+      return OmpSupport.unknown;
+    }
+  }
+
+  void _setConnectionOmpSupport(OmpSupport? support) {
+    _connectionOmpSupport = support;
+    final url = _lastUrl;
+    if (support != null && url != null) {
+      _lastOmpSupportByTarget[_bridgeTargetKeyForUrl(url)] = support;
+    }
+    _publishOmpSupport();
+    if (support != null && !_connectionOmpSupportController.isClosed) {
+      _connectionOmpSupportController.add(support);
+    }
+  }
+
+  void _publishOmpSupport() {
+    final support = ompSupport;
+    if (support == _publishedOmpSupport) return;
+    _publishedOmpSupport = support;
+    if (!_ompSupportController.isClosed) _ompSupportController.add(support);
+    _publishOfflinePendingActions();
+  }
 
   String? projectRequestIdForWire(String requestId) =>
       supportsProjectRequestCorrelation ? requestId : null;
@@ -267,6 +355,7 @@ class BridgeService implements BridgeServiceBase {
   bool _appendMode = false;
   String? _currentProjectFilter;
   String? _currentProvider;
+  List<String>? _currentProviders;
   bool? _currentNamedOnly;
   String? _currentSearchQuery;
 
@@ -529,6 +618,7 @@ class BridgeService implements BridgeServiceBase {
     final isReplacingConnectedSocket = _channel != null && isConnected;
     _connectionEpoch++;
     _protocolCapabilities = const {};
+    _connectionOmpSupport = null;
     _protocolCompatibility = null;
     _legacyWorktreeRemoveFamilyQuarantined = false;
     final epoch = _connectionEpoch;
@@ -551,6 +641,7 @@ class BridgeService implements BridgeServiceBase {
       _clearBridgeScopedState(clearOfflineQueue: true);
     }
     _lastUrl = url;
+    _publishOmpSupport();
 
     _setBridgeConnectionState(BridgeConnectionState.connecting);
     try {
@@ -623,6 +714,9 @@ class BridgeService implements BridgeServiceBase {
                 :final codexAutoReviewDisabled,
                 :final bridgeVersion,
                 :final protocolCapabilities,
+                :final ompModels,
+                :final ompAvailability,
+                :final ompModelsRevision,
               ):
                 final compatibility = announcedCompatibility!;
                 _protocolCompatibility = compatibility;
@@ -639,8 +733,21 @@ class BridgeService implements BridgeServiceBase {
                 _defaultCodexProfile = defaultCodexProfile;
                 _codexAutoReviewDisabled = codexAutoReviewDisabled;
                 _codexAutoReviewPolicyController.add(codexAutoReviewDisabled);
+                // Absent omp fields keep the cache (§7.1 presence rule).
+                if (ompModels != null) _ompModels = ompModels;
+                if (ompAvailability != null) {
+                  _ompAvailability = ompAvailability;
+                }
+                if (ompModelsRevision != null) {
+                  _ompModelsRevision = ompModelsRevision;
+                }
                 _bridgeVersion = bridgeVersion;
                 _protocolCapabilities = protocolCapabilities;
+                _setConnectionOmpSupport(
+                  protocolCapabilities.contains(ompProviderCapability)
+                      ? OmpSupport.supported
+                      : OmpSupport.unsupported,
+                );
                 _flushMessageQueue();
                 _dispatchNextLegacyFileListRequest();
                 _dispatchNextLegacyWorktreeListRequest();
@@ -823,6 +930,11 @@ class BridgeService implements BridgeServiceBase {
                 _taggedMessageController.add((msg, sessionId));
                 _messageController.add(msg);
               case SystemMessage(:final permissionMode):
+                if (msg.subtype == 'session_created' &&
+                    _failsOmpStartWithOtherProvider(msg)) {
+                  _clearPendingSessionActionFor(msg);
+                  return;
+                }
                 if (msg.subtype == 'session_created') {
                   _clearPendingSessionActionFor(msg);
                 } else if (msg.subtype == 'session_resume_started') {
@@ -869,6 +981,9 @@ class BridgeService implements BridgeServiceBase {
                 _messageController.add(msg);
               case ErrorMessage(:final message):
                 _routeProjectRequestError(msg);
+                if (msg.requestId case final requestId?) {
+                  _sentOmpStartRequestIds.remove(requestId);
+                }
                 final isDownloadResponse = _isFileDownloadResponseError(msg);
                 final isUploadResponse = _isFileUploadResponseError(msg);
                 if (isDownloadResponse || isUploadResponse) {
@@ -933,6 +1048,7 @@ class BridgeService implements BridgeServiceBase {
           if (epoch != _connectionEpoch) return;
           logger.error('WS stream error', error, stackTrace);
           _protocolCapabilities = const {};
+          _setConnectionOmpSupport(null);
           _setBridgeConnectionState(BridgeConnectionState.disconnected);
           _clearTransportScopedRequestState();
           _requeueInFlightInputMessages();
@@ -943,6 +1059,7 @@ class BridgeService implements BridgeServiceBase {
           if (epoch != _connectionEpoch) return;
           _channel = null;
           _protocolCapabilities = const {};
+          _setConnectionOmpSupport(null);
           _clearTransportScopedRequestState();
           if (!_intentionalDisconnect) {
             _setBridgeConnectionState(BridgeConnectionState.disconnected);
@@ -1244,6 +1361,11 @@ class BridgeService implements BridgeServiceBase {
         DateTime.now().isBefore(deadline);
   }
 
+  String _bridgeTargetKeyForUrl(String url) {
+    final uri = Uri.tryParse(url);
+    return uri == null ? url : _bridgeTargetKey(uri);
+  }
+
   bool _sameBridgeTarget(String left, String right) {
     final leftUri = Uri.tryParse(left);
     final rightUri = Uri.tryParse(right);
@@ -1290,9 +1412,14 @@ class BridgeService implements BridgeServiceBase {
     _codexProfiles = const [];
     _defaultCodexProfile = null;
     _codexAutoReviewDisabled = false;
+    _ompModels = const [];
+    _ompAvailability = null;
+    _ompModelsRevision = null;
+    _sentOmpStartRequestIds.clear();
     _bridgeVersion = null;
     _protocolCompatibility = null;
     _protocolCapabilities = const {};
+    _connectionOmpSupport = null;
     _promptHistoryBridgeId = null;
     _lastUsageResult = null;
     _pendingHistoryDeltaSinceSeq.clear();
@@ -1307,6 +1434,7 @@ class BridgeService implements BridgeServiceBase {
     clearDiffImageCache();
 
     _publishSessionList();
+    _publishOmpSupport();
     _recentSessionsController.add(_recentSessions);
     _galleryController.add(_galleryImages);
     _projectHistoryController.add(_projectHistory);
@@ -1506,12 +1634,17 @@ class BridgeService implements BridgeServiceBase {
     if (_channel != null &&
         isConnected &&
         (canSendBeforeNegotiation || protocolReady)) {
+      if (!_connectedBridgeSupportsOmp && _requiresOmpSupport(message)) {
+        _rejectForMissingOmpSupport(message);
+        return;
+      }
       if (!_trackInFlightPendingMessage(message)) return;
       _trackInFlightInputMessage(message);
       _trackNonReplayableToolAction(message);
       try {
         _channel!.sink.add(_messageForCurrentProtocol(message).toJson());
         _markScopedRequestSent(message);
+        _rememberSentOmpStart(message);
       } catch (error, stackTrace) {
         _clearNonReplayableToolAction(message);
         logger.warning('WS send failed; queued message', error, stackTrace);
@@ -1522,6 +1655,172 @@ class BridgeService implements BridgeServiceBase {
     } else {
       _queueOfflineMessage(message);
     }
+  }
+
+  static const _bridgeUpdateRequiredText =
+      'This Bridge does not support omp. Update the Bridge to use omp.';
+
+  /// Whether [message] names omp and must not reach a Bridge without
+  /// [ompProviderCapability] (§9.5). Older Bridges ignore or misread the
+  /// provider: up to v1.72.1 `start {provider:"omp"}` ran a Claude process.
+  bool _requiresOmpSupport(ClientMessage message) {
+    switch (message.type) {
+      case 'set_omp_model':
+        return true;
+      case 'start' ||
+          'resume_session' ||
+          'resolve_session_link' ||
+          'list_recent_sessions' ||
+          'archive_session' ||
+          'rename_session':
+        final json = jsonDecode(message.toJson()) as Map<String, dynamic>;
+        if (json['provider'] == Provider.omp.value) return true;
+        final providers = json['providers'];
+        return providers is List && providers.contains(Provider.omp.value);
+      default:
+        return false;
+    }
+  }
+
+  /// Offline start/resume actions that wait for a Bridge with omp support
+  /// instead of being flushed to the connected one.
+  bool _isHeldForOmpSupport(ClientMessage message) {
+    return (message.type == 'start' || message.type == 'resume_session') &&
+        !_connectedBridgeSupportsOmp &&
+        _requiresOmpSupport(message);
+  }
+
+  void _emitLocalMessage(ServerMessage message, {String? sessionId}) {
+    if (_messageController.isClosed) return;
+    _taggedMessageController.add((message, sessionId));
+    _messageController.add(message);
+  }
+
+  /// Answers an omp message the connected Bridge cannot handle with local
+  /// messages, so the waiting UI resolves instead of hanging.
+  void _rejectForMissingOmpSupport(ClientMessage message) {
+    final json = jsonDecode(message.toJson()) as Map<String, dynamic>;
+    final requestId = json['requestId'] as String?;
+    final sessionId = json['sessionId'] as String?;
+    final error = ErrorMessage(
+      message: _bridgeUpdateRequiredText,
+      errorCode: 'bridge_update_required',
+      requestId: requestId,
+      sessionId:
+          message.type == 'set_omp_model' || message.type == 'rename_session'
+          ? sessionId
+          : null,
+    );
+    switch (message.type) {
+      case 'resume_session':
+        final resumeRequestId = json['resumeRequestId'] as String?;
+        _emitLocalMessage(
+          SystemMessage(
+            subtype: 'session_resume_failed',
+            provider: Provider.omp.value,
+            sourceSessionId: sessionId,
+            projectPath: json['projectPath'] as String?,
+            resumeRequestId: resumeRequestId,
+          ),
+        );
+        // Same shape as the Bridge's failResumeOperation error, so the
+        // screen matches it to the failed resume.
+        _emitLocalMessage(
+          ErrorMessage(
+            message: _bridgeUpdateRequiredText,
+            errorCode: 'bridge_update_required',
+            sessionId: sessionId,
+            requestId: resumeRequestId,
+          ),
+          sessionId: sessionId,
+        );
+      case 'resolve_session_link':
+        _emitLocalMessage(error);
+        final completer = _pendingSessionLinkResolutions.remove(requestId);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(const SessionLinkResolveResult.unavailable());
+        }
+      case 'list_recent_sessions':
+        _emitLocalMessage(error);
+        final failure = ErrorMessage(
+          message: _bridgeUpdateRequiredText,
+          errorCode: 'recent_sessions_failed',
+          path: json['projectPath'] as String?,
+          projectId: json['projectId'] as String?,
+          workspaceKind: json['workspaceKind'] as String?,
+          requestId: requestId,
+          requestScope: json['requestScope'] as String?,
+          offset: json['offset'] as int?,
+        );
+        if (_acceptRecentSessionsFailure(failure)) {
+          if ((failure.requestScope ?? 'list') != 'project') {
+            _appendMode = false;
+          }
+          _emitLocalMessage(failure);
+        }
+      case 'archive_session':
+        _emitLocalMessage(error);
+        if (sessionId != null) {
+          _emitLocalMessage(
+            ArchiveResultMessage(
+              sessionId: sessionId,
+              success: false,
+              error: _bridgeUpdateRequiredText,
+            ),
+          );
+        }
+      case 'rename_session':
+        _emitLocalMessage(error, sessionId: sessionId);
+        if (sessionId != null) {
+          _emitLocalMessage(
+            RenameResultMessage(
+              sessionId: sessionId,
+              name: json['name'] as String?,
+              success: false,
+              error: _bridgeUpdateRequiredText,
+            ),
+            sessionId: sessionId,
+          );
+        }
+      case 'set_omp_model':
+        _emitLocalMessage(error, sessionId: sessionId);
+      default:
+        // `start` and anything else: a pending start page matches the
+        // error by its requestId.
+        _emitLocalMessage(error);
+    }
+  }
+
+  void _rememberSentOmpStart(ClientMessage message) {
+    if (message.type != 'start') return;
+    final json = jsonDecode(message.toJson()) as Map<String, dynamic>;
+    final requestId = json['requestId'];
+    if (json['provider'] == Provider.omp.value &&
+        requestId is String &&
+        requestId.isNotEmpty) {
+      _sentOmpStartRequestIds.add(requestId);
+    }
+  }
+
+  /// A `session_created` answering an omp start with another provider means
+  /// the Bridge did not run omp. The start fails with a local error instead
+  /// of opening that session as omp (§9.5, second line behind the send gate).
+  bool _failsOmpStartWithOtherProvider(SystemMessage message) {
+    final requestId = message.requestId;
+    if (requestId == null || !_sentOmpStartRequestIds.remove(requestId)) {
+      return false;
+    }
+    if (message.provider == Provider.omp.value) return false;
+    _emitLocalMessage(
+      ErrorMessage(
+        message:
+            'The Bridge started a ${message.provider ?? Provider.claude.value} '
+            'session instead of omp. Update the Bridge to use omp.',
+        errorCode: 'bridge_update_required',
+        requestId: requestId,
+      ),
+    );
+    return true;
   }
 
   void _queueOfflineMessage(ClientMessage message) {
@@ -1796,8 +2095,15 @@ class BridgeService implements BridgeServiceBase {
     await _ensureOfflineQueueRestored();
     if (_messageQueue.isEmpty || !isConnected) return;
     final generation = _offlineQueueGeneration;
-    final queued = List<ClientMessage>.from(_messageQueue);
-    _messageQueue.clear();
+    final queued = <ClientMessage>[];
+    final held = <ClientMessage>[];
+    for (final message in _messageQueue) {
+      (_isHeldForOmpSupport(message) ? held : queued).add(message);
+    }
+    if (queued.isEmpty) return;
+    _messageQueue
+      ..clear()
+      ..addAll(held);
     _flushingMessageQueue.addAll(queued);
     try {
       await _persistOfflinePendingMessages();
@@ -1912,6 +2218,8 @@ class BridgeService implements BridgeServiceBase {
     final state = canCancel
         ? OfflinePendingActionState.queuedForReconnect
         : OfflinePendingActionState.processing;
+    final bridgeUpdateRequired =
+        provider == Provider.omp.value && ompSupport == OmpSupport.unsupported;
     return switch (message.type) {
       'start' => OfflinePendingAction(
         id: _offlinePendingActionId(message),
@@ -1923,6 +2231,7 @@ class BridgeService implements BridgeServiceBase {
         createdAt: createdAt,
         state: state,
         canCancel: canCancel,
+        bridgeUpdateRequired: bridgeUpdateRequired,
       ),
       'resume_session' => OfflinePendingAction(
         id: _offlinePendingActionId(message),
@@ -1935,6 +2244,7 @@ class BridgeService implements BridgeServiceBase {
         state: state,
         canCancel: canCancel,
         sessionId: json['sessionId'] as String?,
+        bridgeUpdateRequired: bridgeUpdateRequired,
       ),
       _ => null,
     };
@@ -2593,6 +2903,7 @@ class BridgeService implements BridgeServiceBase {
     required String? projectPath,
     required String requestScope,
     required String? provider,
+    List<String>? providers,
     required bool? namedOnly,
     required String? searchQuery,
   }) {
@@ -2607,6 +2918,7 @@ class BridgeService implements BridgeServiceBase {
       projectPath,
       requestScope,
       provider,
+      providers,
       namedOnly,
       searchQuery,
     ]);
@@ -2634,6 +2946,7 @@ class BridgeService implements BridgeServiceBase {
         requestScope: requestScope,
         requestId: requestId,
         provider: provider,
+        providers: providers,
         namedOnly: namedOnly,
         searchQuery: searchQuery,
       ),
@@ -2860,6 +3173,7 @@ class BridgeService implements BridgeServiceBase {
       projectPath: projectPath,
       requestScope: 'list',
       provider: _currentProvider,
+      providers: _currentProviders,
       namedOnly: _currentNamedOnly,
       searchQuery: _currentSearchQuery,
     );
@@ -2880,6 +3194,7 @@ class BridgeService implements BridgeServiceBase {
       projectPath: requestedProjectPath,
       requestScope: requestScope,
       provider: _currentProvider,
+      providers: _currentProviders,
       namedOnly: _currentNamedOnly,
       searchQuery: _currentSearchQuery,
     );
@@ -2896,21 +3211,29 @@ class BridgeService implements BridgeServiceBase {
       projectPath: projectPath,
       requestScope: 'list',
       provider: _currentProvider,
+      providers: _currentProviders,
       namedOnly: _currentNamedOnly,
       searchQuery: _currentSearchQuery,
     );
   }
 
   /// Switch all filters at once and re-fetch from offset 0.
+  ///
+  /// [provider] selects one provider; [providers] restricts "All" to a
+  /// subset. At most one of them may be set.
   void switchFilter({
     String? projectPath,
     String? provider,
+    List<String>? providers,
     bool? namedOnly,
     String? searchQuery,
     int pageSize = 20,
   }) {
     _currentProjectFilter = projectPath;
     _currentProvider = provider;
+    _currentProviders = providers == null || providers.isEmpty
+        ? null
+        : List.unmodifiable(providers);
     _currentNamedOnly = namedOnly;
     _currentSearchQuery = searchQuery;
     _appendMode = false;
@@ -2920,6 +3243,7 @@ class BridgeService implements BridgeServiceBase {
       projectPath: projectPath,
       requestScope: 'list',
       provider: provider,
+      providers: _currentProviders,
       namedOnly: namedOnly,
       searchQuery: searchQuery,
     );
@@ -2984,6 +3308,7 @@ class BridgeService implements BridgeServiceBase {
     String? provider,
     String? sandboxMode,
     String? model,
+    String? thinkingLevel,
     String? modelReasoningEffort,
     String? serviceTier,
     bool? networkAccessEnabled,
@@ -3014,6 +3339,7 @@ class BridgeService implements BridgeServiceBase {
         provider: provider,
         sandboxMode: sandboxMode,
         model: model,
+        thinkingLevel: thinkingLevel,
         modelReasoningEffort: modelReasoningEffort,
         serviceTier: serviceTier,
         networkAccessEnabled: networkAccessEnabled,
@@ -3945,6 +4271,16 @@ class BridgeService implements BridgeServiceBase {
         codexNetworkAccessEnabled:
             message.networkAccessEnabled ?? current.codexNetworkAccessEnabled,
         codexWebSearchMode: message.webSearchMode ?? current.codexWebSearchMode,
+        ompModel: message.provider == Provider.omp.value ? message.model : null,
+        ompThinkingLevel: message.provider == Provider.omp.value
+            ? message.thinkingLevel
+            : null,
+        // `init` and `omp_settings` are full snapshots: an absent level means
+        // omp has none for the model.
+        clearOmpThinkingLevel:
+            message.provider == Provider.omp.value &&
+            message.thinkingLevel == null &&
+            (message.subtype == 'init' || message.subtype == 'omp_settings'),
       );
     _publishSessionList();
   }
@@ -4015,6 +4351,38 @@ class BridgeService implements BridgeServiceBase {
         codexModel: model,
         codexModelReasoningEffort:
             modelReasoningEffort ?? current.codexModelReasoningEffort,
+      );
+    _publishSessionList();
+  }
+
+  /// Optimistically record an omp model / thinking level change on the cached
+  /// session, as [patchSessionCodexModel] does for Codex.
+  ///
+  /// [clearModel] and [clearThinkingLevel] record "not known" / "no level"
+  /// (used when a change is rolled back to settings without them).
+  void patchSessionOmpModel(
+    String sessionId, {
+    String? model,
+    String? thinkingLevel,
+    bool clearModel = false,
+    bool clearThinkingLevel = false,
+  }) {
+    final idx = _sessions.indexWhere((s) => s.id == sessionId);
+    if (idx < 0) return;
+    final current = _sessions[idx];
+    final modelUnchanged = clearModel
+        ? current.ompModel == null
+        : model == null || current.ompModel == model;
+    final levelUnchanged = clearThinkingLevel
+        ? current.ompThinkingLevel == null
+        : thinkingLevel == null || current.ompThinkingLevel == thinkingLevel;
+    if (modelUnchanged && levelUnchanged) return;
+    _sessions = List.of(_sessions)
+      ..[idx] = current.copyWith(
+        ompModel: model,
+        clearOmpModel: clearModel,
+        ompThinkingLevel: thinkingLevel,
+        clearOmpThinkingLevel: clearThinkingLevel,
       );
     _publishSessionList();
   }
@@ -4317,6 +4685,8 @@ class BridgeService implements BridgeServiceBase {
     _channel = null;
     _messageController.close();
     _taggedMessageController.close();
+    _ompSupportController.close();
+    _connectionOmpSupportController.close();
     _connectionController.close();
     _sessionListController.close();
     _sessionStoppedController.close();

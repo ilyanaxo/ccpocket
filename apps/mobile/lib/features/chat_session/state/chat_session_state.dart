@@ -47,6 +47,12 @@ abstract class ChatSessionState with _$ChatSessionState {
     String? codexModel,
     ReasoningEffort? codexModelReasoningEffort,
     @Default(CodexSpeed.standard) CodexSpeed codexSpeed,
+
+    // omp model selector and thinking level (Bridge is the source of truth).
+    String? ompModel,
+    String? ompThinkingLevel,
+    // Thinking levels the current omp model offers.
+    @Default([]) List<String> ompThinkingLevels,
     @Default(false) bool planMode,
 
     // Sandbox mode - Freezed default is .on but Cubit constructor overrides
@@ -66,7 +72,7 @@ abstract class ChatSessionState with _$ChatSessionState {
     // Slash commands available in this session
     @Default([]) List<SlashCommand> slashCommands,
 
-    // Codex conversation queue (Bridge is the source of truth).
+    // Codex / omp conversation queue (Bridge is the source of truth).
     QueuedInputItem? queuedInput,
 
     // Persisted Codex thread goal (Bridge/app-server is the source of truth).

@@ -149,6 +149,11 @@ class SessionStackNavigation {
         arguments is CodexSessionRouteArgs) {
       return arguments.sessionId == sessionId;
     }
+    if (routeName == OmpSessionRoute.name &&
+        provider == 'omp' &&
+        arguments is OmpSessionRouteArgs) {
+      return arguments.sessionId == sessionId;
+    }
     return false;
   }
 }

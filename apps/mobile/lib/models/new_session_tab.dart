@@ -41,7 +41,65 @@ extension NewSessionTabL10n on NewSessionTab {
 }
 
 /// Default tab order when no user preference is saved.
-const defaultNewSessionTabs = [NewSessionTab.codex, NewSessionTab.claude];
+const defaultNewSessionTabs = [
+  NewSessionTab.codex,
+  NewSessionTab.claude,
+  NewSessionTab.omp,
+];
+
+/// Providers of the enabled [tabs], in tab order.
+Set<Provider> enabledProvidersFromTabs(List<NewSessionTab> tabs) {
+  return {for (final tab in tabs) tab.toProvider()};
+}
+
+NewSessionTab _tabForProvider(Provider provider) => switch (provider) {
+  Provider.claude => NewSessionTab.claude,
+  Provider.codex => NewSessionTab.codex,
+  Provider.omp => NewSessionTab.omp,
+};
+
+/// Enables or disables [provider] in [tabs]. An enabled provider is appended
+/// at the end when missing; a disabled one is removed. The last enabled
+/// provider cannot be disabled: [tabs] is then returned unchanged.
+List<NewSessionTab> tabsWithProvider(
+  List<NewSessionTab> tabs,
+  Provider provider,
+  bool enabled,
+) {
+  final tab = _tabForProvider(provider);
+  final ordered = <NewSessionTab>[];
+  for (final current in tabs) {
+    if (!ordered.contains(current)) ordered.add(current);
+  }
+  if (enabled) {
+    if (!ordered.contains(tab)) ordered.add(tab);
+    return ordered;
+  }
+  if (!ordered.contains(tab)) return ordered;
+  if (ordered.length == 1) return tabs;
+  return ordered..remove(tab);
+}
+
+/// Providers the app offers: the enabled ones, with omp only while the
+/// Bridge supports it. Iteration follows the tab order. Falls back to
+/// Claude and Codex when nothing else remains (only omp enabled on a Bridge
+/// without omp). `unknown` hides omp; callers must not persist anything
+/// derived from that coercion.
+Set<Provider> effectiveProviders(
+  List<NewSessionTab> enabledTabs,
+  OmpSupport ompSupport,
+) {
+  final allowed = <Provider>{
+    Provider.claude,
+    Provider.codex,
+    if (ompSupport == OmpSupport.supported) Provider.omp,
+  };
+  final effective = enabledProvidersFromTabs(enabledTabs)
+      .where(allowed.contains)
+      .toSet();
+  if (effective.isNotEmpty) return effective;
+  return {Provider.claude, Provider.codex};
+}
 
 EnabledAgentsMode enabledAgentsModeFromTabs(List<NewSessionTab> tabs) {
   final set = tabs.toSet();

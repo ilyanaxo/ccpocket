@@ -51,6 +51,19 @@ class ChatStateUpdate {
   final String? codexModel;
   final ReasoningEffort? codexModelReasoningEffort;
   final CodexSpeed? codexSpeed;
+
+  /// omp model selector from an omp `system` message.
+  final String? ompModel;
+
+  /// omp thinking level from an omp `system` message.
+  final String? ompThinkingLevel;
+
+  /// omp thinking levels the model offers, when the message lists them.
+  final List<String>? ompThinkingLevels;
+
+  /// The omp message is a settings snapshot without a thinking level: omp
+  /// has none set for the model.
+  final bool clearOmpThinkingLevel;
   final bool? planMode;
   final List<ChatEntry> entriesToAdd;
   final List<ChatEntry> entriesToPrepend;
@@ -110,6 +123,10 @@ class ChatStateUpdate {
     this.codexModel,
     this.codexModelReasoningEffort,
     this.codexSpeed,
+    this.ompModel,
+    this.ompThinkingLevel,
+    this.ompThinkingLevels,
+    this.clearOmpThinkingLevel = false,
     this.planMode,
     this.entriesToAdd = const [],
     this.entriesToPrepend = const [],
@@ -161,6 +178,7 @@ const _unsupportedActions = <String, UnsupportedAction>{
   'steer_queued_input': UnsupportedAction.showUpdateHint,
   'set_codex_model': UnsupportedAction.showUpdateHint,
   'set_codex_speed': UnsupportedAction.showUpdateHint,
+  'set_omp_model': UnsupportedAction.showUpdateHint,
   'set_goal': UnsupportedAction.showUpdateHint,
   'clear_goal': UnsupportedAction.showUpdateHint,
   'mutate_prompt_history': UnsupportedAction.showUpdateHint,
@@ -194,6 +212,7 @@ class ChatMessageHandler {
     ServerMessage msg, {
     required bool isBackground,
     bool isCodex = false,
+    bool isOmp = false,
     Set<String> ignoredToolUseIds = const {},
   }) {
     switch (msg) {
@@ -214,7 +233,11 @@ class ChatMessageHandler {
       case PastHistoryMessage(:final claudeSessionId, :final messages):
         return _handlePastHistory(messages, claudeSessionId: claudeSessionId);
       case HistoryMessage(:final messages):
-        return _handleHistory(messages, ignoredToolUseIds: ignoredToolUseIds);
+        return _handleHistory(
+          messages,
+          ignoredToolUseIds: ignoredToolUseIds,
+          isOmp: isOmp,
+        );
       case ConversationQueueMessage(:final items):
         return ChatStateUpdate(
           queuedInput: items.isNotEmpty ? items.first : null,
@@ -241,6 +264,7 @@ class ChatMessageHandler {
           plugins: plugins,
           pluginMetadata: pluginMetadata,
           isCodex: isCodex,
+          isOmp: isOmp,
         );
       case PermissionRequestMessage(
         :final toolUseId,
@@ -329,11 +353,24 @@ class ChatMessageHandler {
           markUserMessagesFailed: true,
           userStatusClientMessageId: clientMessageId,
         );
-      case RenameResultMessage(:final success, :final error):
+      case RenameResultMessage(:final success, :final error, :final name):
         if (!success) {
           logger.warning(
             '[handler] rename failed: ${error ?? "unknown reason"}',
           );
+          // omp rejects empty names, so clearing an omp name always fails.
+          if (isOmp && (name == null || name.trim().isEmpty)) {
+            return ChatStateUpdate(
+              entriesToAdd: [
+                ServerChatEntry(
+                  ErrorMessage(
+                    message: error ?? 'omp session names cannot be cleared',
+                    errorCode: 'omp_name_cannot_be_cleared',
+                  ),
+                ),
+              ],
+            );
+          }
         }
         return const ChatStateUpdate();
       case PushRegistrationResultMessage():
@@ -609,6 +646,7 @@ class ChatMessageHandler {
   ChatStateUpdate _handleHistory(
     List<ServerMessage> messages, {
     Set<String> ignoredToolUseIds = const {},
+    bool isOmp = false,
   }) {
     final entries = <ChatEntry>[];
     ProcessStatus? lastStatus;
@@ -625,6 +663,10 @@ class ChatMessageHandler {
     String? codexModel;
     ReasoningEffort? codexModelReasoningEffort;
     CodexSpeed? codexSpeed;
+    String? ompModel;
+    String? ompThinkingLevel;
+    List<String>? ompThinkingLevels;
+    var clearOmpThinkingLevel = false;
     QueuedInputItem? queuedInput;
     var clearQueuedInput = false;
 
@@ -666,13 +708,15 @@ class ChatMessageHandler {
         );
       } else {
         // Don't add internal metadata messages as visible entries.
-        // codex_settings is re-sent after every history sync.
+        // codex_settings and omp_settings are re-sent after every history
+        // sync.
         if (m is! SystemMessage ||
             (m.subtype == 'init' && m.provider == Provider.codex.value) ||
             (m.subtype != 'init' &&
                 m.subtype != 'supported_commands' &&
                 m.subtype != 'session_created' &&
-                m.subtype != 'codex_settings')) {
+                m.subtype != 'codex_settings' &&
+                m.subtype != 'omp_settings')) {
           entries.add(ServerChatEntry(m, timestamp: lastKnownTs));
         }
         // Restore slash commands from history (init, supported_commands, or
@@ -703,17 +747,32 @@ class ChatMessageHandler {
             );
           }
           // Extract claudeSessionId for image loading etc.
-          // Prefer full Claude CLI UUID over Bridge's 8-char ID.
+          // Prefer full Claude CLI UUID over Bridge's 8-char ID. omp keys its
+          // per-session settings by the omp id, so the Bridge id is never a
+          // fallback for it.
           if (m.claudeSessionId != null) {
             claudeSessionId = m.claudeSessionId;
-          } else if (m.sessionId != null) {
+          } else if (m.sessionId != null && !isOmp) {
             claudeSessionId = m.sessionId;
           }
         }
         if (m is SystemMessage && m.projectPath?.trim().isNotEmpty == true) {
           projectPath = m.projectPath;
         }
-        if (m is SystemMessage) {
+        if (m is SystemMessage && m.provider == Provider.omp.value) {
+          final settings = _ompSettingsFrom(m);
+          if (settings.model != null) ompModel = settings.model;
+          if (settings.thinkingLevel != null) {
+            ompThinkingLevel = settings.thinkingLevel;
+            clearOmpThinkingLevel = false;
+          } else if (settings.clearsThinkingLevel) {
+            ompThinkingLevel = null;
+            clearOmpThinkingLevel = true;
+          }
+          if (settings.thinkingLevels != null) {
+            ompThinkingLevels = settings.thinkingLevels;
+          }
+        } else if (m is SystemMessage) {
           if (m.model?.trim().isNotEmpty == true) {
             codexModel = m.model;
           }
@@ -802,8 +861,36 @@ class ChatMessageHandler {
       codexModel: codexModel,
       codexModelReasoningEffort: codexModelReasoningEffort,
       codexSpeed: codexSpeed,
+      ompModel: ompModel,
+      ompThinkingLevel: ompThinkingLevel,
+      ompThinkingLevels: ompThinkingLevels,
+      clearOmpThinkingLevel: clearOmpThinkingLevel,
       queuedInput: queuedInput,
       clearQueuedInput: clearQueuedInput,
+    );
+  }
+
+  /// omp settings carried by an omp `system` message: `init` and
+  /// `omp_settings` are full snapshots (an absent level means none is set),
+  /// `session_created` and others only report what they contain.
+  ({
+    String? model,
+    String? thinkingLevel,
+    List<String>? thinkingLevels,
+    bool clearsThinkingLevel,
+  })
+  _ompSettingsFrom(SystemMessage message) {
+    final isSnapshot =
+        message.subtype == 'init' || message.subtype == 'omp_settings';
+    final model = message.model?.trim();
+    final level = ompThinkingLevelFromValue(message.thinkingLevel)?.value;
+    return (
+      model: model == null || model.isEmpty ? null : model,
+      thinkingLevel: level,
+      thinkingLevels: isSnapshot || message.thinkingLevels.isNotEmpty
+          ? message.thinkingLevels
+          : null,
+      clearsThinkingLevel: isSnapshot && level == null,
     );
   }
 
@@ -818,6 +905,7 @@ class ChatMessageHandler {
     List<String> plugins = const [],
     List<CodexPluginMetadata> pluginMetadata = const [],
     required bool isCodex,
+    bool isOmp = false,
   }) {
     List<SlashCommand>? commands;
     PermissionMode? permissionMode;
@@ -932,11 +1020,16 @@ class ChatMessageHandler {
         codexSpeed = codexSpeedFromRaw(msg.serviceTier);
       }
     }
+    final ompSettings =
+        msg is SystemMessage && msg.provider == Provider.omp.value
+        ? _ompSettingsFrom(msg)
+        : null;
     // Extract claudeSessionId from session_created or init messages.
     // Prefer the full Claude CLI UUID (claudeSessionId) over the Bridge's
-    // internal 8-char ID (sessionId) for JSONL file lookups.
+    // internal 8-char ID (sessionId) for JSONL file lookups. For omp only the
+    // omp session id counts: the Bridge id would re-key its settings store.
     final sessionId = msg is SystemMessage
-        ? (msg.claudeSessionId ?? msg.sessionId)
+        ? (msg.claudeSessionId ?? (isOmp ? null : msg.sessionId))
         : null;
     // Track git tip to suppress duplicate git errors later
     if (subtype == 'tip' &&
@@ -960,6 +1053,10 @@ class ChatMessageHandler {
       codexModel: codexModel,
       codexModelReasoningEffort: codexModelReasoningEffort,
       codexSpeed: codexSpeed,
+      ompModel: ompSettings?.model,
+      ompThinkingLevel: ompSettings?.thinkingLevel,
+      ompThinkingLevels: ompSettings?.thinkingLevels,
+      clearOmpThinkingLevel: ompSettings?.clearsThinkingLevel ?? false,
       planMode: planMode,
       inPlanMode: inPlanMode,
       slashCommands: commands,

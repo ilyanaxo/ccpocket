@@ -64,6 +64,22 @@ void main() {
       expect(store.messages('s1'), isEmpty);
     });
 
+    test('keeps omp settings out of the chat timeline cache', () {
+      final store = SessionRuntimeStore();
+      const settings = SystemMessage(
+        subtype: 'omp_settings',
+        provider: 'omp',
+        model: 'baseten/MiniMaxAI/MiniMax-M3',
+        thinkingLevel: 'off',
+        thinkingLevels: ['off'],
+      );
+
+      store.applyServerMessage('s1', settings);
+      store.applyServerMessage('s1', settings);
+
+      expect(store.messages('s1'), isEmpty);
+    });
+
     test('keeps timeline and explorer history separated by session', () {
       final store = SessionRuntimeStore();
 

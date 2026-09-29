@@ -1,3 +1,5 @@
+import '../models/messages.dart';
+
 sealed class DeepLinkParams {}
 
 class ConnectionParams extends DeepLinkParams {
@@ -19,7 +21,7 @@ class ConnectionUrlParser {
   ///
   /// Supported formats:
   /// - `ccpocket://connect?url=ws://IP:PORT&token=...` → [ConnectionParams]
-  /// - `ccpocket://session/<sessionId>?provider=codex` →
+  /// - `ccpocket://session/<sessionId>?provider=codex|omp` →
   ///   [SessionLinkParams]
   /// - `ws://IP:PORT` or `wss://IP:PORT` → [ConnectionParams]
   /// - `IP:PORT` (treated as ws://) → [ConnectionParams]
@@ -38,9 +40,11 @@ class ConnectionUrlParser {
         if (segments.isEmpty) return null;
         final sessionId = segments.first;
         if (sessionId.isEmpty) return null;
-        final provider = uri.queryParameters['provider'] == 'codex'
-            ? 'codex'
-            : 'claude';
+        // Unknown providers keep the historical Claude fallback.
+        final provider =
+            (providerFromValue(uri.queryParameters['provider']) ??
+                    Provider.claude)
+                .value;
         return SessionLinkParams(sessionId: sessionId, provider: provider);
       }
 

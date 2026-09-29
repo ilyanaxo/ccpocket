@@ -63,12 +63,18 @@ class SettingsCubit extends Cubit<SettingsState> {
   static const _keySelectedAppIcon = 'settings_selected_app_icon';
   static const _keyTerminalApp = 'settings_terminal_app';
   static const _keyNewSessionTabs = 'settings_new_session_tabs';
+
+  /// Set once omp was added to a stored tab list (omp is enabled by default;
+  /// afterwards the user's choice is kept).
+  static const _keyNewSessionTabsOmpMigrated =
+      'settings_new_session_tabs_omp_migrated_v1';
   static const _keyShowHiddenDirectories = 'settings_show_hidden_directories';
   static const _keyUsageDisplayMode = 'settings_usage_display_mode';
   static const _keyAutoRenameCodexSessions = 'autoRenameCodexSessions';
   static const _keyShowExtendedCodexEfforts =
       'settings_show_extended_codex_efforts';
   static const _keyAutoRenameClaudeSessions = 'autoRenameClaudeSessions';
+  static const _keyAutoRenameOmpSessions = 'autoRenameOmpSessions';
   static const _keyTextScale = 'settings_text_scale';
   static const _keyCodeFontSize = 'settings_code_font_size';
   static const _keyCodeFontFamily = 'settings_code_font_family';
@@ -233,6 +239,8 @@ class SettingsCubit extends Cubit<SettingsState> {
         prefs.getBool(_keyShowExtendedCodexEfforts) ?? false;
     final autoRenameClaudeSessions =
         prefs.getBool(_keyAutoRenameClaudeSessions) ?? false;
+    final autoRenameOmpSessions =
+        prefs.getBool(_keyAutoRenameOmpSessions) ?? true;
     final showHiddenDirectories =
         prefs.getBool(_keyShowHiddenDirectories) ?? false;
 
@@ -253,6 +261,19 @@ class SettingsCubit extends Cubit<SettingsState> {
     final tabsJson = prefs.getString(_keyNewSessionTabs);
     if (tabsJson != null) {
       newSessionTabs = tabsFromJson(tabsJson) ?? defaultNewSessionTabs;
+    }
+    // One-time: enable omp in a tab list stored before omp existed. Fresh
+    // installs already get it from [defaultNewSessionTabs]. The flag keeps a
+    // later "omp disabled" choice. SharedPreferences updates its cache
+    // synchronously, so the writes need not be awaited here.
+    if (prefs.getBool(_keyNewSessionTabsOmpMigrated) != true) {
+      if (tabsJson != null && !newSessionTabs.contains(NewSessionTab.omp)) {
+        newSessionTabs = [...newSessionTabs, NewSessionTab.omp];
+        unawaited(
+          prefs.setString(_keyNewSessionTabs, tabsToJson(newSessionTabs)),
+        );
+      }
+      unawaited(prefs.setBool(_keyNewSessionTabsOmpMigrated, true));
     }
 
     return SettingsState(
@@ -292,6 +313,7 @@ class SettingsCubit extends Cubit<SettingsState> {
       autoRenameCodexSessions: autoRenameCodexSessions,
       showExtendedCodexEfforts: showExtendedCodexEfforts,
       autoRenameClaudeSessions: autoRenameClaudeSessions,
+      autoRenameOmpSessions: autoRenameOmpSessions,
     );
   }
 
@@ -490,6 +512,22 @@ class SettingsCubit extends Cubit<SettingsState> {
     setNewSessionTabs(tabsForEnabledAgentsMode(mode, state.newSessionTabs));
   }
 
+  /// Enables or disables one agent. The last enabled agent cannot be
+  /// disabled (the call is then ignored).
+  void setAgentEnabled(Provider provider, bool enabled) {
+    final next = tabsWithProvider(state.newSessionTabs, provider, enabled);
+    if (_sameTabs(next, state.newSessionTabs)) return;
+    setNewSessionTabs(next);
+  }
+
+  static bool _sameTabs(List<NewSessionTab> a, List<NewSessionTab> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   void setUsageDisplayMode(UsageDisplayMode mode) {
     _prefs.setString(_keyUsageDisplayMode, mode.name);
     emit(state.copyWith(usageDisplayMode: mode));
@@ -508,6 +546,11 @@ class SettingsCubit extends Cubit<SettingsState> {
   void setAutoRenameClaudeSessions(bool enabled) {
     _prefs.setBool(_keyAutoRenameClaudeSessions, enabled);
     emit(state.copyWith(autoRenameClaudeSessions: enabled));
+  }
+
+  void setAutoRenameOmpSessions(bool enabled) {
+    _prefs.setBool(_keyAutoRenameOmpSessions, enabled);
+    emit(state.copyWith(autoRenameOmpSessions: enabled));
   }
 
   void toggleUsageDisplayMode() {

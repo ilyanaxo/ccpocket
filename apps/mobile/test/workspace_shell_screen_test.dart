@@ -155,6 +155,7 @@ class _MockBridgeService extends BridgeService {
   void switchFilter({
     String? projectPath,
     String? provider,
+    List<String>? providers,
     bool? namedOnly,
     String? searchQuery,
     int pageSize = 20,

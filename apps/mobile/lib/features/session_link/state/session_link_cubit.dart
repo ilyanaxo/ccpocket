@@ -14,6 +14,7 @@ class SessionLinkCubit extends Cubit<SessionLinkState> {
     required String provider,
     SessionResumeCoordinator? resumeCoordinator,
     String? resumeRequestId,
+    this.ompSupportTimeout = const Duration(seconds: 10),
   }) : _bridge = bridge,
        _sourceSessionId = sourceSessionId,
        _provider = provider,
@@ -25,6 +26,9 @@ class SessionLinkCubit extends Cubit<SessionLinkState> {
        super(const SessionLinkState.resolving());
 
   final BridgeService _bridge;
+
+  /// How long an omp link waits for the Bridge's capabilities.
+  final Duration ompSupportTimeout;
   final String _sourceSessionId;
   final String _provider;
   final String _resumeRequestId;
@@ -36,6 +40,25 @@ class SessionLinkCubit extends Cubit<SessionLinkState> {
   Future<void> resolve() async {
     if (_started) return;
     _started = true;
+    if (_provider == Provider.omp.value) {
+      // Decide only once this connection has announced its capabilities, so
+      // a cold-start tap right after connect does not show a false "update
+      // required".
+      final support = await _bridge.waitForConnectionOmpSupport(
+        timeout: ompSupportTimeout,
+      );
+      if (isClosed) return;
+      switch (support) {
+        case OmpSupport.supported:
+          break;
+        case OmpSupport.unsupported:
+          emit(const SessionLinkState.bridgeUpdateRequired());
+          return;
+        case OmpSupport.unknown:
+          emit(const SessionLinkState.unavailable());
+          return;
+      }
+    }
     final result = await _bridge.resolveSessionLink(
       _sourceSessionId,
       provider: _provider,

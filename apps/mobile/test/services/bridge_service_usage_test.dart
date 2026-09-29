@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io' hide WebSocketTransformer;
 import 'dart:io' as io show WebSocketTransformer;
 
+import 'package:ccpocket/features/chat_session/state/streaming_state_cubit.dart';
+import 'package:ccpocket/features/omp_session/state/omp_session_cubit.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/models/offline_pending_action.dart';
 import 'package:ccpocket/models/protocol_version.dart';
@@ -4627,4 +4629,618 @@ void main() {
       },
     );
   });
+
+  group('BridgeService omp support', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      _automaticallyAnnounceLegacyProtocol = false;
+    });
+
+    tearDown(() {
+      _automaticallyAnnounceLegacyProtocol = true;
+    });
+
+    test(
+      'ompSupport is unknown, then per connection, then last known',
+      () async {
+        final ompServer = await _OmpTestServer.start(supportsOmp: true);
+        final legacyServer = await _OmpTestServer.start(supportsOmp: false);
+        final bridge = BridgeService();
+        final published = <OmpSupport>[];
+        final sub = bridge.ompSupportStream.listen(published.add);
+
+        expect(bridge.ompSupport, OmpSupport.unknown);
+
+        bridge.connect(ompServer.url);
+        await ompServer.nextSocket();
+        await _settle();
+        expect(bridge.ompSupport, OmpSupport.supported);
+
+        // Losing the connection keeps the last value for the same target.
+        await ompServer.closeSockets();
+        await _settle();
+        expect(bridge.isConnected, isFalse);
+        expect(bridge.ompSupport, OmpSupport.supported);
+
+        // Another Bridge target starts unknown until its session_list.
+        legacyServer.announce = false;
+        bridge.connect(legacyServer.url);
+        final legacySocket = await legacyServer.nextSocket();
+        await _settle();
+        expect(bridge.ompSupport, OmpSupport.unknown);
+        legacyServer.sendSessionList(legacySocket);
+        await _settle();
+        expect(bridge.ompSupport, OmpSupport.unsupported);
+        expect(published, [
+          OmpSupport.supported,
+          OmpSupport.unknown,
+          OmpSupport.unsupported,
+        ]);
+
+        await sub.cancel();
+        bridge.dispose();
+        await ompServer.stop();
+        await legacyServer.stop();
+      },
+    );
+
+    test(
+      'waitForConnectionOmpSupport resolves with the session_list',
+      () async {
+        final server = await _OmpTestServer.start(supportsOmp: true)
+          ..announce = false;
+        final bridge = BridgeService();
+        bridge.connect(server.url);
+        final socket = await server.nextSocket();
+
+        final waiting = bridge.waitForConnectionOmpSupport(
+          timeout: const Duration(seconds: 2),
+        );
+        await _settle();
+        server.sendSessionList(socket);
+
+        expect(await waiting, OmpSupport.supported);
+        expect(
+          await bridge.waitForConnectionOmpSupport(
+            timeout: const Duration(milliseconds: 1),
+          ),
+          OmpSupport.supported,
+        );
+
+        bridge.dispose();
+        await server.stop();
+      },
+    );
+
+    test('keeps the omp catalogue when a session_list omits it', () async {
+      final server = await _OmpTestServer.start(supportsOmp: true)
+        ..announce = false;
+      final other = await _OmpTestServer.start(supportsOmp: true);
+      final bridge = BridgeService();
+      bridge.connect(server.url);
+      final socket = await server.nextSocket();
+
+      server.sendSessionList(
+        socket,
+        extra: {
+          'ompModels': [
+            {
+              'selector': 'a/b',
+              'provider': 'a',
+              'name': 'B',
+              'thinkingLevels': ['off', 'high'],
+              'input': ['text'],
+            },
+          ],
+          'ompAvailability': 'available',
+          'ompModelsRevision': 1,
+        },
+      );
+      await _settle();
+      expect(bridge.ompModels.single.selector, 'a/b');
+      expect(bridge.ompAvailability, OmpAvailability.available);
+      expect(bridge.ompModelsRevision, 1);
+
+      server.sendSessionList(socket);
+      await _settle();
+      expect(bridge.ompModels.single.selector, 'a/b');
+      expect(bridge.ompAvailability, OmpAvailability.available);
+      expect(bridge.ompModelsRevision, 1);
+
+      server.sendSessionList(
+        socket,
+        extra: {
+          'ompModels': <Object>[],
+          'ompAvailability': 'no_models',
+          'ompModelsRevision': 2,
+        },
+      );
+      await _settle();
+      expect(bridge.ompModels, isEmpty);
+      expect(bridge.ompAvailability, OmpAvailability.noModels);
+      expect(bridge.ompModelsRevision, 2);
+
+      // A Bridge switch drops the cache.
+      server.sendSessionList(
+        socket,
+        extra: {
+          'ompModels': [
+            {'selector': 'a/b', 'provider': 'a', 'name': 'B'},
+          ],
+        },
+      );
+      await _settle();
+      bridge.connect(other.url);
+      await other.nextSocket();
+      await _settle();
+      expect(bridge.ompModels, isEmpty);
+      expect(bridge.ompAvailability, isNull);
+      expect(bridge.ompModelsRevision, isNull);
+
+      bridge.dispose();
+      await server.stop();
+      await other.stop();
+    });
+
+    test('omp messages never reach a Bridge without provider_omp_v1', () async {
+      final server = await _OmpTestServer.start(supportsOmp: false);
+      final bridge = BridgeService();
+      final messages = <ServerMessage>[];
+      final sessionMessages = <ServerMessage>[];
+      final sub = bridge.messages.listen(messages.add);
+      final sessionSub = bridge
+          .messagesForSession('3f9c2a1b')
+          .listen(sessionMessages.add);
+      bridge.connect(server.url);
+      await server.nextSocket();
+      await _settle();
+      expect(bridge.ompSupport, OmpSupport.unsupported);
+
+      bridge.send(
+        ClientMessage.start('/p', provider: 'omp', requestId: 'pending_1'),
+      );
+      bridge.resumeSession(
+        'omp-id',
+        '/p',
+        provider: 'omp',
+        executionMode: 'default',
+        resumeRequestId: 'resume-1',
+      );
+      bridge.send(
+        ClientMessage.archiveSession(
+          sessionId: 'omp-id',
+          provider: 'omp',
+          projectPath: '/p',
+        ),
+      );
+      bridge.send(
+        ClientMessage.renameSession(
+          sessionId: '3f9c2a1b',
+          name: 'x',
+          provider: 'omp',
+        ),
+      );
+      bridge.send(ClientMessage.setOmpModel('3f9c2a1b', thinkingLevel: 'off'));
+      bridge.switchFilter(providers: const ['claude', 'omp']);
+      final link = await bridge.resolveSessionLink(
+        'omp-id',
+        provider: 'omp',
+        timeout: const Duration(seconds: 2),
+      );
+      // A Claude start still goes through.
+      bridge.send(ClientMessage.start('/p', provider: 'claude'));
+      await _settle();
+
+      expect(link.support, SessionLinkResolveSupport.unavailable);
+      final sentTypes = server.received.map((message) => message['type']);
+      expect(sentTypes, isNot(contains('resume_session')));
+      expect(sentTypes, isNot(contains('archive_session')));
+      expect(sentTypes, isNot(contains('rename_session')));
+      expect(sentTypes, isNot(contains('set_omp_model')));
+      expect(sentTypes, isNot(contains('list_recent_sessions')));
+      expect(sentTypes, isNot(contains('resolve_session_link')));
+      expect(server.received.where((message) => message['type'] == 'start'), [
+        containsPair('provider', 'claude'),
+      ]);
+
+      final errors = messages.whereType<ErrorMessage>().toList();
+      expect(
+        errors.where((error) => error.errorCode == 'bridge_update_required'),
+        hasLength(7),
+      );
+      expect(
+        errors
+            .where((error) => error.requestId == 'pending_1')
+            .single
+            .errorCode,
+        'bridge_update_required',
+      );
+      expect(
+        errors.where((error) => error.errorCode == 'recent_sessions_failed'),
+        hasLength(1),
+      );
+      final resumeFailed = messages.whereType<SystemMessage>().singleWhere(
+        (message) => message.subtype == 'session_resume_failed',
+      );
+      expect(resumeFailed.provider, 'omp');
+      expect(resumeFailed.sourceSessionId, 'omp-id');
+      expect(resumeFailed.resumeRequestId, 'resume-1');
+      final resumeIndex = messages.indexOf(resumeFailed);
+      // The shape of the Bridge's own resume failure: the session list
+      // matches it by source session id and resume request id.
+      expect(
+        messages[resumeIndex + 1],
+        isA<ErrorMessage>()
+            .having(
+              (error) => error.errorCode,
+              'errorCode',
+              'bridge_update_required',
+            )
+            .having((error) => error.sessionId, 'sessionId', 'omp-id')
+            .having((error) => error.requestId, 'requestId', 'resume-1'),
+      );
+      expect(
+        messages.whereType<ArchiveResultMessage>().single.success,
+        isFalse,
+      );
+      expect(messages.whereType<RenameResultMessage>().single.success, isFalse);
+      expect(
+        sessionMessages.whereType<ErrorMessage>().map(
+          (error) => error.errorCode,
+        ),
+        ['bridge_update_required', 'bridge_update_required'],
+      );
+      expect(bridge.offlinePendingActions, isEmpty);
+
+      await sub.cancel();
+      await sessionSub.cancel();
+      bridge.dispose();
+      await server.stop();
+    });
+
+    test('omp messages pass on a Bridge with provider_omp_v1', () async {
+      final server = await _OmpTestServer.start(supportsOmp: true);
+      final bridge = BridgeService();
+      bridge.connect(server.url);
+      await server.nextSocket();
+      await _settle();
+
+      bridge.send(ClientMessage.setOmpModel('3f9c2a1b', model: 'a/b'));
+      bridge.switchFilter(providers: const ['claude', 'omp']);
+      await _settle();
+
+      expect(
+        server.received.map((message) => message['type']),
+        containsAll(['set_omp_model', 'list_recent_sessions']),
+      );
+      final list = server.received.lastWhere(
+        (message) => message['type'] == 'list_recent_sessions',
+      );
+      expect(list['providers'], ['claude', 'omp']);
+
+      bridge.dispose();
+      await server.stop();
+    });
+
+    test('an offline omp start waits for a Bridge with omp support', () async {
+      final legacy = await _OmpTestServer.start(supportsOmp: false);
+      final bridge = BridgeService();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      bridge.send(
+        ClientMessage.start('/p', provider: 'omp', requestId: 'pending_7'),
+      );
+      await _settle();
+      expect(bridge.offlinePendingActions.single.bridgeUpdateRequired, isFalse);
+
+      bridge.connect(legacy.url);
+      await legacy.nextSocket();
+      await _settle();
+
+      final action = bridge.offlinePendingActions.single;
+      expect(action.provider, 'omp');
+      expect(action.kind, OfflinePendingActionKind.start);
+      expect(action.bridgeUpdateRequired, isTrue);
+      expect(action.canCancel, isTrue);
+      expect(
+        legacy.received.where((message) => message['type'] == 'start'),
+        isEmpty,
+      );
+
+      await bridge.cancelOfflinePendingAction(action.id);
+      expect(bridge.offlinePendingActions, isEmpty);
+
+      bridge.dispose();
+      await legacy.stop();
+    });
+
+    test('the held omp start is sent once the Bridge supports omp', () async {
+      final server = await _OmpTestServer.start(supportsOmp: false);
+      final bridge = BridgeService();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      bridge.send(
+        ClientMessage.start('/p', provider: 'omp', requestId: 'pending_8'),
+      );
+      bridge.connect(server.url);
+      await server.nextSocket();
+      await _settle();
+      expect(bridge.offlinePendingActions.single.bridgeUpdateRequired, isTrue);
+
+      // The same Bridge target is updated and reconnects with omp support.
+      server.supportsOmp = true;
+      await server.closeSockets();
+      await _settle();
+      bridge.connect(server.url);
+      await server.nextSocket();
+      await _settle();
+
+      expect(
+        server.received.where((message) => message['type'] == 'start').single,
+        containsPair('requestId', 'pending_8'),
+      );
+
+      bridge.dispose();
+      await server.stop();
+    });
+
+    test(
+      'a session_created for another provider fails the omp start',
+      () async {
+        final server = await _OmpTestServer.start(supportsOmp: true);
+        final bridge = BridgeService();
+        final messages = <ServerMessage>[];
+        final sub = bridge.messages.listen(messages.add);
+        bridge.connect(server.url);
+        final socket = await server.nextSocket();
+        await _settle();
+
+        bridge.send(
+          ClientMessage.start('/p', provider: 'omp', requestId: 'pending_9'),
+        );
+        await _settle();
+        socket.add(
+          jsonEncode({
+            'type': 'system',
+            'subtype': 'session_created',
+            'sessionId': 'b1',
+            'provider': 'claude',
+            'projectPath': '/p',
+            'requestId': 'pending_9',
+          }),
+        );
+        await _settle();
+
+        expect(
+          messages.whereType<SystemMessage>().where(
+            (message) => message.subtype == 'session_created',
+          ),
+          isEmpty,
+        );
+        final error = messages.whereType<ErrorMessage>().single;
+        expect(error.errorCode, 'bridge_update_required');
+        expect(error.requestId, 'pending_9');
+        expect(bridge.offlinePendingActions, isEmpty);
+
+        // A matching provider is delivered normally.
+        bridge.send(
+          ClientMessage.start('/p', provider: 'omp', requestId: 'pending_10'),
+        );
+        await _settle();
+        socket.add(
+          jsonEncode({
+            'type': 'system',
+            'subtype': 'session_created',
+            'sessionId': 'b2',
+            'provider': 'omp',
+            'projectPath': '/p',
+            'requestId': 'pending_10',
+          }),
+        );
+        await _settle();
+        expect(messages.whereType<SystemMessage>().single.sessionId, 'b2');
+
+        await sub.cancel();
+        bridge.dispose();
+        await server.stop();
+      },
+    );
+
+    test('omp settings patch the cached session', () async {
+      final server = await _OmpTestServer.start(supportsOmp: true)
+        ..announce = false;
+      final bridge = BridgeService();
+      bridge.connect(server.url);
+      final socket = await server.nextSocket();
+      server.sendSessionList(
+        socket,
+        sessions: [
+          {
+            'id': '3f9c2a1b',
+            'provider': 'omp',
+            'projectPath': '/p',
+            'status': 'idle',
+            'ompSettings': {'model': 'a/b', 'thinkingLevel': 'high'},
+          },
+        ],
+      );
+      await _settle();
+      expect(bridge.sessions.single.ompModel, 'a/b');
+
+      socket.add(
+        jsonEncode({
+          'type': 'system',
+          'subtype': 'omp_settings',
+          'sessionId': '3f9c2a1b',
+          'provider': 'omp',
+          'model': 'a/plain',
+          'thinkingLevels': ['off'],
+        }),
+      );
+      await _settle();
+      expect(bridge.sessions.single.ompModel, 'a/plain');
+      expect(bridge.sessions.single.ompThinkingLevel, isNull);
+
+      bridge.patchSessionOmpModel(
+        '3f9c2a1b',
+        model: 'a/b',
+        thinkingLevel: 'max',
+      );
+      expect(bridge.sessions.single.ompModel, 'a/b');
+      expect(bridge.sessions.single.ompThinkingLevel, 'max');
+      bridge.patchSessionOmpModel('3f9c2a1b', clearThinkingLevel: true);
+      expect(bridge.sessions.single.ompThinkingLevel, isNull);
+      bridge.patchSessionOmpModel('3f9c2a1b', clearModel: true);
+      expect(bridge.sessions.single.ompModel, isNull);
+
+      bridge.dispose();
+      await server.stop();
+    });
+
+    test(
+      'a rejected omp model change rolls back to an unknown model for good',
+      () async {
+        final server = await _OmpTestServer.start(supportsOmp: true)
+          ..announce = false;
+        final bridge = BridgeService();
+        bridge.connect(server.url);
+        final socket = await server.nextSocket();
+        // No init yet: the summary does not know the model.
+        server.sendSessionList(
+          socket,
+          sessions: [
+            {
+              'id': 'b1',
+              'provider': 'omp',
+              'projectPath': '/p',
+              'status': 'idle',
+              'claudeSessionId': 'omp-1',
+              'ompSettings': <String, dynamic>{},
+            },
+          ],
+          extra: {
+            'ompModels': [
+              {
+                'selector': 'a/b',
+                'provider': 'a',
+                'name': 'B',
+                'thinkingLevels': ['off'],
+              },
+            ],
+          },
+        );
+        await _settle();
+        final streaming = StreamingStateCubit();
+        final cubit = OmpSessionCubit(
+          sessionId: 'b1',
+          bridge: bridge,
+          streamingCubit: streaming,
+        );
+        await _settle();
+        expect(cubit.state.ompModel, isNull);
+
+        cubit.setOmpModel(model: 'a/b');
+        expect(cubit.state.ompModel, 'a/b');
+        expect(bridge.sessions.single.ompModel, 'a/b');
+
+        socket.add(
+          jsonEncode({
+            'type': 'error',
+            'sessionId': 'b1',
+            'errorCode': 'set_omp_model_failed',
+            'message': 'Model not found: a/b',
+          }),
+        );
+        await _settle();
+        expect(cubit.state.ompModel, isNull);
+        expect(bridge.sessions.single.ompModel, isNull);
+
+        // The next summary publish does not bring the rejected model back.
+        socket.add(
+          jsonEncode({
+            'type': 'status',
+            'sessionId': 'b1',
+            'status': 'running',
+          }),
+        );
+        await _settle();
+        expect(bridge.sessions.single.status, 'running');
+        expect(cubit.state.ompModel, isNull);
+
+        await cubit.close();
+        await streaming.close();
+        bridge.dispose();
+        await server.stop();
+      },
+    );
+  });
+}
+
+Future<void> _settle() =>
+    Future<void>.delayed(const Duration(milliseconds: 60));
+
+/// A loopback Bridge stub that announces a protocol-v1 `session_list`, with
+/// or without `provider_omp_v1`, and records what the app sends.
+class _OmpTestServer {
+  _OmpTestServer._(this._server, {required this.supportsOmp}) {
+    _server.transform(io.WebSocketTransformer()).listen((socket) {
+      _sockets.add(socket);
+      socket.listen((data) {
+        received.add(jsonDecode(data as String) as Map<String, dynamic>);
+      });
+      if (announce) sendSessionList(socket);
+      _socketController.add(socket);
+    });
+  }
+
+  static Future<_OmpTestServer> start({required bool supportsOmp}) async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    return _OmpTestServer._(server, supportsOmp: supportsOmp);
+  }
+
+  final HttpServer _server;
+  final _sockets = <WebSocket>[];
+  final _socketController = StreamController<WebSocket>.broadcast();
+  final received = <Map<String, dynamic>>[];
+  bool supportsOmp;
+  bool announce = true;
+  late final Stream<WebSocket> _socketStream = _socketController.stream;
+
+  String get url => 'ws://127.0.0.1:${_server.port}';
+
+  Future<WebSocket> nextSocket() =>
+      _socketStream.first.timeout(const Duration(seconds: 2));
+
+  void sendSessionList(
+    WebSocket socket, {
+    List<Map<String, dynamic>> sessions = const [],
+    Map<String, dynamic> extra = const {},
+  }) {
+    socket.add(
+      jsonEncode({
+        'type': 'session_list',
+        'sessions': sessions,
+        'protocolVersion': 1,
+        'minimumProtocolVersion': 1,
+        'protocolCapabilities': [
+          'project_request_correlation_v1',
+          'session_context_v1',
+          if (supportsOmp) 'provider_omp_v1',
+        ],
+        ...extra,
+      }),
+    );
+  }
+
+  Future<void> closeSockets() async {
+    for (final socket in List.of(_sockets)) {
+      await socket.close();
+    }
+    _sockets.clear();
+  }
+
+  Future<void> stop() async {
+    await closeSockets();
+    await _socketController.close();
+    await _server.close(force: true);
+  }
 }

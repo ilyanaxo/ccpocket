@@ -38,6 +38,12 @@ class NewSessionParams {
   final bool? claudeForkSession;
   final bool? claudePersistSession;
 
+  /// omp model selector (`<provider>/<id>`); null = omp's configured default.
+  final String? ompModel;
+
+  /// omp thinking level wire value; null = omp's default for the model.
+  final String? ompThinkingLevel;
+
   NewSessionParams({
     required this.projectPath,
     this.projectId,
@@ -62,7 +68,7 @@ class NewSessionParams {
     this.worktreeBranch,
     this.existingWorktreePath,
     this.model,
-    this.sandboxMode,
+    SandboxMode? sandboxMode,
     this.modelReasoningEffort,
     this.codexSpeed = CodexSpeed.standard,
     this.networkAccessEnabled,
@@ -75,9 +81,13 @@ class NewSessionParams {
     this.claudeFallbackModel,
     this.claudeForkSession,
     this.claudePersistSession,
+    this.ompModel,
+    this.ompThinkingLevel,
   }) : claudePermissionMode = provider == Provider.claude
            ? (claudePermissionMode ?? permissionMode)
            : null,
+       // omp has no process sandbox; null keeps it out of starts and defaults.
+       sandboxMode = provider == Provider.omp ? null : sandboxMode,
        executionMode =
            executionMode ??
            deriveExecutionMode(
@@ -100,7 +110,10 @@ class NewSessionParams {
            (provider == Provider.codex
                ? CodexApprovalPolicy.onRequest
                : CodexApprovalPolicy.onRequest),
-       planMode = planMode ?? (permissionMode == PermissionMode.plan);
+       // omp has no plan mode.
+       planMode =
+           provider != Provider.omp &&
+           (planMode ?? (permissionMode == PermissionMode.plan));
 
   String get codexApprovalsReviewer =>
       codexApprovalPolicy == CodexApprovalPolicy.onRequest &&
@@ -155,6 +168,8 @@ class NewSessionParams {
     String? claudeFallbackModel,
     bool? claudeForkSession,
     bool? claudePersistSession,
+    String? ompModel,
+    String? ompThinkingLevel,
   }) {
     return NewSessionParams(
       projectPath: projectPath ?? this.projectPath,
@@ -200,6 +215,8 @@ class NewSessionParams {
       claudeFallbackModel: claudeFallbackModel ?? this.claudeFallbackModel,
       claudeForkSession: claudeForkSession ?? this.claudeForkSession,
       claudePersistSession: claudePersistSession ?? this.claudePersistSession,
+      ompModel: ompModel ?? this.ompModel,
+      ompThinkingLevel: ompThinkingLevel ?? this.ompThinkingLevel,
     );
   }
 }
@@ -229,7 +246,7 @@ WebSearchMode? webSearchModeFromRaw(String? raw) =>
     enumByValue(WebSearchMode.values, raw, (v) => v.value);
 
 Provider _providerFromRaw(String? raw) =>
-    enumByValue(Provider.values, raw, (v) => v.value) ?? Provider.codex;
+    providerFromValue(raw) ?? Provider.codex;
 
 PermissionMode? permissionModeFromRaw(String? raw) =>
     enumByValue(PermissionMode.values, raw, (v) => v.value);
@@ -281,6 +298,8 @@ Map<String, dynamic> sessionStartDefaultsToJson(NewSessionParams params) {
     'claudeFallbackModel': params.claudeFallbackModel,
     'claudeForkSession': params.claudeForkSession,
     'claudePersistSession': params.claudePersistSession,
+    'ompModel': params.ompModel,
+    'ompThinkingLevel': params.ompThinkingLevel,
   };
 }
 
@@ -335,5 +354,14 @@ NewSessionParams? sessionStartDefaultsFromJson(Map<String, dynamic> json) {
     claudeFallbackModel: json['claudeFallbackModel'] as String?,
     claudeForkSession: json['claudeForkSession'] as bool?,
     claudePersistSession: json['claudePersistSession'] as bool?,
+    ompModel: _nonEmpty(json['ompModel'] as String?),
+    ompThinkingLevel: ompThinkingLevelFromValue(
+      json['ompThinkingLevel'] as String?,
+    )?.value,
   );
+}
+
+String? _nonEmpty(String? value) {
+  final trimmed = value?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : trimmed;
 }

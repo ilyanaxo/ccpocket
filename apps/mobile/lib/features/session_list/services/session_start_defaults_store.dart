@@ -43,7 +43,8 @@ class SessionStartDefaultsStore {
     }
 
     return _loadScoped(prefs, Provider.codex) ??
-        _loadScoped(prefs, Provider.claude);
+        _loadScoped(prefs, Provider.claude) ??
+        _loadScoped(prefs, Provider.omp);
   }
 
   Future<void> save(NewSessionParams params) async {
@@ -113,7 +114,7 @@ class SessionStartDefaultsStore {
   Future<void> _removeObsoleteProjectlessDefaults(
     SharedPreferences prefs,
   ) async {
-    for (final key in [_legacyKey, _claudeKey, _codexKey]) {
+    for (final key in [_legacyKey, _claudeKey, _codexKey, _ompKey]) {
       final raw = prefs.getString(key);
       if (raw == null || raw.isEmpty) continue;
       try {
@@ -133,9 +134,5 @@ class SessionStartDefaultsStore {
     Provider.omp => _ompKey,
   };
 
-  Provider? _providerFromRaw(String? raw) => switch (raw) {
-    'claude' => Provider.claude,
-    'codex' => Provider.codex,
-    _ => null,
-  };
+  Provider? _providerFromRaw(String? raw) => providerFromValue(raw);
 }

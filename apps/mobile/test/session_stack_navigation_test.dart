@@ -70,6 +70,42 @@ void main() {
       );
     });
 
+    test('matches the same omp session only', () {
+      final routeIdentity = Object();
+      final arguments = OmpSessionRoute(sessionId: 'omp-1').args;
+
+      expect(
+        SessionStackNavigation.matchesDestination(
+          routeIdentity: routeIdentity,
+          routeName: OmpSessionRoute.name,
+          arguments: arguments,
+          sessionId: 'omp-1',
+          provider: 'omp',
+        ),
+        isTrue,
+      );
+      expect(
+        SessionStackNavigation.matchesDestination(
+          routeIdentity: routeIdentity,
+          routeName: OmpSessionRoute.name,
+          arguments: arguments,
+          sessionId: 'omp-1',
+          provider: 'claude',
+        ),
+        isFalse,
+      );
+      expect(
+        SessionStackNavigation.matchesDestination(
+          routeIdentity: routeIdentity,
+          routeName: OmpSessionRoute.name,
+          arguments: arguments,
+          sessionId: 'omp-2',
+          provider: 'omp',
+        ),
+        isFalse,
+      );
+    });
+
     test('does not treat an in-flight session link as a destination', () {
       final routeIdentity = Object();
       final arguments = SessionLinkRoute(
