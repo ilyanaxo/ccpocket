@@ -89,6 +89,7 @@ Flutter App ←WebSocket→ websocket.ts ←→ session.ts ─┼→ codex-proce
 - 設計と互換性方針: `docs/omp-integration.md`、プロトコル capability: `docs/protocol-versioning.md`
 - `session.ts` - マルチセッション管理 (SessionManager)
 - `websocket.ts` - WebSocket接続管理・認証・メッセージルーティング
+- `http-handler.ts` / `request-auth.ts` - HTTPルーティングとAPIキー判定 (WebSocket と共通)
 - `index.ts` - エントリーポイント
 
 ## 環境変数
@@ -97,7 +98,7 @@ Flutter App ←WebSocket→ websocket.ts ←→ session.ts ─┼→ codex-proce
 |------|-----------|------|
 | `BRIDGE_PORT` | `8765` | WebSocketポート |
 | `BRIDGE_HOST` | `0.0.0.0` | バインドアドレス |
-| `BRIDGE_API_KEY` | (なし) | APIキー認証 (設定時に有効化) |
+| `BRIDGE_API_KEY` | (なし) | 設定時は WebSocket と全HTTPエンドポイントでAPIキーを要求 (下記「Bridge の認証とHTTPエンドポイント」) |
 | `BRIDGE_ALLOWED_DIRS` | `$HOME` | 許可するプロジェクトディレクトリ (カンマ区切り) |
 | `BRIDGE_RECORDING` | (なし) | セッション録画を有効化 (設定時に有効化) |
 | `BRIDGE_DISABLE_MDNS` | (なし) | mDNSアドバタイズメントを無効化 (設定時に有効化) |
@@ -156,6 +157,24 @@ Cloud Functions (relay) がFCMトークンの管理とプッシュ送信を担�
 - 通常のチャット操作は、新機能追加時に `_unsupportedActions` へ1行追加する
 - 専用UIが直接レスポンスを待つ操作（例: `list_directory`）は、そのUI内で
   `unsupported_message` と元のタイプ名を照合し、Bridge更新案内を表示する
+
+## Bridge の認証とHTTPエンドポイント
+
+実装は `packages/bridge/src/request-auth.ts` (判定) と `http-handler.ts` (HTTPルーティング)。WebSocket も同じ判定関数を使う。
+
+- `BRIDGE_API_KEY` 設定時は、WebSocket と全HTTPエンドポイント (`/version`, `/usage`, `/doctor`, `/images/*`, `/api/media/*`, `/api/uploads/*`, `/api/gallery*`, 未知のパス) でキーを要求する。受け付けるのは `?token=<key>` と `Authorization: Bearer <key>`。比較は SHA-256 ダイジェスト同士の定数時間比較。
+- 拒否時: HTTP は `401` + `{"error":"Unauthorized"}` + `WWW-Authenticate: Bearer realm="ccpocket"`。WebSocket は従来どおり接続後に `4001` で close する。
+- 例外は `OPTIONS` プリフライトと `GET /health`。アプリはキーを付けられない場面でも `/health` を呼ぶため、キーなしで答える。到達性プローブ (`bridge_endpoint_probe.dart`) は HTTPS のときだけ `Authorization: Bearer` を付け、平文HTTPでは付けない。`machine_manager_service.dart` と `BridgeService.checkHealth` は、自動モードで暗号化されていない接続 (SSLなし、SSHジャンプなし) ではユーザーの確認までキーを付けず、それ以外 (HTTPS、明示的な `ws://`、SSHトンネル) では付ける。キーが未登録の場合もある。どの呼び出しも HTTP 200 と `status == "ok"` だけを見る。未認証では `{"status":"ok"}` だけを返し、キー付きの場合のみ `uptime` / `sessions` / `clients` を追加する。
+- `BRIDGE_API_KEY` 未設定時の挙動は変えない (全エンドポイントが認証なし、`/health` も従来の全項目)。
+- ルーティングは `req.url` の完全一致ではなく pathname で行う。`?token=` 付きでも同じルートに届く。
+- 互換性: キー設定時、HTTPリクエストにキーを付けない古いアプリでは画像・メディア・ファイル転送・ギャラリー・`/version` が `401` になる。Bridge と同時にアプリを更新する。WebSocket は従来の `?token=` をそのまま受け付ける。
+- localhost は信頼境界ではない (同じホストの他ユーザーやコンテナから 127.0.0.1 に届く)。SSHトンネルや VPN 経由でもキーを設定する。
+
+認証と無関係に適用する防御:
+
+- URLとして解釈できないリクエストターゲット (例: `//[`) は `400`。`Host` ヘッダーはURL解析に使わない (以前は不正な `Host` で WebSocket upgrade が例外を投げ、プロセスが落ちた)。プロセス全体の `uncaughtException` ハンドラーは既存パターンにないため追加していない。
+- `POST /api/gallery/upload` の `filePath` モードは、symlink 解決後のパスが `BRIDGE_ALLOWED_DIRS` 内の場合だけコピーし、それ以外は `403`。ボディ上限は `GALLERY_UPLOAD_MAX_BODY_BYTES` (ImageStore の上限 10MB の base64 長 + 64KiB)。`Content-Length` で超過が分かれば読まずに、チャンク転送では超過した時点で `413` を返し接続を閉じる。
+- WebSocket keepalive: Bridge は 30 秒ごとに全クライアントへ ping を送る。生存の証拠は、受信データ (pong に限らず、大きなメッセージの途中も含む) と、前回の tick で送信待ちだったデータの書き込み完了。2 tick 続けて証拠がないクライアントを terminate する (切れた経路の検知は 60〜90 秒)。低速回線では ping や pong が大きなメッセージの後ろで待ち、送信済みのデータもカーネルや SSH トンネルのバッファで数十秒待つため、1 tick の無応答は許容する。Node は書き込み完了を write 単位 (送信待ちの複数フレームはまとめて1回) でしか通知しないため、1回の書き込みの転送に約 60 秒以上かかり、その間クライアントが何も送らない場合は切断される。dart:io・ブラウザ・`ws` は ping に自動で pong を返すため、クライアント側の変更は不要。
 
 ## リモートアクセス設定
 

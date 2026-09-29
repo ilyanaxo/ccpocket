@@ -1,4 +1,5 @@
 import type { Server as HttpServer } from "node:http";
+import type { Socket } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
@@ -150,10 +151,12 @@ import type { PromptHistoryBackupStore } from "./prompt-history-backup.js";
 import type { PromptHistoryStore } from "./prompt-history-store.js";
 import { getPackageVersion } from "./version.js";
 import {
+  isCanonicalPathAllowed,
   isPathWithinAllowedDirectory,
   resolvePlatformPath,
   resolvePlatformPathFrom,
 } from "./path-utils.js";
+import { isAuthorizedRequest, parseRequestUrl } from "./request-auth.js";
 import {
   DirectoryListingError,
   listAllowedDirectories,
@@ -870,6 +873,17 @@ interface DeltaTextChunk {
   charCount: number;
 }
 
+/** Keepalive state of one client connection. */
+interface ClientLiveness {
+  socket: Socket;
+  /** Keepalive ticks since the client last showed a sign of life. */
+  silentTicks: number;
+  /** Bytes the socket had finished writing at the last tick. */
+  writtenBytes: number;
+  /** Bytes still queued for writing at the last tick. */
+  queuedBytes: number;
+}
+
 export class BridgeWebSocketServer {
   private static readonly MAX_DEBUG_EVENTS = 800;
   private static readonly MAX_HISTORY_SUMMARY_ITEMS = 300;
@@ -880,8 +894,18 @@ export class BridgeWebSocketServer {
   private static readonly DEFAULT_FILE_UPLOAD_MAX_BYTES = 512 * 1024 * 1024;
   private static readonly DEFAULT_DELTA_BATCH_MS = 100;
   private static readonly DEFAULT_DELTA_BATCH_MAX_CHARS = 4096;
+  static readonly KEEPALIVE_INTERVAL_MS = 30 * 1000;
+  /**
+   * Ticks without a sign of life after which a client is dropped. A ping can
+   * wait behind data already handed to the kernel and to an SSH tunnel, which
+   * takes tens of seconds to drain on a slow link, so one silent tick is
+   * tolerated.
+   */
+  private static readonly KEEPALIVE_MAX_SILENT_TICKS = 2;
 
   private wss: WebSocketServer;
+  private keepaliveTimer: NodeJS.Timeout;
+  private clientLiveness = new WeakMap<WebSocket, ClientLiveness>();
   private sessionManager: SessionManager;
   private apiKey: string | null;
   private allowedDirs: string[];
@@ -1095,15 +1119,25 @@ export class BridgeWebSocketServer {
     );
 
     this.wss.on("connection", (ws, req) => {
-      // API key authentication
-      if (this.apiKey) {
-        const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-        const token = url.searchParams.get("token");
-        if (token !== this.apiKey) {
-          console.log("[ws] Client rejected: invalid token");
-          ws.close(4001, "Unauthorized");
-          return;
-        }
+      const liveness: ClientLiveness = {
+        socket: req.socket,
+        silentTicks: 0,
+        writtenBytes: 0,
+        queuedBytes: 0,
+      };
+      this.clientLiveness.set(ws, liveness);
+      // Any received data is a sign of life, including part of a large
+      // message that the client's pong is queued behind.
+      req.socket.on("data", () => {
+        liveness.silentTicks = 0;
+      });
+
+      // API key authentication. The Host header is not used for parsing, and
+      // an unparseable request target counts as a missing token.
+      if (!isAuthorizedRequest(req, parseRequestUrl(req.url), this.apiKey)) {
+        console.log("[ws] Client rejected: invalid token");
+        ws.close(4001, "Unauthorized");
+        return;
       }
 
       console.log("[ws] Client connected");
@@ -1114,7 +1148,40 @@ export class BridgeWebSocketServer {
       console.error("[ws] Server error:", err.message);
     });
 
+    // Ping every client periodically so connections behind a dead network
+    // path or SSH tunnel are detected. Clients answer pings automatically.
+    this.keepaliveTimer = setInterval(
+      () => this.checkClientLiveness(),
+      BridgeWebSocketServer.KEEPALIVE_INTERVAL_MS,
+    );
+    this.keepaliveTimer.unref();
+
     console.log(`[ws] WebSocket server attached to HTTP server`);
+  }
+
+  private checkClientLiveness(): void {
+    for (const client of this.wss.clients) {
+      const liveness = this.clientLiveness.get(client);
+      if (!liveness) continue;
+      const { socket } = liveness;
+      // Data that was queued at the last tick and has since been written
+      // shows the client is reading. The ping may still wait behind it.
+      if (
+        liveness.queuedBytes > 0 &&
+        socket.bytesWritten - socket.writableLength > liveness.writtenBytes
+      ) {
+        liveness.silentTicks = 0;
+      }
+      if (liveness.silentTicks >= BridgeWebSocketServer.KEEPALIVE_MAX_SILENT_TICKS) {
+        console.log("[ws] Terminating client that did not answer a ping");
+        client.terminate();
+        continue;
+      }
+      liveness.silentTicks += 1;
+      client.ping();
+      liveness.writtenBytes = socket.bytesWritten - socket.writableLength;
+      liveness.queuedBytes = socket.writableLength;
+    }
   }
 
   /**
@@ -1128,20 +1195,8 @@ export class BridgeWebSocketServer {
     );
   }
 
-  private async isCanonicalPathAllowed(path: string): Promise<boolean> {
-    if (this.allowedDirs.length === 0) return true;
-    for (const dir of this.allowedDirs) {
-      let canonicalDir = dir;
-      try {
-        canonicalDir = await realpath(dir);
-      } catch {
-        // Keep the configured path when the allowed root cannot be resolved.
-      }
-      if (isPathWithinAllowedDirectory(path, canonicalDir, this.platform)) {
-        return true;
-      }
-    }
-    return false;
+  private isCanonicalPathAllowed(path: string): Promise<boolean> {
+    return isCanonicalPathAllowed(path, this.allowedDirs, this.platform);
   }
 
   private sendFileDownloadError(
@@ -2811,6 +2866,7 @@ export class BridgeWebSocketServer {
 
   close(): void {
     console.log("[ws] Shutting down...");
+    clearInterval(this.keepaliveTimer);
     for (const operation of this.resumeOperations.values()) {
       if (operation.timeout) clearTimeout(operation.timeout);
     }

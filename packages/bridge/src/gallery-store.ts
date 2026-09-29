@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, mkdir, copyFile, stat, unlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, copyFile, realpath, stat, unlink } from "node:fs/promises";
 import { join, extname, basename, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { MAX_IMAGE_FILE_SIZE } from "./image-store.js";
+import { isCanonicalPathAllowed } from "./path-utils.js";
 
 export interface GalleryImageMeta {
   id: string;
@@ -29,6 +31,13 @@ export interface GalleryImageInfo {
 const GALLERY_DIR = join(homedir(), ".ccpocket", "gallery");
 const IMAGES_DIR = join(GALLERY_DIR, "images");
 const INDEX_FILE = join(GALLERY_DIR, "index.json");
+
+/**
+ * Largest POST /api/gallery/upload body: the base64 form of the largest image
+ * the Bridge accepts, plus room for the other JSON fields.
+ */
+export const GALLERY_UPLOAD_MAX_BODY_BYTES =
+  Math.ceil(MAX_IMAGE_FILE_SIZE / 3) * 4 + 64 * 1024;
 
 const MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -90,34 +99,66 @@ export class GalleryStore {
     try {
       const resolvedPath = await this.resolveReadablePath(filePath, projectPath);
       if (!resolvedPath) return null;
-      const st = await stat(resolvedPath);
+      return await this.copyImage(resolvedPath, projectPath, sessionId);
+    } catch (err) {
+      console.warn(`[gallery] Failed to add image ${filePath}:`, err);
+      return null;
+    }
+  }
 
-      const ext = extname(resolvedPath).toLowerCase();
-      const mimeType = MIME_TYPES[ext];
-      if (!mimeType) return null;
+  private async copyImage(
+    resolvedPath: string,
+    projectPath: string,
+    sessionId?: string,
+  ): Promise<GalleryImageMeta | null> {
+    const st = await stat(resolvedPath);
 
-      const id = randomUUID();
-      const filename = `${id}${ext}`;
-      const destPath = join(IMAGES_DIR, filename);
+    const ext = extname(resolvedPath).toLowerCase();
+    const mimeType = MIME_TYPES[ext];
+    if (!mimeType) return null;
 
-      await copyFile(resolvedPath, destPath);
+    const id = randomUUID();
+    const filename = `${id}${ext}`;
+    const destPath = join(IMAGES_DIR, filename);
 
-      const meta: GalleryImageMeta = {
-        id,
-        filename,
-        mimeType,
-        projectPath,
-        sessionId,
-        sourcePath: resolvedPath,
-        addedAt: new Date().toISOString(),
-        sizeBytes: st.size,
-      };
+    await copyFile(resolvedPath, destPath);
 
-      this.index.push(meta);
-      await this.saveIndex();
+    const meta: GalleryImageMeta = {
+      id,
+      filename,
+      mimeType,
+      projectPath,
+      sessionId,
+      sourcePath: resolvedPath,
+      addedAt: new Date().toISOString(),
+      sizeBytes: st.size,
+    };
 
-      console.log(`[gallery] Added image ${id} from ${basename(resolvedPath)}`);
-      return meta;
+    this.index.push(meta);
+    await this.saveIndex();
+
+    console.log(`[gallery] Added image ${id} from ${basename(resolvedPath)}`);
+    return meta;
+  }
+
+  /**
+   * Add a client-named file for POST /api/gallery/upload. The file is copied
+   * from its canonical path only when that path lies inside allowedDirs.
+   */
+  private async addAllowedImage(
+    filePath: string,
+    projectPath: string,
+    allowedDirs: readonly string[],
+    sessionId?: string,
+  ): Promise<GalleryImageMeta | "not_allowed" | null> {
+    try {
+      const resolvedPath = await this.resolveReadablePath(filePath, projectPath);
+      if (!resolvedPath) return null;
+      const canonicalPath = await realpath(resolvedPath);
+      if (!(await isCanonicalPathAllowed(canonicalPath, allowedDirs))) {
+        return "not_allowed";
+      }
+      return await this.copyImage(canonicalPath, projectPath, sessionId);
     } catch (err) {
       console.warn(`[gallery] Failed to add image ${filePath}:`, err);
       return null;
@@ -253,10 +294,10 @@ export class GalleryStore {
    * Returns true if the request was handled.
    */
   handleRequest(req: IncomingMessage, res: ServerResponse): boolean {
-    const url = req.url ?? "";
+    const url = new URL(req.url ?? "", "http://localhost");
 
     // Match /api/gallery/:id (alphanumeric, hyphens, underscores)
-    const imageMatch = url.match(/^\/api\/gallery\/([a-zA-Z0-9_-]+)$/);
+    const imageMatch = url.pathname.match(/^\/api\/gallery\/([a-zA-Z0-9_-]+)$/);
 
     // GET /api/gallery/:id — serve image file
     if (imageMatch && req.method === "GET") {
@@ -283,9 +324,8 @@ export class GalleryStore {
     }
 
     // GET /api/gallery — list images (exact path or with query string)
-    if ((url === "/api/gallery" || url.startsWith("/api/gallery?")) && req.method === "GET") {
-      const parsedUrl = new URL(url, `http://${req.headers.host ?? "localhost"}`);
-      const project = parsedUrl.searchParams.get("project") ?? undefined;
+    if (url.pathname === "/api/gallery" && req.method === "GET") {
+      const project = url.searchParams.get("project") ?? undefined;
       const images = this.list({ projectPath: project });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ images }));
@@ -324,23 +364,51 @@ export class GalleryStore {
   /**
    * Handle POST /api/gallery/upload.
    * Accepts JSON body with EITHER:
-   *   - { filePath: string, projectPath: string, sessionId?: string } (file path mode)
+   *   - { filePath: string, projectPath: string, sessionId?: string } (file path mode;
+   *     the file must lie inside allowedDirs, an empty list allows any path)
    *   - { base64: string, mimeType: string, projectPath: string, sessionId?: string } (base64 mode)
+   * Bodies larger than GALLERY_UPLOAD_MAX_BODY_BYTES are rejected with 413.
    * Returns true if the request was handled.
    */
   handleUploadRequest(
     req: IncomingMessage,
     res: ServerResponse,
-    onNewImage?: (meta: GalleryImageMeta) => void,
+    options: {
+      allowedDirs: readonly string[];
+      onNewImage?: (meta: GalleryImageMeta) => void;
+    },
   ): boolean {
-    const url = req.url ?? "";
-    if (url !== "/api/gallery/upload" || req.method !== "POST") return false;
+    const url = new URL(req.url ?? "", "http://localhost");
+    if (url.pathname !== "/api/gallery/upload" || req.method !== "POST") return false;
 
-    let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    let tooLarge = false;
+    const rejectTooLarge = () => {
+      tooLarge = true;
+      // Close the connection instead of reading the rest of the body.
+      res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+      res.end(JSON.stringify({ error: "Request body too large" }));
+    };
+    if (Number(req.headers["content-length"]) > GALLERY_UPLOAD_MAX_BODY_BYTES) {
+      rejectTooLarge();
+      return true;
+    }
+
+    const chunks: Buffer[] = [];
+    let receivedBytes = 0;
+    req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > GALLERY_UPLOAD_MAX_BODY_BYTES) {
+        chunks.length = 0;
+        rejectTooLarge();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", async () => {
+      if (tooLarge) return;
       try {
-        const parsed = JSON.parse(body) as {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
           filePath?: string;
           base64?: string;
           mimeType?: string;
@@ -367,11 +435,18 @@ export class GalleryStore {
         }
         // File path mode: copy from file path
         else if (parsed.filePath) {
-          meta = await this.addImage(
+          const added = await this.addAllowedImage(
             parsed.filePath,
             parsed.projectPath,
+            options.allowedDirs,
             parsed.sessionId,
           );
+          if (added === "not_allowed") {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "filePath is outside the allowed directories" }));
+            return;
+          }
+          meta = added;
         } else {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Either filePath or (base64 + mimeType) is required" }));
@@ -384,7 +459,7 @@ export class GalleryStore {
           return;
         }
         const info = this.metaToInfo(meta);
-        if (onNewImage) onNewImage(meta);
+        if (options.onNewImage) options.onNewImage(meta);
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ image: info }));
       } catch {

@@ -25,7 +25,8 @@ interface StoredThumbnail {
   buffer: Buffer;
 }
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+/** Largest image the Bridge stores or accepts from a client. */
+export const MAX_IMAGE_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_ENTRIES = 100;
 const THUMBNAIL_MAX_DIMENSION = 768;
 const THUMBNAIL_MIME_TYPE = "image/webp";
@@ -124,7 +125,7 @@ export class ImageStore {
     for (const candidate of candidates) {
       try {
         const st = await stat(candidate);
-        if (st.isFile() && st.size <= MAX_FILE_SIZE) return candidate;
+        if (st.isFile() && st.size <= MAX_IMAGE_FILE_SIZE) return candidate;
       } catch {
         // Try next candidate.
       }
@@ -173,7 +174,7 @@ export class ImageStore {
       }
 
       const buffer = Buffer.from(base64Data, "base64");
-      if (buffer.length > MAX_FILE_SIZE) {
+      if (buffer.length > MAX_IMAGE_FILE_SIZE) {
         console.warn(`[image-store] Skipping base64 image (>10MB)`);
         return null;
       }

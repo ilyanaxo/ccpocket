@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { posix, win32 } from "node:path";
 
 function getPathApi(platform: NodeJS.Platform) {
@@ -89,4 +90,30 @@ export function isPathWithinAllowedDirectory(
     !relativePath.startsWith("..") &&
     !pathApi.isAbsolute(relativePath)
   );
+}
+
+/**
+ * Whether an already canonical path lies inside one of the allowed
+ * directories. Each allowed root is resolved through realpath first, so a
+ * symlinked root still matches its canonical children. An empty list means
+ * unrestricted access (`BRIDGE_ALLOWED_DIRS=*`).
+ */
+export async function isCanonicalPathAllowed(
+  canonicalPath: string,
+  allowedDirs: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (allowedDirs.length === 0) return true;
+  for (const dir of allowedDirs) {
+    let canonicalDir = dir;
+    try {
+      canonicalDir = await realpath(dir);
+    } catch {
+      // Keep the configured path when the allowed root cannot be resolved.
+    }
+    if (isPathWithinAllowedDirectory(canonicalPath, canonicalDir, platform)) {
+      return true;
+    }
+  }
+  return false;
 }

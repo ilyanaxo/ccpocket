@@ -41,7 +41,7 @@ ccpocket-bridge --version
 | `BRIDGE_PORT` | `8765` | WebSocket port |
 | `BRIDGE_NOTIFY_GOAL_TURN_COMPLETED` | `false` | Set exactly to `true` to notify intermediate Codex turns while a Goal is active. Goal completion, blockers, limits, approvals and errors remain enabled. Read at session creation; restart Bridge to apply to all sessions. |
 | `BRIDGE_HOST` | `0.0.0.0` | Bind address |
-| `BRIDGE_API_KEY` | (none) | API key authentication (enabled when set) |
+| `BRIDGE_API_KEY` | (none) | API key required on the WebSocket and every HTTP endpoint when set; see [API Key Authentication](#api-key-authentication) |
 | `BRIDGE_ALLOWED_DIRS` | `$HOME` | Comma-separated list of project directories the Bridge may access; set exactly to `*` to allow any directory |
 | `BRIDGE_FILE_DOWNLOAD_ALLOW_ALL_PATHS` | unset (project only) | Set exactly to `1` to allow sharing/downloading any regular file readable by the Bridge process, including paths outside `BRIDGE_ALLOWED_DIRS`. Absolute and relative paths within the selected project work by default. |
 | `BRIDGE_PUBLIC_WS_URL` | (none) | Public `ws://` / `wss://` URL used for startup deep link and QR code |
@@ -83,6 +83,50 @@ supported. When `BRIDGE_PROMPT_HISTORY_FILE` is not set and `BRIDGE_PORT` is not
 
 Push relay uses Firebase Anonymous Auth automatically; no FCM environment
 variables are required.
+
+## API Key Authentication
+
+When `BRIDGE_API_KEY` is set, the WebSocket and every HTTP endpoint (`/version`,
+`/usage`, `/doctor`, `/images/*`, `/api/media/*`, `/api/uploads/*` and
+`/api/gallery*`) require the key. Clients send it either as a `token` query
+parameter (`?token=<key>`) or as an `Authorization: Bearer <key>` header. The
+Bridge compares the key in constant time.
+
+- A missing or wrong key gets HTTP `401` with the body `{"error":"Unauthorized"}`
+  and a `WWW-Authenticate: Bearer realm="ccpocket"` header. A WebSocket without
+  the key is closed with code `4001`.
+- `OPTIONS` preflight requests need no key.
+- `GET /health` also needs no key, because the app sometimes calls it without
+  one: reachability probes over plain HTTP, and health checks in automatic mode
+  over an unencrypted connection before the user confirms sending the key.
+  Elsewhere the app sends the key. Without the key the endpoint returns only
+  `{"status":"ok"}`. With the key it also returns `uptime`, `sessions` and
+  `clients`.
+- Without `BRIDGE_API_KEY`, every endpoint stays open as before.
+
+Binding to `127.0.0.1` does not replace the key when other local accounts or
+containers on the host can reach the loopback port.
+
+Clients that send the key only on the WebSocket get `401` for images, media,
+file uploads, the gallery and `/version` once a key is set. Update the app
+together with the Bridge.
+
+Other HTTP and WebSocket safeguards, independent of the key:
+
+- A request target that is not a valid URL gets `400`. The Bridge never parses
+  the `Host` header, so a malformed one cannot crash it.
+- `POST /api/gallery/upload` in `filePath` mode copies a file only when its
+  resolved path, after following symlinks, lies inside `BRIDGE_ALLOWED_DIRS`.
+  Other files get `403`. Request bodies larger than the base64 form of a 10 MB
+  image get `413`, and the Bridge closes the connection without reading the
+  rest.
+- The Bridge pings every WebSocket client every 30 seconds. Any data received
+  from a client counts as a sign of life, and so does queued outgoing data that
+  finishes writing, because on a slow link a ping or pong can wait behind a
+  large message. A client without a sign of life for two intervals in a row is
+  terminated, so connections behind a dead network path or SSH tunnel are
+  cleaned up within about 90 seconds. Standard WebSocket clients answer pings
+  automatically.
 
 ## Claude Subscription Authentication (Explicit Opt-In)
 
