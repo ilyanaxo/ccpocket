@@ -413,6 +413,22 @@ const CLAUDE_ASSISTANT_ERRORS = {
     message: "This Claude subscription organization cannot be used by the Agent SDK.",
     errorCode: "claude_oauth_org_not_allowed",
   },
+  account_on_hold: {
+    message: "This Claude account is on hold.",
+    errorCode: "claude_account_on_hold",
+  },
+  verification_required: {
+    message: "Claude requires account verification before it can continue.",
+    errorCode: "claude_verification_required",
+  },
+  cloud_credential_error: {
+    message: "Claude could not use the cloud provider credentials on the Bridge machine (for example AWS for Amazon Bedrock).",
+    errorCode: "claude_cloud_credential_error",
+  },
+  overloaded: {
+    message: "Claude is overloaded right now. Try again shortly.",
+    errorCode: "claude_overloaded",
+  },
   billing_error: {
     message: "Claude could not continue because of an account billing error.",
     errorCode: "claude_billing_error",
