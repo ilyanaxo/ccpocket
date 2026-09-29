@@ -4,6 +4,21 @@ All notable changes to `@ccpocket/bridge` will be documented in this file.
 
 ## [Unreleased]
 
+## [1.86.1] - 2026-09-29
+
+### Fixed
+- Keep failed background Codex goal lookups out of chat while preserving the last known goal and reporting manual lookup errors.
+- Share concurrent Codex goal lookups and allow retry after failures.
+
+## [1.86.0] - 2026-09-29
+
+### Changed
+- Group Recent Sessions started in worktrees under their repository instead of showing each worktree as a separate project. Covers Claude Code worktrees (`<repo>/.claude/worktrees/<name>`), sibling git worktrees (resolved with git), and Codex sessions whose worktree was deleted (matched by the recorded repository URL). Resume still targets the worktree directory.
+
+### Fixed
+- Distinguish goal progress from goal completion in session and push notifications, avoiding premature completion alerts.
+- Keep repository-filtered recent sessions independent of listing order, preserve monorepo subdirectory groups, and refresh cached repository information.
+
 ## [1.85.2] - 2026-09-28
 
 ### Fixed

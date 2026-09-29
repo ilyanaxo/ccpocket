@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -231,6 +233,16 @@ describe("isWorktreeSlug", () => {
       ),
     ).toBe(false);
   });
+
+  it("matches Claude Code worktree directory slugs", () => {
+    // /Users/x/Workspace/vibetunnel/.claude/worktrees/feature
+    expect(
+      isWorktreeSlug(
+        "-Users-x-Workspace-vibetunnel--claude-worktrees-feature",
+        projectSlug,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("normalizeWorktreePath", () => {
@@ -267,6 +279,30 @@ describe("normalizeWorktreePath", () => {
     expect(
       normalizeWorktreePath("/Users/x/Workspace/foo-worktrees/bar/baz"),
     ).toBe("/Users/x/Workspace/foo-worktrees/bar/baz");
+  });
+
+  it("normalizes a Claude Code worktree path to the repository path", () => {
+    expect(
+      normalizeWorktreePath("/Users/x/Workspace/ccpocket/.claude/worktrees/fix-a1b2"),
+    ).toBe("/Users/x/Workspace/ccpocket");
+  });
+
+  it("normalizes Windows-style Claude Code worktree paths", () => {
+    expect(
+      normalizeWorktreePath("C:\\work\\ccpocket\\.claude\\worktrees\\fix-a1b2"),
+    ).toBe("C:\\work\\ccpocket");
+  });
+
+  it("does not match paths inside a Claude Code worktree", () => {
+    expect(
+      normalizeWorktreePath("/Users/x/Workspace/ccpocket/.claude/worktrees/fix/apps"),
+    ).toBe("/Users/x/Workspace/ccpocket/.claude/worktrees/fix/apps");
+  });
+
+  it("does not match the Claude Code worktrees root itself", () => {
+    expect(
+      normalizeWorktreePath("/Users/x/Workspace/ccpocket/.claude/worktrees"),
+    ).toBe("/Users/x/Workspace/ccpocket/.claude/worktrees");
   });
 });
 
@@ -984,6 +1020,62 @@ describe("codex sessions integration", () => {
       limit: 200,
     });
     expect(worktreeFilter.sessions.some((s) => s.sessionId === threadId)).toBe(true);
+  });
+
+  it("groups Claude Code worktree sessions under the repository and keeps resumeCwd", async () => {
+    const sessionId = "claude-code-worktree-session";
+    const mainProjectPath = "/tmp/project-a";
+    const worktreePath = "/tmp/project-a/.claude/worktrees/feature-x";
+    const claudeDir = join(
+      tempHome,
+      ".claude",
+      "projects",
+      "-tmp-project-a--claude-worktrees-feature-x",
+    );
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, `${sessionId}.jsonl`),
+      [
+        JSON.stringify({
+          type: "user",
+          message: { role: "user", content: "first prompt" },
+          cwd: worktreePath,
+          gitBranch: "claude/feature-x",
+          timestamp: "2026-02-13T12:00:00.000Z",
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          },
+          cwd: worktreePath,
+          timestamp: "2026-02-13T12:00:01.000Z",
+        }),
+        JSON.stringify({
+          type: "user",
+          message: { role: "user", content: "follow-up prompt" },
+          cwd: worktreePath,
+          timestamp: "2026-02-13T12:00:02.000Z",
+        }),
+      ].join("\n"),
+    );
+
+    const { sessions } = await getAllRecentSessions({ limit: 200 });
+    const entry = sessions.find((s) => s.sessionId === sessionId);
+    expect(entry).toBeDefined();
+    expect(entry?.provider).toBe("claude");
+    expect(entry?.projectPath).toBe(mainProjectPath);
+    expect(entry?.resumeCwd).toBe(worktreePath);
+    // Regression: after regrouping, the last-prompt fill-in must still open
+    // the worktree's JSONL, not `pathToSlug(repositoryRoot)`.
+    expect(entry?.lastPrompt).toBe("follow-up prompt");
+
+    const mainFilter = await getAllRecentSessions({
+      projectPath: mainProjectPath,
+      limit: 200,
+    });
+    expect(mainFilter.sessions.some((s) => s.sessionId === sessionId)).toBe(true);
   });
 
   it("returns only codex sessions when provider=codex", async () => {
@@ -2731,5 +2823,264 @@ describe("shared decodeJsonStringPrefix", () => {
     // The helper moved to jsonl-partial.ts; the Codex lister still uses it.
     expect(decodeJsonStringPrefix("line one\\nline two\\u00")).toBe("line one\nline two");
     expect(decodeJsonStringPrefix("emoji \\ud83d")).toBe("emoji ");
+  });
+});
+
+describe("recent sessions grouped by git repository", () => {
+  const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
+  let tempHome: string;
+  let work: string;
+  let repo: string;
+
+  const git = (cwd: string, args: string[]): void => {
+    execFileSync("git", args, { cwd, stdio: "ignore" });
+  };
+
+  const writeCodexSession = (
+    threadId: string,
+    cwd: string,
+    repositoryUrl?: string,
+  ): void => {
+    const codexDir = join(tempHome, ".codex", "sessions", "2026", "02", "13");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      join(codexDir, `rollout-2026-02-13T12-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T12:00:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: threadId,
+            cwd,
+            ...(repositoryUrl ? { git: { repository_url: repositoryUrl } } : {}),
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T12:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: `prompt in ${cwd}` },
+        }),
+      ].join("\n"),
+    );
+  };
+
+  const writeClaudeSession = (sessionId: string, cwd: string): void => {
+    const dir = join(tempHome, ".claude", "projects", pathToSlug(cwd));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${sessionId}.jsonl`),
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: `prompt in ${cwd}` },
+        cwd,
+        timestamp: "2026-02-13T12:00:00.000Z",
+      }),
+    );
+  };
+
+  /** An omp session file under `~/.omp/agent/sessions/<bucket>/` (§6.1 layout). */
+  const writeOmpSession = (sessionId: string, cwd: string): void => {
+    const bucket = join(tempHome, ".omp", "agent", "sessions", pathToSlug(cwd));
+    mkdirSync(bucket, { recursive: true });
+    writeFileSync(
+      join(bucket, `2026-02-13T12-00-00-000Z_${sessionId}.jsonl`),
+      [
+        JSON.stringify({ type: "title", v: 1, title: "", pad: " ".repeat(200) }),
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: sessionId,
+          timestamp: "2026-02-13T12:00:00.000Z",
+          cwd,
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "u1",
+          parentId: null,
+          timestamp: "2026-02-13T12:00:01.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: `prompt in ${cwd}` }],
+            attribution: "user",
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+  };
+
+  beforeEach(() => {
+    tempHome = realpathSync(mkdtempSync(join(tmpdir(), "ccpocket-test-git-home-")));
+    work = join(tempHome, "work");
+    repo = join(work, "app");
+    mkdirSync(repo, { recursive: true });
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "README.md"), "hello\n");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-q", "-m", "init"]);
+    git(repo, ["remote", "add", "origin", "git@github.com:owner/app.git"]);
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    clearOmpSessionCaches();
+  });
+
+  afterEach(() => {
+    process.env.HOME = oldHome;
+    process.env.USERPROFILE = oldUserProfile;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it("groups sessions from a sibling git worktree under the main repository", async () => {
+    const worktree = join(work, "app-feature-1");
+    git(repo, ["worktree", "add", "-q", "-b", "feature-1", worktree]);
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000a1", worktree);
+    writeClaudeSession("claude-sibling-worktree", worktree);
+
+    const { sessions } = await getAllRecentSessions({ limit: 50 });
+    for (const id of ["019c56c0-d4d8-7b22-9e3c-2006640000a1", "claude-sibling-worktree"]) {
+      const entry = sessions.find((s) => s.sessionId === id);
+      expect(entry?.projectPath).toBe(repo);
+      expect(entry?.resumeCwd).toBe(worktree);
+    }
+
+    const filtered = await getAllRecentSessions({ projectPath: repo, limit: 50 });
+    expect(filtered.sessions.map((s) => s.sessionId).sort()).toEqual([
+      "019c56c0-d4d8-7b22-9e3c-2006640000a1",
+      "claude-sibling-worktree",
+    ]);
+  });
+
+  it("includes sibling worktrees on the first filtered request and excludes unrelated projects", async () => {
+    const worktree = join(work, "feature-checkout");
+    git(repo, ["worktree", "add", "-q", "-b", "feature", worktree]);
+    writeClaudeSession("claude-cold-worktree", worktree);
+    writeClaudeSession("claude-unrelated", join(work, "unrelated"));
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000d1", worktree);
+
+    const filtered = await getAllRecentSessions({ projectPath: repo, limit: 50 });
+    expect(filtered.sessions.map((s) => s.sessionId).sort()).toEqual([
+      "019c56c0-d4d8-7b22-9e3c-2006640000d1",
+      "claude-cold-worktree",
+    ]);
+    expect(filtered.sessions.every((s) => s.resumeCwd === worktree)).toBe(true);
+  });
+
+  it("keeps existing monorepo subdirectories separate even when Codex records the repository URL", async () => {
+    const sub = join(repo, "packages", "mobile");
+    mkdirSync(sub, { recursive: true });
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000e1", repo);
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000e2", sub, "https://github.com/owner/app.git");
+    writeClaudeSession("claude-package", sub);
+
+    const filtered = await getAllRecentSessions({ projectPath: sub, limit: 50 });
+    expect(filtered.sessions.map((s) => s.sessionId).sort()).toEqual([
+      "019c56c0-d4d8-7b22-9e3c-2006640000e2",
+      "claude-package",
+    ]);
+    expect(filtered.sessions.every((s) => s.projectPath === sub && !s.resumeCwd)).toBe(true);
+  });
+
+  it("groups Codex sessions from deleted worktrees by repository URL", async () => {
+    const deleted = join(work, "app-review-42");
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000b1", repo);
+    writeCodexSession(
+      "019c56c0-d4d8-7b22-9e3c-2006640000b2",
+      deleted,
+      "https://github.com/owner/app.git",
+    );
+
+    const { sessions } = await getAllRecentSessions({ limit: 50 });
+    const entry = sessions.find(
+      (s) => s.sessionId === "019c56c0-d4d8-7b22-9e3c-2006640000b2",
+    );
+    expect(entry?.projectPath).toBe(repo);
+    expect(entry?.resumeCwd).toBe(deleted);
+
+    const filtered = await getAllRecentSessions({ projectPath: repo, limit: 50 });
+    expect(filtered.sessions.map((s) => s.sessionId)).toContain(
+      "019c56c0-d4d8-7b22-9e3c-2006640000b2",
+    );
+  });
+
+  it("keeps separate repositories that only share a name prefix", async () => {
+    const other = join(work, "app-stats");
+    mkdirSync(other);
+    git(other, ["init", "-q"]);
+    git(other, ["remote", "add", "origin", "git@github.com:owner/app-stats.git"]);
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000c1", repo);
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000c2", other);
+
+    const { sessions } = await getAllRecentSessions({ limit: 50 });
+    const entry = sessions.find(
+      (s) => s.sessionId === "019c56c0-d4d8-7b22-9e3c-2006640000c2",
+    );
+    expect(entry?.projectPath).toBe(other);
+    expect(entry?.resumeCwd).toBeUndefined();
+  });
+
+  it("groups omp sessions from a sibling git worktree under the main repository", async () => {
+    const worktree = join(work, "app-omp-1");
+    git(repo, ["worktree", "add", "-q", "-b", "omp-1", worktree]);
+    writeOmpSession("omp-sibling-worktree", worktree);
+    writeOmpSession("omp-unrelated", join(work, "unrelated"));
+
+    const { sessions } = await getAllRecentSessions({ limit: 50 });
+    const entry = sessions.find((s) => s.sessionId === "omp-sibling-worktree");
+    expect(entry).toMatchObject({ provider: "omp", projectPath: repo, resumeCwd: worktree });
+
+    // The first filtered request already sees the sibling bucket, for every
+    // provider selection the app sends (all, omp-only, several).
+    for (const providers of [undefined, ["omp" as const], ["claude" as const, "omp" as const]]) {
+      const filtered = await getAllRecentSessions({ projectPath: repo, providers, limit: 50 });
+      expect(filtered.sessions.map((s) => `${s.provider}:${s.sessionId}`)).toEqual([
+        "omp:omp-sibling-worktree",
+      ]);
+    }
+  });
+
+  it("filters omp sessions by repository on a cold cache next to Claude and Codex", async () => {
+    const worktree = join(work, "omp-checkout");
+    git(repo, ["worktree", "add", "-q", "-b", "omp-checkout", worktree]);
+    writeOmpSession("omp-cold-worktree", worktree);
+    writeOmpSession("omp-main", repo);
+    writeClaudeSession("claude-cold-worktree", worktree);
+    writeCodexSession("019c56c0-d4d8-7b22-9e3c-2006640000f1", worktree);
+
+    const filtered = await getAllRecentSessions({ projectPath: repo, limit: 50 });
+    expect(filtered.sessions.map((s) => `${s.provider}:${s.sessionId}`).sort()).toEqual([
+      "claude:claude-cold-worktree",
+      "codex:019c56c0-d4d8-7b22-9e3c-2006640000f1",
+      "omp:omp-cold-worktree",
+      "omp:omp-main",
+    ]);
+    expect(filtered.sessions.find((s) => s.sessionId === "omp-main")?.resumeCwd).toBeUndefined();
+    expect(filtered.sessions.find((s) => s.sessionId === "omp-cold-worktree")?.resumeCwd).toBe(
+      worktree,
+    );
+  });
+
+  it("keeps omp sessions in an existing monorepo subdirectory in their own group", async () => {
+    const sub = join(repo, "packages", "mobile");
+    mkdirSync(sub, { recursive: true });
+    writeOmpSession("omp-root", repo);
+    writeOmpSession("omp-package", sub);
+
+    const filtered = await getAllRecentSessions({ projectPath: sub, provider: "omp", limit: 50 });
+    expect(filtered.sessions.map((s) => s.sessionId)).toEqual(["omp-package"]);
+    expect(filtered.sessions[0]).toMatchObject({ projectPath: sub });
+    expect(filtered.sessions[0].resumeCwd).toBeUndefined();
+  });
+
+  it("groups omp sessions in a Claude Code worktree path under the repository", async () => {
+    // Path pattern only: `<repo>/.claude/worktrees/<name>` need not exist.
+    const worktree = join(repo, ".claude", "worktrees", "omp-task");
+    writeOmpSession("omp-claude-worktree", worktree);
+
+    const filtered = await getAllRecentSessions({ projectPath: repo, provider: "omp", limit: 50 });
+    expect(filtered.sessions).toEqual([
+      expect.objectContaining({ sessionId: "omp-claude-worktree", projectPath: repo, resumeCwd: worktree }),
+    ]);
   });
 });

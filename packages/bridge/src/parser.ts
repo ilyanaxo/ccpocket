@@ -210,7 +210,7 @@ export type ClientMessage =
       model?: string;
       thinkingLevel?: OmpThinkingLevel;
     }
-  | { type: "get_goal"; sessionId: string }
+  | { type: "get_goal"; sessionId: string; background?: boolean }
   | {
       type: "set_goal";
       sessionId: string;
@@ -1543,6 +1543,9 @@ export function parseClientMessage(data: string): ClientMessage | null {
           return null;
         break;
       case "get_goal":
+        if (msg.background !== undefined && typeof msg.background !== "boolean") return null;
+        if (typeof msg.sessionId !== "string") return null;
+        break;
       case "clear_goal":
         if (typeof msg.sessionId !== "string") return null;
         break;

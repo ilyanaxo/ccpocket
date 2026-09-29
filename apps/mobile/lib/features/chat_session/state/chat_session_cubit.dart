@@ -232,7 +232,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
               (message) =>
                   message is SystemMessage && message.subtype == 'init',
             )) {
-      requestGoal();
+      requestGoal(background: true);
     }
 
     // Request in-memory history from the bridge server
@@ -319,7 +319,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       }
     }
     if (isCodex && msg is SystemMessage && msg.subtype == 'init') {
-      requestGoal();
+      requestGoal(background: true);
     }
     if (msg is SystemMessage && msg.subtype == 'omp_settings') {
       // The Bridge confirmed the applied settings.
@@ -1586,9 +1586,9 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     }
   }
 
-  void requestGoal() {
+  void requestGoal({bool background = false}) {
     if (!isCodex) return;
-    _bridge.send(ClientMessage.getGoal(sessionId));
+    _bridge.send(ClientMessage.getGoal(sessionId, background: background));
   }
 
   void setGoalObjective(String objective) {

@@ -208,7 +208,7 @@ describe("listOmpRecentSessions (§6.1)", () => {
     expect(sessions.map((session) => session.sessionId)).toEqual(["0123456789abcdef"]);
   });
 
-  it("filters by the header cwd, folding worktrees and ignoring colliding bucket names", async () => {
+  it("takes projectPath from the header cwd, folding worktrees and ignoring colliding bucket names", async () => {
     await writeSessionFile("-work-proj-worktrees-feature", "2026-01-01T00-00-00-000Z_wt.jsonl", [
       titleSlot(""),
       header("wt", "/work/proj-worktrees/feature"),
@@ -226,13 +226,17 @@ describe("listOmpRecentSessions (§6.1)", () => {
       userLine("dash project"),
     ]);
 
-    const worktree = await listOmpRecentSessions({ env, projectPath: "/work/proj" });
-    expect(worktree).toEqual([
-      expect.objectContaining({ sessionId: "wt", projectPath: "/work/proj", resumeCwd: "/work/proj-worktrees/feature" }),
-    ]);
-    expect((await listOmpRecentSessions({ env, projectPath: "/a/b" })).map((s) => s.sessionId)).toEqual(["slash"]);
-    expect((await listOmpRecentSessions({ env, projectPath: "/a-b" })).map((s) => s.sessionId)).toEqual(["dash"]);
-    expect(await listOmpRecentSessions({ env, projectPath: "/elsewhere" })).toEqual([]);
+    // The project filter itself runs in getAllRecentSessions after repository
+    // grouping (sessions-index.test.ts); every bucket is listed here.
+    const sessions = await listOmpRecentSessions({ env });
+    const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+    expect(byId.get("wt")).toEqual(
+      expect.objectContaining({ projectPath: "/work/proj", resumeCwd: "/work/proj-worktrees/feature" }),
+    );
+    expect(byId.get("slash")?.projectPath).toBe("/a/b");
+    expect(byId.get("dash")?.projectPath).toBe("/a-b");
+    expect(byId.get("slash")?.resumeCwd).toBeUndefined();
+    expect(byId.get("dash")?.resumeCwd).toBeUndefined();
   });
 
   it("recovers a first prompt longer than the head window from the cut line", async () => {

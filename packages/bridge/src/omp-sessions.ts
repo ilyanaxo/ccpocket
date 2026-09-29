@@ -61,7 +61,6 @@ interface EnvOption {
 /** Headers never change after a file is created (a rename rewrites line 1 only). */
 const headerCache = new Map<string, OmpSessionHeader>();
 const summaryCache = new Map<string, { mtimeMs: number; size: number; summary: OmpFileSummary }>();
-const bucketCwdCache = new Map<string, { mtimeMs: number; cwds: Set<string> }>();
 /** sessionId → session file, filled by scans. */
 const sessionFileIndex = new Map<string, string>();
 
@@ -69,7 +68,6 @@ const sessionFileIndex = new Map<string, string>();
 export function clearOmpSessionCaches(): void {
   headerCache.clear();
   summaryCache.clear();
-  bucketCwdCache.clear();
   sessionFileIndex.clear();
 }
 
@@ -357,50 +355,22 @@ async function listSessionFiles(bucket: string): Promise<string[]> {
 }
 
 /**
- * The normalized cwds recorded in a bucket's files, cached by the bucket's
- * mtime. Bucket names encode the cwd lossily (`/a-b` and `/a/b` collide), so
- * the filter uses the headers, never the directory name.
+ * Recent omp sessions from omp's own session store (docs/omp-integration.md
+ * §6.1). Every bucket is listed: `getAllRecentSessions` filters by project
+ * after grouping worktree sessions under their git repository, which a bucket
+ * name or header cwd alone cannot tell (§15.7).
  */
-async function bucketProjectPaths(bucket: string, files: string[]): Promise<Set<string>> {
-  let mtimeMs = -1;
-  try {
-    mtimeMs = (await stat(bucket)).mtimeMs;
-  } catch {
-    return new Set();
-  }
-  const cached = bucketCwdCache.get(bucket);
-  if (cached && cached.mtimeMs === mtimeMs) return cached.cwds;
-  const headers = await parallelMap(files, PARALLEL_FILE_READ_LIMIT, readOmpSessionHeader);
-  const cwds = new Set(
-    headers.flatMap((header) => (header?.cwd ? [projectPathOf(header.cwd)] : [])),
-  );
-  bucketCwdCache.set(bucket, { mtimeMs, cwds });
-  return cwds;
-}
-
-function projectPathOf(cwd: string): string {
-  return normalizeWorktreePath(resolve(cwd));
-}
-
-/** Recent omp sessions from omp's own session store (docs/omp-integration.md §6.1). */
 export async function listOmpRecentSessions(
-  options: { projectPath?: string; env?: NodeJS.ProcessEnv } = {},
+  options: EnvOption = {},
 ): Promise<OmpRecentSession[]> {
   const env = options.env ?? process.env;
-  const wanted = options.projectPath ? resolve(options.projectPath) : undefined;
   const buckets = await listBuckets(env);
   const files: string[] = [];
   for (const bucket of buckets) {
-    const bucketFiles = await listSessionFiles(bucket);
-    if (bucketFiles.length === 0) continue;
-    if (wanted && !(await bucketProjectPaths(bucket, bucketFiles)).has(wanted)) continue;
-    files.push(...bucketFiles);
+    files.push(...(await listSessionFiles(bucket)));
   }
 
   const summaries = await parallelMap(files, PARALLEL_FILE_READ_LIMIT, async (file) => {
-    const header = await readOmpSessionHeader(file);
-    if (!header) return null;
-    if (wanted && projectPathOf(header.cwd) !== wanted) return null;
     const summary = await cachedSummary(file);
     if (!summary) return null;
     sessionFileIndex.set(summary.header.id, file);
