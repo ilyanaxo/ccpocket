@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:ccpocket/features/session_list/state/session_list_cubit.dart';
 import 'package:ccpocket/features/codex_session/codex_session_screen.dart';
+import 'package:ccpocket/features/omp_session/omp_session_screen.dart';
 import 'package:ccpocket/features/chat_session/state/chat_session_cubit.dart';
 import 'package:ccpocket/features/chat_session/widgets/chat_message_list.dart';
 import 'package:ccpocket/features/session_list/session_list_screen.dart';
@@ -10,6 +11,7 @@ import 'package:ccpocket/features/session_list/workspace_shell_screen.dart';
 import 'package:ccpocket/features/settings/state/settings_cubit.dart';
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/models/protocol_version.dart';
 import 'package:ccpocket/router/app_router.dart';
 import 'package:ccpocket/router/session_stack_navigation.dart';
 import 'package:ccpocket/router/session_route_observer.dart';
@@ -57,6 +59,14 @@ class _MockBridgeService extends BridgeService {
   final String? _lastUrl;
   final sentMessages = <ClientMessage>[];
   bool disconnectCalled = false;
+  OmpSupport fakeOmpSupport = OmpSupport.unknown;
+  ProtocolCompatibility? fakeProtocolCompatibility;
+
+  @override
+  OmpSupport get ompSupport => fakeOmpSupport;
+
+  @override
+  ProtocolCompatibility? get protocolCompatibility => fakeProtocolCompatibility;
 
   _MockBridgeService({
     BridgeConnectionState initialState = BridgeConnectionState.connected,
@@ -155,6 +165,7 @@ class _MockBridgeService extends BridgeService {
   void switchFilter({
     String? projectPath,
     String? provider,
+    List<String>? providers,
     bool? namedOnly,
     String? searchQuery,
     int pageSize = 20,
@@ -691,6 +702,88 @@ void main() {
       findsNothing,
     );
   });
+
+  for (final (code, message, shown) in const [
+    (
+      'omp_session_busy',
+      'The omp session file is still in use by another process.',
+      'omp Session Busy\n'
+          'The omp session file is still in use by another process.\n'
+          'Wait until the previous omp process has exited, then try again',
+    ),
+    // The Bridge message already states the hint.
+    (
+      'omp_session_already_open',
+      'Stop the running session before resuming it with other settings.',
+      'omp Session Already Open\n'
+          'Stop the running session before resuming it with other settings.',
+    ),
+  ]) {
+    testWidgets('shows the omp resume failure $code from the recent list', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _MockBridgeService()
+        ..fakeOmpSupport = OmpSupport.supported;
+      final settingsCubit = await _createSettingsCubit(bridge);
+      final draftService = DraftService(await SharedPreferences.getInstance());
+      final revenueCatService = _FakeRevenueCatService();
+      final supportBannerService = await _createSupportBannerService();
+      const ompRecent = RecentSession(
+        sessionId: 'one',
+        provider: 'omp',
+        firstPrompt: 'Prompt one',
+        created: '2025-01-01T00:00:00Z',
+        modified: '2025-01-01T00:00:00Z',
+        gitBranch: 'main',
+        projectPath: '/Users/demo/project-one',
+        isSidechain: false,
+      );
+
+      await tester.pumpWidget(
+        _buildWorkspaceApp(
+          bridge: bridge,
+          settingsCubit: settingsCubit,
+          draftService: draftService,
+          revenueCatService: revenueCatService,
+          supportBannerService: supportBannerService,
+          debugRecentSessions: const [ompRecent],
+          sessionListOnly: true,
+        ),
+      );
+      bridge.emitRecentSessions(const [ompRecent]);
+      await _pumpUi(tester);
+
+      await tester.tap(find.byKey(const ValueKey('recent_session_one')));
+      await _pumpUi(tester);
+      final sent =
+          jsonDecode(bridge.sentMessages.last.toJson()) as Map<String, dynamic>;
+      expect(sent['provider'], 'omp');
+      final resumeRequestId = sent['resumeRequestId'] as String;
+
+      // What the Bridge's failResumeOperation sends.
+      bridge.emitMessage(
+        SystemMessage(
+          subtype: 'session_resume_failed',
+          provider: 'omp',
+          sourceSessionId: 'one',
+          resumeRequestId: resumeRequestId,
+        ),
+      );
+      bridge.emitMessage(
+        ErrorMessage(
+          message: message,
+          errorCode: code,
+          sessionId: 'one',
+          requestId: resumeRequestId,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text(shown), findsOneWidget);
+    });
+  }
 
   testWidgets(
     'matching resume creation selects session and clears correlation',
@@ -2543,6 +2636,116 @@ void main() {
       expect(NotificationService.instance.activeSessionId, isNull);
     },
   );
+
+  testWidgets('omp selection opens the omp screen and registers omp', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _MockBridgeService();
+    final shellKey = GlobalKey<WorkspaceShellScreenState>();
+
+    await tester.pumpWidget(
+      _buildWorkspaceApp(
+        bridge: bridge,
+        settingsCubit: await _createSettingsCubit(bridge),
+        draftService: DraftService(await SharedPreferences.getInstance()),
+        revenueCatService: _FakeRevenueCatService(),
+        supportBannerService: await _createSupportBannerService(),
+        shellKey: shellKey,
+      ),
+    );
+    await _pumpUi(tester);
+
+    shellKey.currentState!.selectSession(
+      const WorkspaceSessionSelection(
+        sessionId: 'omp-live',
+        provider: Provider.omp,
+        projectPath: '/tmp/workspace',
+        permissionMode: 'default',
+      ),
+    );
+    await _pumpUi(tester);
+    bridge.emitMessage(const StatusMessage(status: ProcessStatus.idle));
+    await _pumpUi(tester);
+
+    expect(find.byType(OmpSessionScreen), findsOneWidget);
+    expect(find.byType(CodexSessionScreen), findsNothing);
+    expect(
+      tester
+          .element(find.byType(ChatMessageList))
+          .read<ChatSessionCubit>()
+          .isOmp,
+      isTrue,
+    );
+    final l = AppLocalizations.of(
+      tester.element(find.byType(OmpSessionScreen)),
+    );
+    expect(find.text(l.ompMessagePlaceholder), findsOneWidget);
+    // The shell reports the session as omp (not Claude) for notifications.
+    expect(
+      NotificationService.instance.isActiveSession(
+        sessionId: 'omp-live',
+        provider: 'omp',
+      ),
+      isTrue,
+    );
+  });
+
+  testWidgets('omp start on a Bridge without omp opens no pending page', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    // Connected, and this connection's session_list came without
+    // provider_omp_v1: BridgeService.send() rejects an omp start at once.
+    final bridge = _MockBridgeService()
+      ..fakeOmpSupport = OmpSupport.unsupported
+      ..fakeProtocolCompatibility = ProtocolCompatibility.forBridge();
+    const ompRecent = RecentSession(
+      sessionId: 'omp-recent',
+      provider: 'omp',
+      firstPrompt: 'Prompt omp-recent',
+      created: '2025-01-01T00:00:00Z',
+      modified: '2025-01-01T00:00:00Z',
+      gitBranch: 'main',
+      projectPath: '/Users/demo/project-omp',
+      isSidechain: false,
+    );
+
+    await tester.pumpWidget(
+      _buildWorkspaceApp(
+        bridge: bridge,
+        settingsCubit: await _createSettingsCubit(bridge),
+        draftService: DraftService(await SharedPreferences.getInstance()),
+        revenueCatService: _FakeRevenueCatService(),
+        supportBannerService: await _createSupportBannerService(),
+        debugRecentSessions: const [ompRecent],
+        sessionListOnly: true,
+      ),
+    );
+    bridge.emitRecentSessions(const [ompRecent]);
+    await _pumpUi(tester);
+
+    final l = AppLocalizations.of(tester.element(find.byType(Scaffold).first));
+    await tester.longPress(
+      find.byKey(const ValueKey('recent_session_omp-recent')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(l.startNewWithSameSettings));
+    await tester.pumpAndSettle();
+
+    expect(find.text(l.ompStartNeedsBridgeUpdate), findsOneWidget);
+    expect(
+      bridge.sentMessages.where(
+        (message) =>
+            (jsonDecode(message.toJson()) as Map<String, dynamic>)['type'] ==
+            'start',
+      ),
+      isEmpty,
+    );
+    expect(find.byType(OmpSessionScreen), findsNothing);
+  });
 
   testWidgets('remote stopped notification clears selected workspace session', (
     tester,

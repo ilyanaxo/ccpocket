@@ -1,5 +1,6 @@
 import 'package:ccpocket/features/settings/state/settings_cubit.dart';
 import 'package:ccpocket/models/code_font_family.dart';
+import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/models/new_session_tab.dart';
 import 'package:ccpocket/theme/code_text_style.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -156,34 +157,150 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final cubit = SettingsCubit(prefs);
 
-      expect(
-        enabledAgentsModeFromTabs(cubit.state.newSessionTabs),
-        EnabledAgentsMode.both,
-      );
+      expect(enabledProvidersFromTabs(cubit.state.newSessionTabs), {
+        Provider.codex,
+        Provider.claude,
+        Provider.omp,
+      });
 
-      cubit.setEnabledAgentsMode(EnabledAgentsMode.codex);
+      cubit.setAgentEnabled(Provider.claude, false);
+      cubit.setAgentEnabled(Provider.omp, false);
       expect(cubit.state.newSessionTabs, [NewSessionTab.codex]);
-      expect(
-        enabledAgentsModeFromTabs(cubit.state.newSessionTabs),
-        EnabledAgentsMode.codex,
-      );
 
       await cubit.close();
 
       final restored = SettingsCubit(prefs);
       expect(restored.state.newSessionTabs, [NewSessionTab.codex]);
-      expect(
-        enabledAgentsModeFromTabs(restored.state.newSessionTabs),
-        EnabledAgentsMode.codex,
-      );
 
-      restored.setEnabledAgentsMode(EnabledAgentsMode.both);
-      expect(restored.state.newSessionTabs.toSet(), {
+      restored.setAgentEnabled(Provider.claude, true);
+      expect(restored.state.newSessionTabs, [
         NewSessionTab.codex,
         NewSessionTab.claude,
-      });
+      ]);
 
       await restored.close();
+    });
+
+    group('omp agent', () {
+      const tabsKey = 'settings_new_session_tabs';
+      const migratedKey = 'settings_new_session_tabs_omp_migrated_v1';
+
+      test('fresh install enables omp and marks the migration done', () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final cubit = SettingsCubit(prefs);
+
+        expect(cubit.state.newSessionTabs, [
+          NewSessionTab.codex,
+          NewSessionTab.claude,
+          NewSessionTab.omp,
+        ]);
+        expect(prefs.getBool(migratedKey), isTrue);
+        expect(prefs.getString(tabsKey), isNull);
+
+        await cubit.close();
+      });
+
+      test('a stored tab list without omp gets omp appended once', () async {
+        SharedPreferences.setMockInitialValues({
+          tabsKey: tabsToJson(const [
+            NewSessionTab.claude,
+            NewSessionTab.codex,
+          ]),
+        });
+        final prefs = await SharedPreferences.getInstance();
+        final cubit = SettingsCubit(prefs);
+
+        const migrated = [
+          NewSessionTab.claude,
+          NewSessionTab.codex,
+          NewSessionTab.omp,
+        ];
+        expect(cubit.state.newSessionTabs, migrated);
+        expect(tabsFromJson(prefs.getString(tabsKey)!), migrated);
+        expect(prefs.getBool(migratedKey), isTrue);
+
+        await cubit.close();
+
+        final restored = SettingsCubit(prefs);
+        expect(restored.state.newSessionTabs, migrated);
+        await restored.close();
+      });
+
+      test('omp disabled after the migration stays disabled', () async {
+        SharedPreferences.setMockInitialValues({
+          tabsKey: tabsToJson(const [NewSessionTab.codex]),
+        });
+        final prefs = await SharedPreferences.getInstance();
+        final cubit = SettingsCubit(prefs);
+        expect(cubit.state.newSessionTabs, [
+          NewSessionTab.codex,
+          NewSessionTab.omp,
+        ]);
+
+        cubit.setAgentEnabled(Provider.omp, false);
+        expect(cubit.state.newSessionTabs, [NewSessionTab.codex]);
+        await cubit.close();
+
+        final restored = SettingsCubit(prefs);
+        expect(restored.state.newSessionTabs, [NewSessionTab.codex]);
+        await restored.close();
+      });
+
+      test('a stored list that already has omp is kept as is', () async {
+        SharedPreferences.setMockInitialValues({
+          tabsKey: tabsToJson(const [NewSessionTab.omp, NewSessionTab.codex]),
+        });
+        final prefs = await SharedPreferences.getInstance();
+        final cubit = SettingsCubit(prefs);
+
+        expect(cubit.state.newSessionTabs, [
+          NewSessionTab.omp,
+          NewSessionTab.codex,
+        ]);
+        expect(prefs.getBool(migratedKey), isTrue);
+        await cubit.close();
+      });
+
+      test('setAgentEnabled toggles agents but keeps the last one', () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final cubit = SettingsCubit(prefs);
+
+        cubit.setAgentEnabled(Provider.codex, false);
+        cubit.setAgentEnabled(Provider.claude, false);
+        expect(cubit.state.newSessionTabs, [NewSessionTab.omp]);
+
+        cubit.setAgentEnabled(Provider.omp, false);
+        expect(cubit.state.newSessionTabs, [NewSessionTab.omp]);
+
+        cubit.setAgentEnabled(Provider.claude, true);
+        expect(cubit.state.newSessionTabs, [
+          NewSessionTab.omp,
+          NewSessionTab.claude,
+        ]);
+        expect(tabsFromJson(prefs.getString(tabsKey)!), [
+          NewSessionTab.omp,
+          NewSessionTab.claude,
+        ]);
+
+        await cubit.close();
+      });
+
+      test('omp auto rename defaults on and persists', () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final cubit = SettingsCubit(prefs);
+        expect(cubit.state.autoRenameOmpSessions, isTrue);
+
+        cubit.setAutoRenameOmpSessions(false);
+        expect(cubit.state.autoRenameOmpSessions, isFalse);
+        await cubit.close();
+
+        final restored = SettingsCubit(prefs);
+        expect(restored.state.autoRenameOmpSessions, isFalse);
+        await restored.close();
+      });
     });
 
     test('remote git status badge defaults off and persists', () async {

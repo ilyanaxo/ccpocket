@@ -8,6 +8,14 @@ import {
 } from "./codex-app-server-config.js";
 import { parseBridgePort } from "./bridge-port.js";
 import { BRIDGE_STABLE_PACKAGE_SPEC } from "./distribution.js";
+import { ompServiceEnvironment } from "./omp-env.js";
+
+function escapePlistString(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 const PLIST_LABEL = "com.ccpocket.bridge";
 
@@ -140,6 +148,14 @@ export function setupLaunchd(opts: SetupOptions): void {
     envBlock += `
         <key>BRIDGE_CODEX_ASSIST_REASONING_EFFORT</key>
         <string>${codexAssistReasoningEffort}</string>`;
+  }
+
+  // omp: the service must resolve the same binary and session store as the
+  // user's shell, or the Bridge lists a different store.
+  for (const [name, value] of ompServiceEnvironment()) {
+    envBlock += `
+        <key>${name}</key>
+        <string>${escapePlistString(value)}</string>`;
   }
 
   if (codexAppServerMode) {

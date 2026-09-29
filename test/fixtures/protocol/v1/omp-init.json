@@ -1,0 +1,11 @@
+{
+  "type": "system",
+  "subtype": "init",
+  "sessionId": "3f9c2a1b",
+  "provider": "omp",
+  "model": "baseten/zai-org/GLM-5.3-Fast",
+  "thinkingLevel": "high",
+  "thinkingLevels": ["off", "high", "max"],
+  "executionMode": "acceptEdits",
+  "permissionMode": "acceptEdits"
+}

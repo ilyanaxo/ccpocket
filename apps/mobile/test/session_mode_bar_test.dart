@@ -19,6 +19,10 @@ class _MockBridgeService extends BridgeService {
       StreamController<(ServerMessage, String?)>.broadcast();
   final sentMessages = <ClientMessage>[];
   List<String> availableCodexModels = const [];
+  List<OmpModelInfo> availableOmpModels = const [];
+
+  @override
+  List<OmpModelInfo> get ompModels => availableOmpModels;
   Map<String, List<String>> availableCodexReasoningEfforts = const {};
   Map<String, List<String>> availableCodexServiceTiers = const {};
 
@@ -641,5 +645,221 @@ void main() {
 
     expect(find.text('Sandbox'), findsNothing);
     expect(find.text('Default'), findsOneWidget);
+  });
+
+  group('omp', () {
+    const ompSessionId = 'omp-session';
+    const opus = OmpModelInfo(
+      selector: 'anthropic/claude-opus-4-7',
+      provider: 'anthropic',
+      name: 'Claude Opus 4.7',
+      thinkingLevels: ['off', 'low', 'high', 'max'],
+      input: ['text', 'image'],
+    );
+    const glm = OmpModelInfo(
+      selector: 'baseten/zai-org/GLM-5.3-Fast',
+      provider: 'baseten',
+      name: 'GLM 5.3 Fast',
+      thinkingLevels: ['off'],
+      input: ['text'],
+    );
+    late ChatSessionCubit ompCubit;
+
+    setUp(() async {
+      bridge.availableOmpModels = const [opus, glm];
+      ompCubit = ChatSessionCubit(
+        sessionId: ompSessionId,
+        provider: Provider.omp,
+        bridge: bridge,
+        streamingCubit: streamingCubit,
+      );
+      await Future<void>.microtask(() {});
+      bridge.emitMessage(
+        const SystemMessage(
+          subtype: 'init',
+          provider: 'omp',
+          model: 'anthropic/claude-opus-4-7',
+          thinkingLevel: 'high',
+          thinkingLevels: ['off', 'low', 'high', 'max'],
+          executionMode: 'default',
+          permissionMode: 'default',
+        ),
+        sessionId: ompSessionId,
+      );
+      await Future<void>.microtask(() {});
+    });
+
+    tearDown(() => ompCubit.close());
+
+    testWidgets('shows model chip and approval chip without plan or sandbox', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.byKey(const ValueKey('omp_model_chip')), findsOneWidget);
+      expect(find.text('Claude Opus 4.7 · High'), findsOneWidget);
+      expect(find.byKey(const ValueKey('omp_approval_chip')), findsOneWidget);
+      expect(find.text('Ask'), findsOneWidget);
+      expect(find.byType(PlanModeChip), findsNothing);
+      expect(find.byType(SandboxModeChip), findsNothing);
+      expect(find.byType(PermissionModeChip), findsNothing);
+      expect(find.byType(CodexModelChip), findsNothing);
+    });
+
+    testWidgets('settings sheet groups models and changes the thinking level', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byKey(const ValueKey('omp_model_chip')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('omp_settings_sheet')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('omp_model_group_anthropic')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('omp_model_group_baseten')),
+        findsOneWidget,
+      );
+      // A running session always has a selector; no "omp default" row.
+      expect(
+        find.byKey(const ValueKey('omp_model_option_default')),
+        findsNothing,
+      );
+      for (final level in const ['off', 'low', 'high', 'max']) {
+        expect(
+          find.byKey(ValueKey('omp_thinking_level_$level')),
+          findsOneWidget,
+        );
+      }
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(find.text(l.reasoningEffortNoneDesc), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('omp_thinking_level_max')));
+      await tester.pumpAndSettle();
+
+      final sent = _decode(bridge.sentMessages.last);
+      expect(sent, {
+        'type': 'set_omp_model',
+        'sessionId': ompSessionId,
+        'thinkingLevel': 'max',
+      });
+      expect(ompCubit.state.ompThinkingLevel, 'max');
+    });
+
+    testWidgets('the selected rows of the settings sheet change nothing', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byKey(const ValueKey('omp_model_chip')));
+      await tester.pumpAndSettle();
+      final sentBefore = bridge.sentMessages.length;
+      await tester.tap(find.byKey(const ValueKey('omp_thinking_level_high')));
+      final opusOption = find.byKey(
+        const ValueKey('omp_model_option_anthropic/claude-opus-4-7'),
+      );
+      await tester.ensureVisible(opusOption);
+      await tester.pumpAndSettle();
+      await tester.tap(opusOption);
+      await tester.pumpAndSettle();
+
+      expect(bridge.sentMessages, hasLength(sentBefore));
+      expect(find.byKey(const ValueKey('omp_settings_sheet')), findsOneWidget);
+    });
+
+    testWidgets('choosing a model shows that model\'s thinking levels', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byKey(const ValueKey('omp_model_chip')));
+      await tester.pumpAndSettle();
+      final glmOption = find.byKey(
+        const ValueKey('omp_model_option_baseten/zai-org/GLM-5.3-Fast'),
+      );
+      await tester.ensureVisible(glmOption);
+      await tester.pumpAndSettle();
+      await tester.tap(glmOption);
+      await tester.pumpAndSettle();
+
+      final sent = _decode(bridge.sentMessages.last);
+      expect(sent['type'], 'set_omp_model');
+      expect(sent['model'], 'baseten/zai-org/GLM-5.3-Fast');
+      expect(sent.containsKey('thinkingLevel'), isFalse);
+      // The sheet follows the cubit: GLM only offers "off".
+      expect(
+        find.byKey(const ValueKey('omp_thinking_level_off')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('omp_thinking_level_high')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('approval menu changes the mode in place', (tester) async {
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byKey(const ValueKey('omp_approval_chip')));
+      await tester.pumpAndSettle();
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(find.byKey(const ValueKey('omp_approval_menu')), findsOneWidget);
+      expect(find.text(l.ompApprovalMenuTitle), findsOneWidget);
+      for (final mode in ExecutionMode.values) {
+        expect(
+          find.byKey(ValueKey('omp_approval_mode_${mode.value}')),
+          findsOneWidget,
+        );
+      }
+      expect(find.text(l.ompApprovalAlwaysAsk), findsOneWidget);
+      expect(find.text(l.ompApprovalWriteDescription), findsOneWidget);
+      expect(find.text(l.ompApprovalYolo), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const ValueKey('omp_approval_mode_acceptEdits')),
+      );
+      await tester.pumpAndSettle();
+
+      // No restart confirmation: the Bridge restarts omp on the same file.
+      expect(find.byType(AlertDialog), findsNothing);
+      final sent = _decode(bridge.sentMessages.last);
+      expect(sent['type'], 'set_permission_mode');
+      expect(sent['executionMode'], 'acceptEdits');
+      expect(sent['mode'], 'acceptEdits');
+      expect(sent['planMode'], isFalse);
+      expect(find.text('Writes'), findsOneWidget);
+    });
+
+    testWidgets('sandbox chip is shown for Claude only', (tester) async {
+      final claudeCubit = ChatSessionCubit(
+        sessionId: 'claude-sandbox-session',
+        provider: Provider.claude,
+        bridge: bridge,
+        streamingCubit: streamingCubit,
+      );
+
+      await tester.pumpWidget(_wrap(claudeCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byType(SandboxModeChip), findsOneWidget);
+
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byType(SandboxModeChip), findsNothing);
+
+      await tester.pumpWidget(_wrap(cubit));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byType(SandboxModeChip), findsNothing);
+
+      await claudeCubit.close();
+    });
   });
 }

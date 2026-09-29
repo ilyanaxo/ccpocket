@@ -3,12 +3,13 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../models/messages.dart';
-import '../../../widgets/new_session_sheet.dart';
+import '../../../models/new_session_params.dart';
 
 const _legacyKey = 'session_start_defaults_v1';
 const _lastProviderKey = 'session_start_defaults_last_provider_v1';
 const _claudeKey = 'session_start_defaults_claude_v1';
 const _codexKey = 'session_start_defaults_codex_v1';
+const _ompKey = 'session_start_defaults_omp_v1';
 
 /// Owns persistence and one-time migration of new-session defaults.
 class SessionStartDefaultsStore {
@@ -42,7 +43,8 @@ class SessionStartDefaultsStore {
     }
 
     return _loadScoped(prefs, Provider.codex) ??
-        _loadScoped(prefs, Provider.claude);
+        _loadScoped(prefs, Provider.claude) ??
+        _loadScoped(prefs, Provider.omp);
   }
 
   Future<void> save(NewSessionParams params) async {
@@ -112,7 +114,7 @@ class SessionStartDefaultsStore {
   Future<void> _removeObsoleteProjectlessDefaults(
     SharedPreferences prefs,
   ) async {
-    for (final key in [_legacyKey, _claudeKey, _codexKey]) {
+    for (final key in [_legacyKey, _claudeKey, _codexKey, _ompKey]) {
       final raw = prefs.getString(key);
       if (raw == null || raw.isEmpty) continue;
       try {
@@ -129,11 +131,8 @@ class SessionStartDefaultsStore {
   String _keyFor(Provider provider) => switch (provider) {
     Provider.claude => _claudeKey,
     Provider.codex => _codexKey,
+    Provider.omp => _ompKey,
   };
 
-  Provider? _providerFromRaw(String? raw) => switch (raw) {
-    'claude' => Provider.claude,
-    'codex' => Provider.codex,
-    _ => null,
-  };
+  Provider? _providerFromRaw(String? raw) => providerFromValue(raw);
 }

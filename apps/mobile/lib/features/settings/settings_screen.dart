@@ -16,6 +16,7 @@ import '../../models/app_icon.dart';
 import '../../models/git_diff_interaction_mode.dart';
 import '../../models/image_paste_shortcut.dart';
 import '../../models/machine.dart';
+import '../../models/messages.dart';
 import '../../models/new_session_tab.dart';
 import '../../providers/machine_manager_cubit.dart';
 import '../../router/app_router.dart';
@@ -275,9 +276,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             machineManagerCubit.state,
             state.activeMachineId,
           );
-          final enabledAgentsMode = enabledAgentsModeFromTabs(
-            state.newSessionTabs,
-          );
           final codexEnabled = isNewSessionTabEnabled(
             state.newSessionTabs,
             NewSessionTab.codex,
@@ -285,6 +283,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           final claudeEnabled = isNewSessionTabEnabled(
             state.newSessionTabs,
             NewSessionTab.claude,
+          );
+          final ompEnabled = isNewSessionTabEnabled(
+            state.newSessionTabs,
+            NewSessionTab.omp,
           );
           final machine = machineWithStatus?.machine;
           final isConnected = state.activeMachineId != null;
@@ -612,64 +614,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 margin: const EdgeInsets.symmetric(horizontal: 16),
                 child: Column(
                   children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                      child: Row(
-                        children: [
-                          Icon(Icons.smart_toy_outlined, color: cs.primary),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: SegmentedButton<EnabledAgentsMode>(
-                              key: const ValueKey('enabled_agents_selector'),
-                              segments: const [
-                                ButtonSegment(
-                                  value: EnabledAgentsMode.both,
-                                  label: Text('Both'),
-                                ),
-                                ButtonSegment(
-                                  value: EnabledAgentsMode.codex,
-                                  label: Text('Codex'),
-                                ),
-                                ButtonSegment(
-                                  value: EnabledAgentsMode.claude,
-                                  label: Text('Claude'),
-                                ),
-                              ],
-                              selected: {enabledAgentsMode},
-                              showSelectedIcon: false,
-                              onSelectionChanged: (selection) => context
-                                  .read<SettingsCubit>()
-                                  .setEnabledAgentsMode(selection.single),
-                            ),
-                          ),
-                        ],
+                    // `ompAvailability` arrives with a later `session_list`
+                    // than `ompSupport` (the Bridge strips omp data until the
+                    // app declares omp), so every session list rebuilds the
+                    // omp hint too.
+                    StreamBuilder<List<SessionInfo>>(
+                      stream: bridge.sessionList,
+                      builder: (context, _) => StreamBuilder<OmpSupport>(
+                        stream: bridge.ompSupportStream,
+                        initialData: bridge.ompSupport,
+                        builder: (context, snapshot) => _EnabledAgentsTiles(
+                          enabledTabs: state.newSessionTabs,
+                          ompSupport: snapshot.data ?? bridge.ompSupport,
+                          ompAvailability: bridge.ompAvailability,
+                        ),
                       ),
                     ),
-                    if (enabledAgentsMode == EnabledAgentsMode.both) ...[
-                      Divider(
-                        height: 1,
-                        indent: 16,
-                        endIndent: 16,
-                        color: cs.outlineVariant,
-                      ),
-                      ListTile(
-                        leading: Icon(Icons.tab, color: cs.primary),
-                        title: Text(l.settingsNewSessionTabs),
-                        subtitle: Text(
-                          state.newSessionTabs
-                              .map((t) => t.localizedLabel(l))
-                              .join(', '),
-                        ),
-                        trailing: const Icon(Icons.chevron_right),
-                        onTap: () => showNewSessionTabsBottomSheet(
-                          context: context,
-                          current: state.newSessionTabs,
-                          onChanged: (tabs) => context
-                              .read<SettingsCubit>()
-                              .setNewSessionTabs(tabs),
-                        ),
-                      ),
-                    ],
                     Divider(
                       height: 1,
                       indent: 16,
@@ -748,6 +708,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onChanged: (value) => context
                             .read<SettingsCubit>()
                             .setAutoRenameClaudeSessions(value),
+                      ),
+                    ],
+                    if (ompEnabled) ...[
+                      Divider(
+                        height: 1,
+                        indent: 16,
+                        endIndent: 16,
+                        color: cs.outlineVariant,
+                      ),
+                      SwitchListTile(
+                        key: const ValueKey('auto_rename_omp_sessions_toggle'),
+                        secondary: Icon(
+                          Icons.drive_file_rename_outline,
+                          color: cs.primary,
+                        ),
+                        title: Text(l.autoRenameOmpSessions),
+                        subtitle: Text(l.autoRenameOmpSessionsSubtitle),
+                        value: state.autoRenameOmpSessions,
+                        onChanged: (value) => context
+                            .read<SettingsCubit>()
+                            .setAutoRenameOmpSessions(value),
                       ),
                     ],
                   ],
@@ -1410,6 +1391,141 @@ String _imagePasteShortcutDescription(
     ImagePasteShortcut.ctrlV => l.imagePasteShortcutCtrlVDescription,
     ImagePasteShortcut.commandV => l.imagePasteShortcutCommandVDescription,
   };
+}
+
+/// The agent chips of the AGENTS section (`agent_filter_chip_<provider>`)
+/// and, with more than one agent offered, the new-session tab order.
+///
+/// omp can be enabled only on a Bridge that supports it; the stored choice
+/// is kept while the Bridge does not confirm omp. An agent cannot be
+/// disabled when no other enabled agent would be offered (omp counts only
+/// while the Bridge supports it, as in [effectiveProviders]).
+class _EnabledAgentsTiles extends StatelessWidget {
+  final List<NewSessionTab> enabledTabs;
+  final OmpSupport ompSupport;
+  final OmpAvailability? ompAvailability;
+
+  const _EnabledAgentsTiles({
+    required this.enabledTabs,
+    required this.ompSupport,
+    required this.ompAvailability,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    final cs = Theme.of(context).colorScheme;
+    final enabled = enabledProvidersFromTabs(enabledTabs);
+    final offered = effectiveProviders(enabledTabs, ompSupport);
+    final ompHint = ompSupport == OmpSupport.unsupported
+        ? l.ompNotAvailableOnBridge
+        : switch (ompAvailability) {
+            OmpAvailability.notInstalled => l.ompNotDetected,
+            OmpAvailability.noModels => l.ompNoModels,
+            OmpAvailability.available || null => null,
+          };
+
+    void toggle(Provider provider, bool value) {
+      final othersOffered = enabled.any(
+        (other) =>
+            other != provider &&
+            (other != Provider.omp || ompSupport == OmpSupport.supported),
+      );
+      if (!value && !othersOffered) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(l.enabledAgentsAtLeastOne)));
+        return;
+      }
+      context.read<SettingsCubit>().setAgentEnabled(provider, value);
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Icon(Icons.smart_toy_outlined, color: cs.primary),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        for (final provider in const [
+                          Provider.codex,
+                          Provider.claude,
+                          Provider.omp,
+                        ])
+                          FilterChip(
+                            key: ValueKey(
+                              'agent_filter_chip_${provider.value}',
+                            ),
+                            label: Text(provider.label),
+                            selected: enabled.contains(provider),
+                            onSelected:
+                                provider == Provider.omp &&
+                                    ompSupport == OmpSupport.unsupported
+                                ? null
+                                : (value) => toggle(provider, value),
+                          ),
+                      ],
+                    ),
+                    if (ompHint != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        ompHint,
+                        key: const ValueKey('agent_omp_hint'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (offered.length > 1) ...[
+          Divider(
+            height: 1,
+            indent: 16,
+            endIndent: 16,
+            color: cs.outlineVariant,
+          ),
+          ListTile(
+            leading: Icon(Icons.tab, color: cs.primary),
+            title: Text(l.settingsNewSessionTabs),
+            subtitle: Text(
+              visibleNewSessionTabs(
+                enabledTabs,
+                ompSupport,
+              ).map((t) => t.localizedLabel(l)).join(', '),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showNewSessionTabsBottomSheet(
+              context: context,
+              current: enabledTabs,
+              offerOmp: ompSupport == OmpSupport.supported,
+              onChanged: (tabs) =>
+                  context.read<SettingsCubit>().setNewSessionTabs(tabs),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
 }
 
 class _SectionHeader extends StatelessWidget {

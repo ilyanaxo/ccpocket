@@ -1,0 +1,18 @@
+[
+  {
+    "type": "list_recent_sessions",
+    "limit": 20,
+    "offset": 0,
+    "requestScope": "list",
+    "requestId": "recent-1",
+    "providers": ["claude", "codex"]
+  },
+  {
+    "type": "list_recent_sessions",
+    "limit": 20,
+    "offset": 0,
+    "requestScope": "list",
+    "requestId": "recent-2",
+    "provider": "omp"
+  }
+]

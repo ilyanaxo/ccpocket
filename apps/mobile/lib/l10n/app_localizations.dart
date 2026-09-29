@@ -5854,6 +5854,186 @@ abstract class AppLocalizations {
   /// In ja, this message translates to:
   /// **'Finderで表示できませんでした。ファイルとBridgeの接続を確認してください。'**
   String get finderRevealFailed;
+
+  /// No description provided for @ompMessagePlaceholder.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp にメッセージ...'**
+  String get ompMessagePlaceholder;
+
+  /// No description provided for @autoRenameOmpSessions.
+  ///
+  /// In ja, this message translates to:
+  /// **'自動Rename (omp)'**
+  String get autoRenameOmpSessions;
+
+  /// No description provided for @autoRenameOmpSessionsSubtitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'最初のエージェント応答後に omp セッションへ自動で名前を付ける'**
+  String get autoRenameOmpSessionsSubtitle;
+
+  /// No description provided for @ompDefaultModel.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp の既定'**
+  String get ompDefaultModel;
+
+  /// No description provided for @ompApprovalMenuTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp の承認モード'**
+  String get ompApprovalMenuTitle;
+
+  /// No description provided for @ompApprovalAlwaysAsk.
+  ///
+  /// In ja, this message translates to:
+  /// **'毎回確認'**
+  String get ompApprovalAlwaysAsk;
+
+  /// No description provided for @ompApprovalAlwaysAskDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'編集・コマンド・MCP ツールの前に確認する'**
+  String get ompApprovalAlwaysAskDescription;
+
+  /// No description provided for @ompApprovalWrite.
+  ///
+  /// In ja, this message translates to:
+  /// **'書き込みを許可'**
+  String get ompApprovalWrite;
+
+  /// No description provided for @ompApprovalWriteDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'編集と MCP ツールは確認なしで実行し、コマンドは確認する。omp の許可ルールも適用される'**
+  String get ompApprovalWriteDescription;
+
+  /// No description provided for @ompApprovalYolo.
+  ///
+  /// In ja, this message translates to:
+  /// **'すべて実行'**
+  String get ompApprovalYolo;
+
+  /// No description provided for @ompApprovalYoloDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'確認せずにすべて実行する'**
+  String get ompApprovalYoloDescription;
+
+  /// No description provided for @ompApprovalChipAlwaysAsk.
+  ///
+  /// In ja, this message translates to:
+  /// **'確認'**
+  String get ompApprovalChipAlwaysAsk;
+
+  /// No description provided for @ompApprovalChipWrite.
+  ///
+  /// In ja, this message translates to:
+  /// **'書込'**
+  String get ompApprovalChipWrite;
+
+  /// No description provided for @ompApprovalChipYolo.
+  ///
+  /// In ja, this message translates to:
+  /// **'全て'**
+  String get ompApprovalChipYolo;
+
+  /// No description provided for @ompApproveAlwaysScope.
+  ///
+  /// In ja, this message translates to:
+  /// **'このセッションでこのツールのすべての呼び出しを許可します'**
+  String get ompApproveAlwaysScope;
+
+  /// No description provided for @ompRewindFailed.
+  ///
+  /// In ja, this message translates to:
+  /// **'巻き戻しに失敗しました: {error}'**
+  String ompRewindFailed(String error);
+
+  /// No description provided for @ompAskDeclineAborts.
+  ///
+  /// In ja, this message translates to:
+  /// **'断ると omp の現在のターンが停止します'**
+  String get ompAskDeclineAborts;
+
+  /// No description provided for @ompChangeDeferredTip.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp が待機状態になり、バックグラウンド処理が終わったら適用されます'**
+  String get ompChangeDeferredTip;
+
+  /// No description provided for @ompAdditionalDirsDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp が参照・作業できる追加ディレクトリ。これ自体は書き込み権限を与えません'**
+  String get ompAdditionalDirsDescription;
+
+  /// No description provided for @ompNotDetected.
+  ///
+  /// In ja, this message translates to:
+  /// **'この Bridge で omp が見つかりません'**
+  String get ompNotDetected;
+
+  /// No description provided for @ompNoModels.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp で使えるモデルがありません。先に omp でログインしてください'**
+  String get ompNoModels;
+
+  /// No description provided for @ompNotAvailableOnBridge.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp を使うには Bridge を更新してください'**
+  String get ompNotAvailableOnBridge;
+
+  /// No description provided for @ompStartNeedsBridgeUpdate.
+  ///
+  /// In ja, this message translates to:
+  /// **'この Bridge では omp セッションを開始できません。Bridge を更新してください'**
+  String get ompStartNeedsBridgeUpdate;
+
+  /// No description provided for @bridgeUpdateRequiredForOmp.
+  ///
+  /// In ja, this message translates to:
+  /// **'この omp セッションには新しい Bridge が必要です'**
+  String get bridgeUpdateRequiredForOmp;
+
+  /// No description provided for @ompNameCannotBeCleared.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp のセッション名は消去できません'**
+  String get ompNameCannotBeCleared;
+
+  /// No description provided for @ompSessionDone.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp セッション完了'**
+  String get ompSessionDone;
+
+  /// No description provided for @ompCwdMissingTip.
+  ///
+  /// In ja, this message translates to:
+  /// **'記録されたディレクトリが存在しないため、omp はプロジェクトディレクトリで続行します'**
+  String get ompCwdMissingTip;
+
+  /// No description provided for @ompModelIgnoredTip.
+  ///
+  /// In ja, this message translates to:
+  /// **'指定されたモデルは omp で使えないため、セッションのモデルを使います'**
+  String get ompModelIgnoredTip;
+
+  /// No description provided for @ompModeMappedTip.
+  ///
+  /// In ja, this message translates to:
+  /// **'omp には plan/auto モードがないため、操作前に確認するモードで開始しました'**
+  String get ompModeMappedTip;
+
+  /// No description provided for @enabledAgentsAtLeastOne.
+  ///
+  /// In ja, this message translates to:
+  /// **'少なくとも1つのエージェントを有効にしてください'**
+  String get enabledAgentsAtLeastOne;
 }
 
 class _AppLocalizationsDelegate

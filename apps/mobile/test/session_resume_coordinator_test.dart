@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:ccpocket/features/session_list/services/session_resume_coordinator.dart';
 import 'package:ccpocket/models/messages.dart';
@@ -162,5 +163,113 @@ void main() {
 
     expect(result.disposition, SessionResumeDisposition.alreadyQueued);
     expect(bridge.sentMessages, isEmpty);
+  });
+
+  group('omp resume', () {
+    Map<String, dynamic> fixture(String name) => jsonDecode(
+      File('../../test/fixtures/protocol/v1/$name.json').readAsStringSync(),
+    ) as Map<String, dynamic>;
+
+    final ompSession = RecentSession.fromJson(
+      (fixture('omp-recent-sessions')['sessions'] as List).single
+          as Map<String, dynamic>,
+    );
+    const ompId = '01a0e960-d626-7359-b8e8-44ce5c598088';
+    const settingsKey = 'claude_session_settings_$ompId';
+
+    Map<String, dynamic> sent() =>
+        jsonDecode(bridge.sentMessages.single.toJson()) as Map<String, dynamic>;
+
+    Future<Map<String, dynamic>> stored() async {
+      // The post-resume save is not awaited by resume().
+      await Future<void>.delayed(Duration.zero);
+      final prefs = await SharedPreferences.getInstance();
+      return jsonDecode(prefs.getString(settingsKey)!) as Map<String, dynamic>;
+    }
+
+    test('sends only the stored approval mode (omp-resume fixture)', () async {
+      SharedPreferences.setMockInitialValues({
+        settingsKey: jsonEncode({
+          'permissionMode': 'acceptEdits',
+          'executionMode': 'acceptEdits',
+        }),
+        // Claude defaults must not leak into an omp resume.
+        'session_start_defaults_claude_v1': jsonEncode({
+          'projectPath': '/workspace/app',
+          'provider': 'claude',
+          'claudeModel': 'claude-opus-4-7',
+          'claudeEffort': 'high',
+          'sandboxMode': 'on',
+        }),
+      });
+      final expected = fixture('omp-resume');
+
+      final result = await SessionResumeCoordinator(bridge: bridge).resume(
+        ompSession,
+        resumeRequestId: expected['resumeRequestId'] as String,
+      );
+
+      expect(result.disposition, SessionResumeDisposition.dispatched);
+      expect(result.projectPath, '/home/user/project-worktrees/fix-login');
+      expect(sent(), expected);
+      expect(await stored(), {
+        'permissionMode': 'acceptEdits',
+        'executionMode': 'acceptEdits',
+      });
+    });
+
+    test('falls back to the omp start defaults', () async {
+      SharedPreferences.setMockInitialValues({
+        'session_start_defaults_omp_v1': jsonEncode({
+          'projectPath': '/home/user/project',
+          'provider': 'omp',
+          'executionMode': 'fullAccess',
+          'ompModel': 'baseten/zai-org/GLM-5.3-Fast',
+          'ompThinkingLevel': 'high',
+        }),
+      });
+
+      await SessionResumeCoordinator(bridge: bridge).resume(ompSession);
+
+      final message = sent();
+      expect(message['executionMode'], 'fullAccess');
+      for (final key in [
+        'model',
+        'thinkingLevel',
+        'permissionMode',
+        'planMode',
+        'sandboxMode',
+        'effort',
+      ]) {
+        expect(message.containsKey(key), isFalse, reason: key);
+      }
+      expect(await stored(), {
+        'permissionMode': 'bypassPermissions',
+        'executionMode': 'fullAccess',
+      });
+    });
+
+    test('maps settings an old app stored for the omp id', () async {
+      SharedPreferences.setMockInitialValues({
+        settingsKey: jsonEncode({
+          'permissionMode': 'plan',
+          'planMode': true,
+          'sandboxMode': 'on',
+          'claudeModel': 'claude-opus-4-7',
+        }),
+      });
+
+      await SessionResumeCoordinator(bridge: bridge).resume(ompSession);
+
+      final message = sent();
+      expect(message['provider'], 'omp');
+      expect(message['executionMode'], 'default');
+      expect(message.containsKey('planMode'), isFalse);
+      expect(message.containsKey('model'), isFalse);
+      expect(message.containsKey('sandboxMode'), isFalse);
+      final settings = await stored();
+      expect(settings['permissionMode'], 'default');
+      expect(settings['executionMode'], 'default');
+    });
   });
 }

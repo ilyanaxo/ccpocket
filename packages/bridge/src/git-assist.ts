@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Provider } from "./parser.js";
 import { getStagedDiff } from "./git-operations.js";
+import { runOmpPrint } from "./omp-print.js";
 import {
   getCodexAssistModel,
   getCodexAssistReasoningConfig,
@@ -17,30 +18,51 @@ export interface GitAssistOptions {
   model?: string;
 }
 
-export function generateCommitMessage(options: GitAssistOptions): string {
+/**
+ * Generate a commit message for the staged diff with the session's provider.
+ *
+ * omp runs through the non-blocking `runOmpPrint` with the diff on stdin.
+ * Claude and Codex keep their synchronous CLI calls.
+ */
+export async function generateCommitMessage(
+  options: GitAssistOptions,
+): Promise<string> {
   const diff = getStagedDiff(options.projectPath).trim();
   if (!diff) {
     throw new Error("Nothing to commit: no files are staged");
   }
 
   const cwd = resolve(options.projectPath);
-  const output =
-    options.provider === "codex"
-      ? runCodexCommitAssist(cwd, diff, options.model)
-      : execFileSync(
-          "claude",
-          [
-            "-p",
-            ...(options.model ? ["--model", options.model] : []),
-            COMMIT_MESSAGE_PROMPT,
-          ],
-          {
-            cwd,
-            encoding: "utf-8",
-            input: diff,
-            maxBuffer: 1024 * 1024,
-          },
-        );
+  let output: string;
+  switch (options.provider) {
+    case "omp":
+      output = await runOmpPrint({
+        cwd,
+        prompt: COMMIT_MESSAGE_PROMPT,
+        stdin: diff,
+        model: options.model,
+      });
+      break;
+    case "codex":
+      output = runCodexCommitAssist(cwd, diff, options.model);
+      break;
+    case "claude":
+      output = execFileSync(
+        "claude",
+        [
+          "-p",
+          ...(options.model ? ["--model", options.model] : []),
+          COMMIT_MESSAGE_PROMPT,
+        ],
+        {
+          cwd,
+          encoding: "utf-8",
+          input: diff,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      break;
+  }
 
   const message = output
     .split("\n")

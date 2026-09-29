@@ -54,6 +54,55 @@ capabilities for compatibility with older clients. The current App sends only
 are flushed after negotiation. Protocol v2 must also make the Bridge wait and
 must not send session or project data until negotiation succeeds.
 
+## Capabilities and provider declaration
+
+`protocolCapabilities` lists additive behaviour inside protocol 1. The Bridge
+sends the same list (`BRIDGE_PROTOCOL_CAPABILITIES` in
+`packages/bridge/src/protocol-version.ts`) in every `session_list` and in
+`/version`:
+
+| Capability | Meaning |
+| --- | --- |
+| `project_request_correlation_v1` | project-scoped requests echo `requestId` / scope metadata |
+| `session_context_v1` | `get_session_context` / `session_context` are available |
+| `provider_omp_v1` | the Bridge accepts `provider:"omp"` wherever a provider is accepted, `thinkingLevel` on `start` / `resume_session`, `providers[]` on `list_recent_sessions` and the `set_omp_model` command, and sends omp data to clients that declare omp |
+
+`provider_omp_v1` is advertised even when omp is not installed; availability
+travels in `session_list.ompAvailability` (`available`, `not_installed`,
+`no_models`), which is absent until the Bridge finished its first
+`omp models --json` refresh.
+
+The App declares the providers it can show in
+`client_capabilities.supportedProviders` (the current App sends
+`["claude", "codex", "omp"]`). Unknown names are ignored. A client without the
+field is treated as `["claude", "codex"]`.
+
+Old apps map unknown providers to Claude, so the Bridge hides omp from a client
+that did not declare it:
+
+- no omp entries in `session_list.sessions` and `recent_sessions.sessions`;
+- no `ompModels`, `ompAvailability` or `ompModelsRevision` fields;
+- no message of a live omp session (stream, status, permissions, settings,
+  `session_created`, history);
+- `session_link_resolution` for an omp session answers `unavailable`;
+- a request that names `provider:"omp"` (or `providers` containing `omp`) and
+  `set_omp_model` get `unsupported_message`.
+
+The connect-time `session_list` is sent before `client_capabilities` arrives and
+treats every client as undeclared. A `client_capabilities` that declares omp
+triggers a second `session_list` with omp sessions and the catalogue.
+
+In the other direction the App gates omp messages once in
+`BridgeService.send()`: it does not write them to a Bridge without
+`provider_omp_v1` and reports `bridge_update_required` locally instead. The
+same gate covers Bridges up to v1.72.1, which had no provider validation.
+
+Deletion condition for these fallbacks: when the minimum supported Bridge
+advertises `provider_omp_v1` and the minimum supported App declares
+`supportedProviders`, after the next protocol version bump (see the readiness
+checklist below), the Bridge filter, the App send gate and the capability
+check can be removed.
+
 ## Change policy
 
 The following require a new protocol version:
@@ -94,5 +143,7 @@ ready.
 - make negotiation complete before normal WebSocket messages
 - require request IDs and scope metadata for correlated operations
 - add App v2/Bridge v2 contract fixtures
+- remove the `provider_omp_v1` / `supportedProviders` fallbacks (see
+  "Capabilities and provider declaration")
 - verify both cross-major combinations fail with an update instruction
 - retain persisted-data migrations independently from wire compatibility

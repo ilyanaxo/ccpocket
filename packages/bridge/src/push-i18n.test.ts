@@ -28,4 +28,13 @@ describe("push i18n", () => {
       "apply_patch 실행을 승인하세요",
     );
   });
+
+  it("names the asking agent in every locale", () => {
+    expect(t("en", "ask_default_body", { agent: "omp" })).toBe("omp is asking a question");
+    expect(t("ja", "ask_default_body", { agent: "Codex" })).toBe("Codex が質問しています");
+    expect(t("zh", "ask_default_body", { agent: "omp" })).toBe("omp 正在提问");
+    expect(t("ko", "ask_default_body", { agent: "Claude" })).toBe(
+      "Claude이(가) 질문하고 있습니다",
+    );
+  });
 });

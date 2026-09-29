@@ -184,6 +184,16 @@ void main() {
         expect(result.provider, 'codex');
       });
 
+      test('parses omp session link provider', () {
+        final result = ConnectionUrlParser.parse(
+          'ccpocket://session/01a0e960?provider=omp',
+        ) as SessionLinkParams?;
+
+        expect(result, isNotNull);
+        expect(result!.sessionId, '01a0e960');
+        expect(result.provider, 'omp');
+      });
+
       test('defaults unsupported session link provider to Claude', () {
         final result = ConnectionUrlParser.parse(
           'ccpocket://session/claude-session?provider=unknown',

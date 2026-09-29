@@ -93,6 +93,7 @@ class _SessionLinkScreenBody extends StatelessWidget {
         final isUnavailable = state is SessionLinkUnavailable;
         return SessionLinkStatusView(
           unavailable: isUnavailable,
+          bridgeUpdateRequired: state is SessionLinkBridgeUpdateRequired,
           resuming: state is SessionLinkResuming,
           onOpenRecentSessions: () {
             context.router.replaceAll([AdaptiveHomeRoute()]);
@@ -115,21 +116,17 @@ class _SessionLinkScreenBody extends StatelessWidget {
     String? approvalPolicy,
     String? approvalsReviewer,
   }) {
-    final normalizedProvider = provider == Provider.codex.value
-        ? Provider.codex.value
-        : Provider.claude.value;
+    final normalizedProvider = providerFromValue(provider) ?? Provider.claude;
     if (SessionStackNavigation.revealStackedSession(
       context.router,
       sessionId: sessionId,
-      provider: normalizedProvider,
+      provider: normalizedProvider.value,
     )) {
       return;
     }
     final selection = WorkspaceSessionSelection(
       sessionId: sessionId,
-      provider: normalizedProvider == 'codex'
-          ? Provider.codex
-          : Provider.claude,
+      provider: normalizedProvider,
       projectPath: projectPath,
       workspace: workspace,
       gitBranch: gitBranch,
@@ -153,11 +150,15 @@ class SessionLinkStatusView extends StatelessWidget {
   const SessionLinkStatusView({
     super.key,
     required this.unavailable,
+    this.bridgeUpdateRequired = false,
     required this.resuming,
     required this.onOpenRecentSessions,
   });
 
   final bool unavailable;
+
+  /// An omp link on a Bridge without omp support.
+  final bool bridgeUpdateRequired;
   final bool resuming;
   final VoidCallback onOpenRecentSessions;
 
@@ -166,7 +167,11 @@ class SessionLinkStatusView extends StatelessWidget {
     final l = AppLocalizations.of(context);
     return Scaffold(
       body: SafeArea(
-        child: unavailable
+        child: bridgeUpdateRequired
+            ? SessionLinkBridgeUpdateView(
+                onOpenRecentSessions: onOpenRecentSessions,
+              )
+            : unavailable
             ? SessionUnavailableView(onOpenRecentSessions: onOpenRecentSessions)
             : Center(
                 child: Padding(
@@ -188,6 +193,58 @@ class SessionLinkStatusView extends StatelessWidget {
                   ),
                 ),
               ),
+      ),
+    );
+  }
+}
+
+/// An omp session link that the connected Bridge cannot open: the Bridge
+/// has to be updated first.
+class SessionLinkBridgeUpdateView extends StatelessWidget {
+  const SessionLinkBridgeUpdateView({
+    super.key,
+    required this.onOpenRecentSessions,
+  });
+
+  final VoidCallback onOpenRecentSessions;
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.system_update_alt,
+              size: 48,
+              color: theme.colorScheme.tertiary,
+            ),
+            const SizedBox(height: 20),
+            Text(
+              l.bridgeUpdateRequiredForOmp,
+              key: const ValueKey('session_link_bridge_update_required'),
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              l.ompNotAvailableOnBridge,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              key: const ValueKey('open_recent_sessions_button'),
+              onPressed: onOpenRecentSessions,
+              icon: const Icon(Icons.history),
+              label: Text(l.openRecentSessions),
+            ),
+          ],
+        ),
       ),
     );
   }

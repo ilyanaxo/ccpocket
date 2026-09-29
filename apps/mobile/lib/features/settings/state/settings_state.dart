@@ -124,6 +124,10 @@ abstract class SettingsState with _$SettingsState {
 
     /// Whether new Claude sessions should be automatically named after the first turn.
     @Default(false) bool autoRenameClaudeSessions,
+
+    /// Whether new omp sessions should be automatically named after the
+    /// first agent response (omp does not title sessions under RPC).
+    @Default(true) bool autoRenameOmpSessions,
   }) = _SettingsState;
 
   /// Whether push notifications are enabled for the currently connected machine.

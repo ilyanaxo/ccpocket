@@ -21,6 +21,7 @@ import '../services/connection_url_parser.dart';
 import '../features/setup_guide/setup_guide_screen.dart';
 import '../screens/qr_scan_screen.dart';
 import '../utils/diff_parser.dart';
+import 'omp_session_route.dart';
 
 import '../features/settings/supporter_screen.dart';
 
@@ -34,6 +35,7 @@ class AppRouter extends RootStackRouter {
     AutoRoute(page: ClaudeSessionRoute.page, path: '/session/:sessionId'),
     AutoRoute(page: SessionLinkRoute.page, path: '/session-link/:sessionId'),
     AutoRoute(page: CodexSessionRoute.page, path: '/codex-session/:sessionId'),
+    AutoRoute(page: OmpSessionRoute.page, path: '/omp-session/:sessionId'),
     AutoRoute(page: ExploreRoute.page, path: '/explore'),
     AutoRoute(page: GalleryRoute.page, path: '/gallery'),
     AutoRoute(page: GitRoute.page, path: '/git'),

@@ -1,4 +1,4 @@
-import 'package:ccpocket/features/codex_session/codex_session_screen.dart';
+import 'package:ccpocket/features/chat_session/widgets/queued_input_panel.dart';
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:flutter/material.dart';

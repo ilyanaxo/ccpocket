@@ -61,6 +61,13 @@ class SessionRouteObserver extends AutoRouterObserver {
       );
       return;
     }
+    if (name == OmpSessionRoute.name) {
+      NotificationService.instance.setActiveSession(
+        sessionId: sessionId,
+        provider: 'omp',
+      );
+      return;
+    }
 
     NotificationService.instance.clearActiveSession();
   }

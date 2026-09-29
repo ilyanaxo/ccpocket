@@ -1056,6 +1056,137 @@ class CodexSessionRouteArgs {
 }
 
 /// generated route for
+/// [WorkspaceOmpSessionScreen]
+class OmpSessionRoute extends PageRouteInfo<OmpSessionRouteArgs> {
+  OmpSessionRoute({
+    Key? key,
+    required String sessionId,
+    String? projectPath,
+    SessionWorkspaceInfo? workspace,
+    String? gitBranch,
+    String? worktreePath,
+    bool isPending = false,
+    String? initialPermissionMode,
+    ValueNotifier<SystemMessage?>? pendingSessionCreated,
+    VoidCallback? onBackToSessions,
+    bool hideSessionBackButton = false,
+    List<PageRouteInfo>? children,
+  }) : super(
+         OmpSessionRoute.name,
+         args: OmpSessionRouteArgs(
+           key: key,
+           sessionId: sessionId,
+           projectPath: projectPath,
+           workspace: workspace,
+           gitBranch: gitBranch,
+           worktreePath: worktreePath,
+           isPending: isPending,
+           initialPermissionMode: initialPermissionMode,
+           pendingSessionCreated: pendingSessionCreated,
+           onBackToSessions: onBackToSessions,
+           hideSessionBackButton: hideSessionBackButton,
+         ),
+         initialChildren: children,
+       );
+
+  static const String name = 'OmpSessionRoute';
+
+  static PageInfo page = PageInfo(
+    name,
+    builder: (data) {
+      final args = data.argsAs<OmpSessionRouteArgs>();
+      return WorkspaceOmpSessionScreen(
+        key: args.key,
+        sessionId: args.sessionId,
+        projectPath: args.projectPath,
+        workspace: args.workspace,
+        gitBranch: args.gitBranch,
+        worktreePath: args.worktreePath,
+        isPending: args.isPending,
+        initialPermissionMode: args.initialPermissionMode,
+        pendingSessionCreated: args.pendingSessionCreated,
+        onBackToSessions: args.onBackToSessions,
+        hideSessionBackButton: args.hideSessionBackButton,
+      );
+    },
+  );
+}
+
+class OmpSessionRouteArgs {
+  const OmpSessionRouteArgs({
+    this.key,
+    required this.sessionId,
+    this.projectPath,
+    this.workspace,
+    this.gitBranch,
+    this.worktreePath,
+    this.isPending = false,
+    this.initialPermissionMode,
+    this.pendingSessionCreated,
+    this.onBackToSessions,
+    this.hideSessionBackButton = false,
+  });
+
+  final Key? key;
+
+  final String sessionId;
+
+  final String? projectPath;
+
+  final SessionWorkspaceInfo? workspace;
+
+  final String? gitBranch;
+
+  final String? worktreePath;
+
+  final bool isPending;
+
+  final String? initialPermissionMode;
+
+  final ValueNotifier<SystemMessage?>? pendingSessionCreated;
+
+  final VoidCallback? onBackToSessions;
+
+  final bool hideSessionBackButton;
+
+  @override
+  String toString() {
+    return 'OmpSessionRouteArgs{key: $key, sessionId: $sessionId, projectPath: $projectPath, workspace: $workspace, gitBranch: $gitBranch, worktreePath: $worktreePath, isPending: $isPending, initialPermissionMode: $initialPermissionMode, pendingSessionCreated: $pendingSessionCreated, onBackToSessions: $onBackToSessions, hideSessionBackButton: $hideSessionBackButton}';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! OmpSessionRouteArgs) return false;
+    return key == other.key &&
+        sessionId == other.sessionId &&
+        projectPath == other.projectPath &&
+        workspace == other.workspace &&
+        gitBranch == other.gitBranch &&
+        worktreePath == other.worktreePath &&
+        isPending == other.isPending &&
+        initialPermissionMode == other.initialPermissionMode &&
+        pendingSessionCreated == other.pendingSessionCreated &&
+        onBackToSessions == other.onBackToSessions &&
+        hideSessionBackButton == other.hideSessionBackButton;
+  }
+
+  @override
+  int get hashCode =>
+      key.hashCode ^
+      sessionId.hashCode ^
+      projectPath.hashCode ^
+      workspace.hashCode ^
+      gitBranch.hashCode ^
+      worktreePath.hashCode ^
+      isPending.hashCode ^
+      initialPermissionMode.hashCode ^
+      pendingSessionCreated.hashCode ^
+      onBackToSessions.hashCode ^
+      hideSessionBackButton.hashCode;
+}
+
+/// generated route for
 /// [WorkspacePlaceholderScreen]
 class WorkspacePlaceholderRoute extends PageRouteInfo<void> {
   const WorkspacePlaceholderRoute({List<PageRouteInfo>? children})

@@ -88,4 +88,21 @@ describe("WorkspaceStore", () => {
       store.resolveRecentWorkspace("claude", "unassigned-session"),
     ).toBeUndefined();
   });
+
+  it("keeps omp assignments across a reload", async () => {
+    const { statePath, store } = await createStore();
+    await store.assignSession("omp", "01a0e960-d626-7359-b8e8-44ce5c598088", {
+      kind: "project",
+      projectName: "Project",
+      rootPaths: ["/tmp/project"],
+    });
+
+    const reloaded = new WorkspaceStore({ filePath: statePath });
+    await reloaded.init();
+    expect(
+      reloaded.getAssignment("omp", "01a0e960-d626-7359-b8e8-44ce5c598088"),
+    ).toMatchObject({ provider: "omp", rootPaths: ["/tmp/project"] });
+    expect(reloaded.getAssignment("claude", "01a0e960-d626-7359-b8e8-44ce5c598088"))
+      .toBeUndefined();
+  });
 });

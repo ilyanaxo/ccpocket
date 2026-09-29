@@ -2,10 +2,12 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/messages.dart';
+import 'package:ccpocket/services/bridge_service.dart';
 import 'package:ccpocket/theme/app_theme.dart';
 import 'package:ccpocket/widgets/session_card.dart';
 import 'package:ccpocket/widgets/session_visual_status.dart';
@@ -17,6 +19,28 @@ Widget _wrap(Widget child) {
     locale: const Locale('en'),
     theme: AppTheme.darkTheme,
     home: Scaffold(body: child),
+  );
+}
+
+/// A Bridge that has delivered its omp model catalogue.
+class _OmpCatalogueBridge extends BridgeService {
+  @override
+  List<OmpModelInfo> get ompModels => const [
+    OmpModelInfo(
+      selector:
+          'amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0',
+      provider: 'amazon-bedrock',
+      name: 'Claude Haiku 4.5',
+      thinkingLevels: ['off', 'low', 'medium', 'high'],
+    ),
+  ];
+}
+
+Widget _wrapWithOmpCatalogue(Widget child) {
+  return RepositoryProvider<BridgeService>(
+    create: (_) => _OmpCatalogueBridge(),
+    dispose: (bridge) => bridge.dispose(),
+    child: _wrap(child),
   );
 }
 
@@ -1424,6 +1448,206 @@ void main() {
       expect(find.text('Cancel'), findsOneWidget);
       expect(find.text('Reject'), findsNothing);
       expect(find.byKey(const ValueKey('approve_always_button')), findsNothing);
+    });
+  });
+
+  group('RunningSessionCard omp', () {
+    testWidgets('shows the omp model, thinking level and approval mode', (
+      tester,
+    ) async {
+      final session = SessionInfo.fromJson({
+        'id': 'omp-running',
+        'provider': 'omp',
+        'projectPath': '/home/user/my-app',
+        'status': 'running',
+        'createdAt': DateTime.now().toIso8601String(),
+        'lastActivityAt': DateTime.now().toIso8601String(),
+        'permissionMode': 'acceptEdits',
+        'executionMode': 'acceptEdits',
+        'ompSettings': {
+          'model': 'baseten/zai-org/GLM-5.3-Fast',
+          'thinkingLevel': 'high',
+        },
+      });
+
+      await tester.pumpWidget(
+        _wrap(RunningSessionCard(session: session, onTap: () {})),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(
+        find.text('zai-org/GLM-5.3-Fast · High  ${l.ompApprovalChipWrite}'),
+        findsOneWidget,
+      );
+      // Not the Claude summary.
+      expect(find.textContaining('accept-edits'), findsNothing);
+    });
+
+    testWidgets('names the omp model from the Bridge catalogue', (
+      tester,
+    ) async {
+      final session = SessionInfo.fromJson({
+        'id': 'omp-running',
+        'provider': 'omp',
+        'projectPath': '/home/user/my-app',
+        'status': 'running',
+        'createdAt': DateTime.now().toIso8601String(),
+        'lastActivityAt': DateTime.now().toIso8601String(),
+        'permissionMode': 'default',
+        'executionMode': 'default',
+        'ompSettings': {
+          'model':
+              'amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0',
+          'thinkingLevel': 'medium',
+        },
+      });
+
+      await tester.pumpWidget(
+        _wrapWithOmpCatalogue(
+          RunningSessionCard(session: session, onTap: () {}),
+        ),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(
+        find.text('Claude Haiku 4.5 · Medium  ${l.ompApprovalChipAlwaysAsk}'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('approve always is session-scoped with the scope note', (
+      tester,
+    ) async {
+      String? approvedAlways;
+      final session = SessionInfo(
+        id: 'omp-approval',
+        provider: 'omp',
+        projectPath: '/home/user/my-app',
+        status: 'waiting_approval',
+        createdAt: DateTime.now().toIso8601String(),
+        lastActivityAt: DateTime.now().toIso8601String(),
+        pendingPermission: const PermissionRequestMessage(
+          toolUseId: 'call-1',
+          toolName: 'Bash',
+          input: {
+            'command': 'echo hi',
+            'approvalDetails': ['Command: echo hi'],
+          },
+        ),
+      );
+
+      await tester.pumpWidget(
+        _wrap(
+          RunningSessionCard(
+            session: session,
+            onTap: () {},
+            onApproveAlways: (id) => approvedAlways = id,
+          ),
+        ),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      final alwaysButton = find.byKey(const ValueKey('approve_always_button'));
+      expect(
+        find.descendant(
+          of: alwaysButton,
+          matching: find.textContaining(l.approveSessionMain),
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining(l.approveAlways), findsNothing);
+      expect(find.text(l.approve), findsOneWidget);
+      expect(find.text(l.ompApproveAlwaysScope), findsOneWidget);
+
+      await tester.tap(alwaysButton);
+      expect(approvedAlways, 'call-1');
+    });
+
+    testWidgets('Claude keeps the permanent approve-always wording', (
+      tester,
+    ) async {
+      final session = SessionInfo(
+        id: 'claude-approval',
+        provider: 'claude',
+        projectPath: '/home/user/my-app',
+        status: 'waiting_approval',
+        createdAt: DateTime.now().toIso8601String(),
+        lastActivityAt: DateTime.now().toIso8601String(),
+        pendingPermission: const PermissionRequestMessage(
+          toolUseId: 'call-2',
+          toolName: 'Bash',
+          input: {'command': 'echo hi'},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _wrap(
+          RunningSessionCard(
+            session: session,
+            onTap: () {},
+            onApproveAlways: (_) {},
+          ),
+        ),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(find.textContaining(l.approveAlways), findsOneWidget);
+      expect(find.text(l.ompApproveAlwaysScope), findsNothing);
+    });
+  });
+
+  group('RecentSessionCard omp', () {
+    testWidgets('shows the recorded omp model and thinking level', (
+      tester,
+    ) async {
+      final session = RecentSession.fromJson({
+        'sessionId': '01a0e960-d626-7359-b8e8-44ce5c598088',
+        'provider': 'omp',
+        'firstPrompt': 'Fix the login',
+        'created': DateTime.now().toIso8601String(),
+        'modified': DateTime.now().toIso8601String(),
+        'gitBranch': '',
+        'projectPath': '/home/user/my-app',
+        'isSidechain': false,
+        'ompSettings': {
+          'model': 'anthropic/claude-opus-4-7',
+          'thinkingLevel': 'max',
+        },
+      });
+
+      await tester.pumpWidget(
+        _wrap(RecentSessionCard(session: session, onTap: () {})),
+      );
+
+      expect(find.text('claude-opus-4-7 · Max'), findsOneWidget);
+    });
+
+    testWidgets('names the omp model from the Bridge catalogue', (
+      tester,
+    ) async {
+      final session = RecentSession.fromJson({
+        'sessionId': '01a0e960-d626-7359-b8e8-44ce5c598088',
+        'provider': 'omp',
+        'firstPrompt': 'Fix the login',
+        'created': DateTime.now().toIso8601String(),
+        'modified': DateTime.now().toIso8601String(),
+        'gitBranch': '',
+        'projectPath': '/home/user/my-app',
+        'isSidechain': false,
+        'ompSettings': {
+          'model':
+              'amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0',
+          'thinkingLevel': 'low',
+        },
+      });
+
+      await tester.pumpWidget(
+        _wrapWithOmpCatalogue(
+          RecentSessionCard(session: session, onTap: () {}),
+        ),
+      );
+
+      expect(find.text('Claude Haiku 4.5 · Low'), findsOneWidget);
     });
   });
 

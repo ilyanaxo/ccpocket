@@ -4,9 +4,11 @@ import 'dart:convert';
 import 'package:ccpocket/features/chat_session/state/chat_session_cubit.dart';
 import 'package:ccpocket/features/chat_session/state/chat_session_state.dart';
 import 'package:ccpocket/features/chat_session/state/streaming_state_cubit.dart';
+import 'package:ccpocket/features/omp_session/state/omp_session_cubit.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/services/bridge_service.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Minimal mock BridgeService for testing the cubit.
 class MockBridgeService extends BridgeService {
@@ -19,9 +21,14 @@ class MockBridgeService extends BridgeService {
   final updatedOfflineInputs = <Map<String, dynamic>>[];
   final canceledOfflineInputs = <Map<String, dynamic>>[];
   final cachedMessagesBySession = <String, List<ServerMessage>>{};
+  final cachedContextBySession = <String, SessionInfo>{};
   final historySeqBySession = <String, int>{};
   int requestSessionContextCallCount = 0;
   bool connected = true;
+  List<OmpModelInfo> ompModelCatalogue = const [];
+
+  @override
+  List<OmpModelInfo> get ompModels => ompModelCatalogue;
 
   void emitMessage(ServerMessage msg, {String? sessionId}) {
     _taggedController.add((msg, sessionId));
@@ -120,6 +127,11 @@ class MockBridgeService extends BridgeService {
   @override
   List<ServerMessage> cachedSessionMessages(String sessionId) {
     return cachedMessagesBySession[sessionId] ?? const [];
+  }
+
+  @override
+  SessionInfo? cachedSessionContext(String sessionId) {
+    return cachedContextBySession[sessionId];
   }
 
   @override
@@ -3050,6 +3062,561 @@ void main() {
         expect(cubit.state.permissionMode, PermissionMode.bypassPermissions);
       },
     );
+  });
+
+  group('omp sessions', () {
+    const catalogue = [
+      OmpModelInfo(
+        selector: 'baseten/zai-org/GLM-5.3-Fast',
+        provider: 'baseten',
+        name: 'GLM 5.3 Fast',
+        thinkingLevels: ['off', 'high', 'max'],
+      ),
+      OmpModelInfo(
+        selector: 'baseten/MiniMaxAI/MiniMax-M3',
+        provider: 'baseten',
+        name: 'MiniMax M3',
+        thinkingLevels: ['off'],
+      ),
+    ];
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      mockBridge.ompModelCatalogue = catalogue;
+    });
+
+    SessionInfo ompContext({
+      String? claudeSessionId = '01a0e960',
+      String? model = 'baseten/zai-org/GLM-5.3-Fast',
+      String? thinkingLevel = 'high',
+      String status = 'idle',
+      String executionMode = 'acceptEdits',
+    }) => SessionInfo(
+      id: 's1',
+      provider: 'omp',
+      projectPath: '/p',
+      claudeSessionId: claudeSessionId,
+      status: status,
+      createdAt: '',
+      lastActivityAt: '',
+      permissionMode: executionMode == 'fullAccess'
+          ? 'bypassPermissions'
+          : executionMode,
+      executionMode: executionMode,
+      ompModel: model,
+      ompThinkingLevel: thinkingLevel,
+    );
+
+    Map<String, dynamic> lastPayload() =>
+        jsonDecode(mockBridge.sentMessages.last.toJson())
+            as Map<String, dynamic>;
+
+    Future<Map<String, dynamic>?> storedSettings(String id) async {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('claude_session_settings_$id');
+      return raw == null ? null : jsonDecode(raw) as Map<String, dynamic>;
+    }
+
+    test('capability getters per provider', () {
+      final omp = createCubit('s1', provider: Provider.omp);
+      final codex = createCubit('s2', provider: Provider.codex);
+      final claude = createCubit('s3', provider: Provider.claude);
+      final unknown = createCubit('s4');
+      addTearDown(omp.close);
+      addTearDown(codex.close);
+      addTearDown(claude.close);
+      addTearDown(unknown.close);
+
+      expect(omp.isOmp, isTrue);
+      expect(omp.isCodex, isFalse);
+      expect(omp.supportsQueuedInput, isTrue);
+      expect(omp.supportsRuntimeModelChange, isTrue);
+      expect(omp.supportsSandboxToggle, isFalse);
+
+      expect(codex.supportsQueuedInput, isTrue);
+      expect(codex.supportsRuntimeModelChange, isTrue);
+      expect(codex.supportsSandboxToggle, isFalse);
+
+      expect(claude.supportsQueuedInput, isFalse);
+      expect(claude.supportsRuntimeModelChange, isFalse);
+      expect(claude.supportsSandboxToggle, isTrue);
+      expect(unknown.supportsSandboxToggle, isTrue);
+    });
+
+    test('OmpSessionCubit derives its modes from the permission mode', () {
+      final cubit = OmpSessionCubit(
+        sessionId: 's1',
+        bridge: mockBridge,
+        streamingCubit: streamingCubit,
+        initialPermissionMode: PermissionMode.bypassPermissions,
+      );
+      addTearDown(cubit.close);
+
+      expect(cubit.provider, Provider.omp);
+      expect(cubit.state.executionMode, ExecutionMode.fullAccess);
+      expect(cubit.state.sandboxMode, SandboxMode.off);
+      expect(cubit.state.planMode, isFalse);
+
+      final plan = OmpSessionCubit(
+        sessionId: 's2',
+        bridge: mockBridge,
+        streamingCubit: streamingCubit,
+        initialPermissionMode: PermissionMode.plan,
+      );
+      addTearDown(plan.close);
+      expect(plan.state.planMode, isFalse);
+      expect(plan.state.inPlanMode, isFalse);
+      expect(plan.state.executionMode, ExecutionMode.defaultMode);
+    });
+
+    test('idle input gets a local entry without an optimistic uuid', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitMessage(
+        const StatusMessage(status: ProcessStatus.idle),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+
+      cubit.sendMessage('hello omp');
+
+      final user = cubit.state.entries.whereType<UserChatEntry>().single;
+      expect(user.text, 'hello omp');
+      expect(user.messageUuid, isNull);
+      expect(lastPayload()['type'], 'input');
+    });
+
+    test('busy input goes to the queue panel like Codex', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitMessage(
+        const StatusMessage(status: ProcessStatus.running),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+
+      cubit.sendMessage('while busy');
+      expect(cubit.state.entries.whereType<UserChatEntry>(), isEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+      expect(cubit.state.queuedInput?.text, 'while busy');
+
+      // One queued item at a time.
+      final sentBefore = mockBridge.sentMessages.length;
+      cubit.sendMessage('second');
+      expect(mockBridge.sentMessages.length, sentBefore);
+    });
+
+    test('omp input carries no Codex structured mentions', () async {
+      final omp = createCubit('s1', provider: Provider.omp);
+      final codex = createCubit('s2', provider: Provider.codex);
+      addTearDown(omp.close);
+      addTearDown(codex.close);
+      await Future.microtask(() {});
+
+      omp.sendMessage('look at @lib/a.dart', mentionablePaths: ['lib/a.dart']);
+      expect(lastPayload().containsKey('mentions'), isFalse);
+
+      codex.sendMessage(
+        'look at @lib/a.dart',
+        mentionablePaths: ['lib/a.dart'],
+      );
+      expect(lastPayload()['mentions'], isNotEmpty);
+    });
+
+    test('queued input update, steer and cancel reach the Bridge', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+      const item = QueuedInputItem(
+        itemId: 'q1',
+        text: 'Original',
+        createdAt: '2026-09-28T00:00:00.000Z',
+      );
+
+      cubit.updateQueuedInput(item, 'Edited @lib/a.dart');
+      expect(lastPayload(), {
+        'type': 'update_queued_input',
+        'sessionId': 's1',
+        'itemId': 'q1',
+        'text': 'Edited @lib/a.dart',
+      });
+      cubit.steerQueuedInput(item);
+      expect(lastPayload()['type'], 'steer_queued_input');
+      cubit.cancelQueuedInput(item);
+      expect(lastPayload()['type'], 'cancel_queued_input');
+    });
+
+    test('session context applies the omp model, level and levels', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+
+      mockBridge.emitSessionList([ompContext()]);
+      await Future.microtask(() {});
+
+      expect(cubit.state.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+      expect(cubit.state.ompThinkingLevel, 'high');
+      expect(cubit.state.ompThinkingLevels, ['off', 'high', 'max']);
+      expect(cubit.state.executionMode, ExecutionMode.acceptEdits);
+      expect(cubit.state.permissionMode, PermissionMode.acceptEdits);
+      expect(cubit.state.claudeSessionId, '01a0e960');
+      expect(cubit.state.sandboxMode, SandboxMode.off);
+
+      mockBridge.emitSessionList([
+        ompContext(model: 'baseten/MiniMaxAI/MiniMax-M3', thinkingLevel: null),
+      ]);
+      await Future.microtask(() {});
+      expect(cubit.state.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+      expect(cubit.state.ompThinkingLevel, isNull);
+      expect(cubit.state.ompThinkingLevels, ['off']);
+    });
+
+    group('reopening with a cached init', () {
+      setUp(() {
+        mockBridge.cachedMessagesBySession['s1'] = [
+          const SystemMessage(
+            subtype: 'init',
+            sessionId: 's1',
+            provider: 'omp',
+            model: 'baseten/zai-org/GLM-5.3-Fast',
+            thinkingLevel: 'high',
+            thinkingLevels: ['off', 'high', 'max'],
+          ),
+        ];
+      });
+
+      test('shows the newer settings of the cached summary', () {
+        // A later omp_settings changed the model. The runtime cache omits
+        // omp_settings; the cached session summary carries the change.
+        mockBridge.cachedContextBySession['s1'] = ompContext(
+          model: 'baseten/MiniMaxAI/MiniMax-M3',
+          thinkingLevel: null,
+        );
+
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+
+        expect(cubit.state.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+        expect(cubit.state.ompThinkingLevel, isNull);
+        expect(cubit.state.ompThinkingLevels, ['off']);
+      });
+
+      test('keeps the init settings when the summary has none', () {
+        mockBridge.cachedContextBySession['s1'] = ompContext(
+          model: null,
+          thinkingLevel: null,
+        );
+
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+
+        expect(cubit.state.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+        expect(cubit.state.ompThinkingLevel, 'high');
+        expect(cubit.state.ompThinkingLevels, ['off', 'high', 'max']);
+      });
+    });
+
+    test('omp_settings and init update the model live', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+
+      mockBridge.emitMessage(
+        const SystemMessage(
+          subtype: 'init',
+          sessionId: 's1',
+          provider: 'omp',
+          model: 'baseten/zai-org/GLM-5.3-Fast',
+          thinkingLevel: 'max',
+          thinkingLevels: ['off', 'high', 'max'],
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+      expect(cubit.state.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+      expect(cubit.state.ompThinkingLevel, 'max');
+      // The Bridge id of init is not the omp session id.
+      expect(cubit.state.claudeSessionId, isNull);
+      expect(cubit.state.entries, isEmpty);
+
+      mockBridge.emitMessage(
+        const SystemMessage(
+          subtype: 'omp_settings',
+          sessionId: 's1',
+          provider: 'omp',
+          model: 'baseten/MiniMaxAI/MiniMax-M3',
+          thinkingLevels: ['off'],
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+      expect(cubit.state.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+      expect(cubit.state.ompThinkingLevel, isNull);
+      expect(cubit.state.ompThinkingLevels, ['off']);
+      expect(cubit.state.entries, isEmpty);
+    });
+
+    for (final (errorCode, message) in const [
+      ('set_omp_model_failed', 'Model not found: baseten/MiniMaxAI/MiniMax-M3'),
+      ('set_omp_model_unsupported', 'Not an omp session'),
+      // Local answer of the BridgeService send gate.
+      ('bridge_update_required', 'This Bridge does not support omp.'),
+      // An old Bridge names the unknown message type.
+      ('unsupported_message', 'set_omp_model'),
+    ]) {
+      test('setOmpModel is optimistic and rolls back on $errorCode', () async {
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+        mockBridge.emitSessionList([ompContext()]);
+        await Future.microtask(() {});
+
+        cubit.setOmpModel(model: 'baseten/MiniMaxAI/MiniMax-M3');
+        expect(cubit.state.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+        // The new model offers no `high`; the Bridge falls back to `off`.
+        expect(cubit.state.ompThinkingLevel, 'off');
+        expect(cubit.state.ompThinkingLevels, ['off']);
+        expect(lastPayload(), {
+          'type': 'set_omp_model',
+          'sessionId': 's1',
+          'model': 'baseten/MiniMaxAI/MiniMax-M3',
+        });
+
+        cubit.setOmpModel(thinkingLevel: 'off');
+        // Nothing changed, nothing sent.
+        expect(mockBridge.sentMessages, hasLength(1));
+
+        mockBridge.emitMessage(
+          ErrorMessage(message: message, errorCode: errorCode),
+          sessionId: 's1',
+        );
+        await Future.microtask(() {});
+        expect(cubit.state.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+        expect(cubit.state.ompThinkingLevel, 'high');
+        expect(cubit.state.ompThinkingLevels, ['off', 'high', 'max']);
+      });
+    }
+
+    test(
+      'a level picked before omp_settings carries the pending model',
+      () async {
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+        mockBridge.emitSessionList([
+          ompContext(
+            model: 'baseten/MiniMaxAI/MiniMax-M3',
+            thinkingLevel: null,
+            status: 'running',
+          ),
+        ]);
+        await Future.microtask(() {});
+
+        // omp is busy, so the Bridge defers this change.
+        cubit.setOmpModel(model: 'baseten/zai-org/GLM-5.3-Fast');
+        expect(lastPayload(), {
+          'type': 'set_omp_model',
+          'sessionId': 's1',
+          'model': 'baseten/zai-org/GLM-5.3-Fast',
+        });
+        expect(cubit.state.ompThinkingLevels, ['off', 'high', 'max']);
+
+        // The sheet now offers the levels of the new model.
+        cubit.setOmpModel(thinkingLevel: 'max');
+        expect(lastPayload(), {
+          'type': 'set_omp_model',
+          'sessionId': 's1',
+          'model': 'baseten/zai-org/GLM-5.3-Fast',
+          'thinkingLevel': 'max',
+        });
+        expect(cubit.state.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+        expect(cubit.state.ompThinkingLevel, 'max');
+      },
+    );
+
+    test('a model picked before omp_settings carries the pending level', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitSessionList([ompContext(status: 'running')]);
+      await Future.microtask(() {});
+
+      cubit.setOmpModel(thinkingLevel: 'max');
+      cubit.setOmpModel(model: 'baseten/MiniMaxAI/MiniMax-M3');
+
+      // MiniMax offers no `max`; the request names the fallback the app shows.
+      expect(lastPayload(), {
+        'type': 'set_omp_model',
+        'sessionId': 's1',
+        'model': 'baseten/MiniMaxAI/MiniMax-M3',
+        'thinkingLevel': 'off',
+      });
+      expect(cubit.state.ompThinkingLevel, 'off');
+    });
+
+    test('an unrelated error keeps the pending omp change', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitSessionList([ompContext()]);
+      await Future.microtask(() {});
+
+      cubit.setOmpModel(model: 'baseten/MiniMaxAI/MiniMax-M3');
+      mockBridge.emitMessage(
+        const ErrorMessage(
+          message: 'set_codex_model',
+          errorCode: 'unsupported_message',
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+
+      expect(cubit.state.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+    });
+
+    test('an older session summary keeps the pending omp change', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitSessionList([ompContext()]);
+      await Future.microtask(() {});
+
+      cubit.setOmpModel(model: 'baseten/MiniMaxAI/MiniMax-M3');
+      mockBridge.emitSessionList([ompContext(status: 'running')]);
+      await Future.microtask(() {});
+
+      expect(cubit.state.status, ProcessStatus.running);
+      expect(cubit.state.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+    });
+
+    test('a confirmed omp change is not rolled back later', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitSessionList([ompContext()]);
+      await Future.microtask(() {});
+
+      cubit.setOmpModel(thinkingLevel: 'max');
+      expect(lastPayload(), {
+        'type': 'set_omp_model',
+        'sessionId': 's1',
+        'thinkingLevel': 'max',
+      });
+      mockBridge.emitMessage(
+        const SystemMessage(
+          subtype: 'omp_settings',
+          sessionId: 's1',
+          provider: 'omp',
+          model: 'baseten/zai-org/GLM-5.3-Fast',
+          thinkingLevel: 'max',
+          thinkingLevels: ['off', 'high', 'max'],
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+      mockBridge.emitMessage(
+        const ErrorMessage(message: 'late', errorCode: 'set_omp_model_failed'),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+
+      expect(cubit.state.ompThinkingLevel, 'max');
+    });
+
+    test('setOmpModel is ignored outside omp sessions', () async {
+      final cubit = createCubit('s1', provider: Provider.codex);
+      addTearDown(cubit.close);
+      cubit.setOmpModel(model: 'a/b');
+      expect(mockBridge.sentMessages, isEmpty);
+    });
+
+    for (final errorCode in ['omp_mode_unsupported', 'omp_respawn_failed']) {
+      test('approval mode rolls back on $errorCode', () async {
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+        await Future.microtask(() {});
+
+        cubit.setSessionModes(executionMode: ExecutionMode.fullAccess);
+        expect(cubit.state.executionMode, ExecutionMode.fullAccess);
+        expect(cubit.state.permissionMode, PermissionMode.bypassPermissions);
+        expect(lastPayload()['planMode'], isFalse);
+
+        mockBridge.emitMessage(
+          ErrorMessage(message: 'rejected', errorCode: errorCode),
+          sessionId: 's1',
+        );
+        await Future.microtask(() {});
+
+        expect(cubit.state.executionMode, ExecutionMode.defaultMode);
+        expect(cubit.state.permissionMode, PermissionMode.defaultMode);
+      });
+    }
+
+    test(
+      'setPermissionMode keeps the stored omp execution mode in step',
+      () async {
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+        mockBridge.emitSessionList([
+          ompContext(claudeSessionId: 'omp-a', executionMode: 'default'),
+        ]);
+        await Future.microtask(() {});
+        await Future<void>.delayed(Duration.zero);
+        expect(await storedSettings('omp-a'), {
+          'permissionMode': 'default',
+          'executionMode': 'default',
+        });
+
+        cubit.setPermissionMode(PermissionMode.bypassPermissions);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(cubit.state.permissionMode, PermissionMode.bypassPermissions);
+        expect(cubit.state.executionMode, ExecutionMode.fullAccess);
+        expect(lastPayload(), {
+          'type': 'set_permission_mode',
+          'mode': 'bypassPermissions',
+          'executionMode': 'fullAccess',
+          'planMode': false,
+          'sessionId': 's1',
+        });
+        // The omp resume reads `executionMode` first.
+        final stored = await storedSettings('omp-a');
+        expect(stored, containsPair('permissionMode', 'bypassPermissions'));
+        expect(stored, containsPair('executionMode', 'fullAccess'));
+
+        // A rejected change rolls both modes back.
+        mockBridge.emitMessage(
+          const ErrorMessage(
+            message: 'rejected',
+            errorCode: 'omp_respawn_failed',
+          ),
+          sessionId: 's1',
+        );
+        await Future.microtask(() {});
+        expect(cubit.state.permissionMode, PermissionMode.defaultMode);
+        expect(cubit.state.executionMode, ExecutionMode.defaultMode);
+      },
+    );
+
+    test('omp modes are stored under every new omp session id', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitSessionList([ompContext(claudeSessionId: 'omp-a')]);
+      await Future.microtask(() {});
+      await Future<void>.delayed(Duration.zero);
+
+      expect(await storedSettings('omp-a'), {
+        'permissionMode': 'acceptEdits',
+        'executionMode': 'acceptEdits',
+      });
+
+      // An approval-mode respawn before the first reply gets a new omp id.
+      mockBridge.emitSessionList([
+        ompContext(claudeSessionId: 'omp-b', executionMode: 'fullAccess'),
+      ]);
+      await Future.microtask(() {});
+      await Future<void>.delayed(Duration.zero);
+
+      expect(await storedSettings('omp-b'), {
+        'permissionMode': 'bypassPermissions',
+        'executionMode': 'fullAccess',
+      });
+      expect(await storedSettings('s1'), isNull);
+    });
   });
 
   group('updateRecentPeekedFiles', () {

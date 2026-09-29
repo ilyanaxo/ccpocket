@@ -42,9 +42,12 @@ Options:
 Setup options:
       --uninstall       Remove the registered service
       setup persists --port, --host, --api-key, --public-ws-url,
-      --no-mdns, Codex app-server options, BRIDGE_ALLOWED_DIRS, and
-      BRIDGE_ALLOW_CLAUDE_OAUTH, BRIDGE_CODEX_ASSIST_MODEL, and
-      BRIDGE_CODEX_ASSIST_REASONING_EFFORT
+      --no-mdns, Codex app-server options, BRIDGE_ALLOWED_DIRS,
+      BRIDGE_ALLOW_CLAUDE_OAUTH, BRIDGE_CODEX_ASSIST_MODEL,
+      BRIDGE_CODEX_ASSIST_REASONING_EFFORT, and the omp variables
+      BRIDGE_OMP_BIN, BRIDGE_OMP_ASSIST_MODEL, OMP_PROFILE, PI_PROFILE,
+      PI_CONFIG_DIR, PI_CODING_AGENT_DIR and PI_CODING_AGENT_SESSION_DIR
+      when they are set
 
 Configuration can also be provided with BRIDGE_PORT, BRIDGE_HOST,
 BRIDGE_API_KEY, BRIDGE_ALLOWED_DIRS, BRIDGE_PUBLIC_WS_URL, and
@@ -52,7 +55,10 @@ BRIDGE_DISABLE_MDNS. Claude subscription authentication can be explicitly
 enabled with BRIDGE_ALLOW_CLAUDE_OAUTH=1. Codex app-server configuration can be provided with
 BRIDGE_CODEX_APP_SERVER_MODE and BRIDGE_CODEX_SHARED_APP_SERVER_URL.
 Codex assist calls can be configured with BRIDGE_CODEX_ASSIST_MODEL and
-BRIDGE_CODEX_ASSIST_REASONING_EFFORT.`);
+BRIDGE_CODEX_ASSIST_REASONING_EFFORT.
+omp: BRIDGE_OMP_BIN is the path to the omp CLI (default: omp on PATH);
+BRIDGE_OMP_ASSIST_MODEL selects the model for omp titles and commit messages
+(default: the session's model).`);
 }
 
 if (parsed.helpRequested) {

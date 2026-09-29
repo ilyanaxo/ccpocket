@@ -14,6 +14,8 @@ import '../../hooks/use_app_resume_callback.dart';
 import '../../hooks/use_scroll_tracking.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/messages.dart';
+import '../../models/new_session_params.dart'
+    show permissionModeFromRaw, sandboxModeFromRaw;
 import '../../providers/bridge_cubits.dart';
 import '../../providers/machine_manager_cubit.dart';
 import '../../router/app_router.dart';
@@ -34,8 +36,6 @@ import '../settings/state/settings_cubit.dart';
 import '../../widgets/approval_bar.dart';
 import '../../widgets/bubbles/ask_user_question_widget.dart';
 import '../../widgets/message_bubble.dart';
-import '../../widgets/new_session_sheet.dart'
-    show permissionModeFromRaw, sandboxModeFromRaw;
 import '../../widgets/plan_detail_sheet.dart';
 import '../../widgets/rename_session_dialog.dart';
 import '../../widgets/screenshot_sheet.dart';
@@ -52,6 +52,7 @@ import '../chat_session/widgets/scroll_to_bottom_button.dart';
 import '../chat_session/widgets/session_file_list_scope.dart';
 import '../chat_session/widgets/session_mode_bar.dart';
 import '../chat_session/widgets/status_line_flexible_space.dart';
+import '../chat_session/utils/session_usage.dart';
 import '../explore/state/explore_state.dart';
 import '../git/state/git_status_cubit.dart';
 import '../git/state/git_view_cache_service.dart';
@@ -716,8 +717,8 @@ class _ChatScreenBody extends HookWidget {
       };
     }, [sessionId]);
 
-    final tokenUsage = _collectTokenUsage(sessionState.entries);
-    final toolUsage = _collectToolUsage(sessionState.entries);
+    final tokenUsage = collectTokenUsage(sessionState.entries);
+    final toolUsage = collectToolUsage(sessionState.entries);
 
     // --- Side effects subscription ---
     useEffect(() {
@@ -1826,42 +1827,4 @@ void _retryFailedMessages(BuildContext context, String sessionId) {
       cubit.retryMessage(entry);
     }
   }
-}
-
-({int inputTokens, int cachedInputTokens, int outputTokens}) _collectTokenUsage(
-  List<ChatEntry> entries,
-) {
-  var inputTokens = 0;
-  var cachedInputTokens = 0;
-  var outputTokens = 0;
-
-  for (final entry in entries) {
-    if (entry is! ServerChatEntry) continue;
-    final msg = entry.message;
-    if (msg is! ResultMessage) continue;
-    inputTokens += msg.inputTokens ?? 0;
-    cachedInputTokens += msg.cachedInputTokens ?? 0;
-    outputTokens += msg.outputTokens ?? 0;
-  }
-
-  return (
-    inputTokens: inputTokens,
-    cachedInputTokens: cachedInputTokens,
-    outputTokens: outputTokens,
-  );
-}
-
-({int toolCalls, int fileEdits}) _collectToolUsage(List<ChatEntry> entries) {
-  var toolCalls = 0;
-  var fileEdits = 0;
-
-  for (final entry in entries) {
-    if (entry is! ServerChatEntry) continue;
-    final msg = entry.message;
-    if (msg is! ResultMessage) continue;
-    toolCalls += msg.toolCalls ?? 0;
-    fileEdits += msg.fileEdits ?? 0;
-  }
-
-  return (toolCalls: toolCalls, fileEdits: fileEdits);
 }

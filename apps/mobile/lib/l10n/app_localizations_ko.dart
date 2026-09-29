@@ -3129,4 +3129,100 @@ class AppLocalizationsKo extends AppLocalizations {
   @override
   String get finderRevealFailed =>
       'Finder에서 파일을 표시하지 못했습니다. 파일과 Bridge 연결을 확인하세요.';
+
+  @override
+  String get ompMessagePlaceholder => 'omp에게 메시지...';
+
+  @override
+  String get autoRenameOmpSessions => '자동 Rename (omp)';
+
+  @override
+  String get autoRenameOmpSessionsSubtitle =>
+      '첫 에이전트 응답 후 omp 세션 이름을 자동으로 지정합니다';
+
+  @override
+  String get ompDefaultModel => 'omp 기본값';
+
+  @override
+  String get ompApprovalMenuTitle => 'omp 승인 모드';
+
+  @override
+  String get ompApprovalAlwaysAsk => '매번 확인';
+
+  @override
+  String get ompApprovalAlwaysAskDescription => '편집, 명령, MCP 도구 실행 전에 확인합니다';
+
+  @override
+  String get ompApprovalWrite => '쓰기 허용';
+
+  @override
+  String get ompApprovalWriteDescription =>
+      '편집과 MCP 도구는 확인 없이 실행하고 명령은 확인합니다. omp 허용 규칙도 적용됩니다';
+
+  @override
+  String get ompApprovalYolo => '모두 실행';
+
+  @override
+  String get ompApprovalYoloDescription => '확인 없이 모두 실행합니다';
+
+  @override
+  String get ompApprovalChipAlwaysAsk => '확인';
+
+  @override
+  String get ompApprovalChipWrite => '쓰기';
+
+  @override
+  String get ompApprovalChipYolo => '전체';
+
+  @override
+  String get ompApproveAlwaysScope => '이 세션에서 이 도구의 모든 호출을 허용합니다';
+
+  @override
+  String ompRewindFailed(String error) {
+    return '되돌리기 실패: $error';
+  }
+
+  @override
+  String get ompAskDeclineAborts => '거절하면 omp의 현재 턴이 중지됩니다';
+
+  @override
+  String get ompChangeDeferredTip => 'omp가 대기 상태가 되고 백그라운드 작업이 끝나면 적용됩니다';
+
+  @override
+  String get ompAdditionalDirsDescription =>
+      'omp가 읽고 작업할 수 있는 추가 디렉터리입니다. 이것만으로 쓰기 권한이 부여되지는 않습니다';
+
+  @override
+  String get ompNotDetected => '이 Bridge에서 omp를 찾을 수 없습니다';
+
+  @override
+  String get ompNoModels => 'omp에서 사용할 수 있는 모델이 없습니다. 먼저 omp에서 로그인하세요';
+
+  @override
+  String get ompNotAvailableOnBridge => 'omp를 사용하려면 Bridge를 업데이트하세요';
+
+  @override
+  String get ompStartNeedsBridgeUpdate =>
+      '이 Bridge에서는 omp 세션을 시작할 수 없습니다. Bridge를 업데이트하세요';
+
+  @override
+  String get bridgeUpdateRequiredForOmp => '이 omp 세션에는 최신 Bridge가 필요합니다';
+
+  @override
+  String get ompNameCannotBeCleared => 'omp 세션 이름은 지울 수 없습니다';
+
+  @override
+  String get ompSessionDone => 'omp 세션 완료';
+
+  @override
+  String get ompCwdMissingTip => '기록된 디렉터리가 없어 omp가 프로젝트 디렉터리에서 계속합니다';
+
+  @override
+  String get ompModelIgnoredTip => '요청한 모델은 omp에서 사용할 수 없어 세션의 모델을 유지합니다';
+
+  @override
+  String get ompModeMappedTip => 'omp에는 plan/auto 모드가 없어 작업 전에 확인하는 모드로 시작했습니다';
+
+  @override
+  String get enabledAgentsAtLeastOne => '에이전트를 하나 이상 켜 두세요';
 }

@@ -168,6 +168,19 @@ class SessionResumeCoordinator {
       );
     }
 
+    if (provider == Provider.omp.value) {
+      await _resumeOmp(
+        session,
+        projectPath: projectPath,
+        resumeRequestId: resumeRequestId,
+      );
+      return SessionResumeDispatch(
+        disposition: SessionResumeDisposition.dispatched,
+        projectPath: projectPath,
+        gitBranch: session.gitBranch,
+      );
+    }
+
     final isCodex = provider == Provider.codex.value;
     final sessionSettings = isCodex
         ? null
@@ -283,6 +296,60 @@ class SessionResumeCoordinator {
       disposition: SessionResumeDisposition.dispatched,
       projectPath: projectPath,
       gitBranch: session.gitBranch,
+    );
+  }
+
+  /// Plain omp resume: only the approval mode is sent. omp restores model
+  /// and thinking level from its session file (OBSERVED P8), and any Claude
+  /// or Codex field would be misapplied by older Bridges.
+  Future<void> _resumeOmp(
+    RecentSession session, {
+    required String projectPath,
+    String? resumeRequestId,
+  }) async {
+    final sessionSettings = await _claudeSettingsStore.load(session.sessionId);
+    final storedExecutionMode = executionModeFromRaw(
+      sessionSettings?['executionMode'] as String?,
+    );
+    final storedPermissionMode = sessionSettings?['permissionMode'] as String?;
+    final ExecutionMode executionMode;
+    if (storedExecutionMode != null) {
+      executionMode = storedExecutionMode;
+    } else if (storedPermissionMode != null) {
+      executionMode = deriveExecutionMode(
+        provider: Provider.omp.value,
+        permissionMode: storedPermissionMode,
+      );
+    } else {
+      final ompDefaults = await _defaultsStore.loadFor(Provider.omp);
+      executionMode = ompDefaults?.executionMode ?? ExecutionMode.defaultMode;
+    }
+    final permissionMode = legacyPermissionModeFromModes(
+      Provider.omp,
+      executionMode: executionMode,
+      planMode: false,
+    );
+    final extraRoots = session.workspaceRootPaths.skip(1).toList();
+
+    _bridge.resumeSession(
+      session.sessionId,
+      projectPath,
+      executionMode: executionMode.value,
+      provider: Provider.omp.value,
+      additionalWritableRoots: extraRoots.isEmpty ? null : extraRoots,
+      projectId: session.workspace?.projectId,
+      projectName: session.workspace?.projectName,
+      workspaceKind: session.workspaceKind == 'unassigned'
+          ? null
+          : session.workspaceKind,
+      resumeRequestId: resumeRequestId,
+    );
+
+    unawaited(
+      _claudeSettingsStore.save(session.sessionId, {
+        'permissionMode': permissionMode.value,
+        'executionMode': executionMode.value,
+      }),
     );
   }
 

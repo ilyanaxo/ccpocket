@@ -204,4 +204,94 @@ void main() {
       expect(find.textContaining('gh auth login'), findsOneWidget);
     });
   });
+
+  group('ErrorBubble omp codes', () {
+    Future<void> pump(WidgetTester tester, ErrorMessage message) {
+      return tester.pumpWidget(
+        _wrapErrorBubble(
+          locale: const Locale('en'),
+          child: ErrorBubble(message: message),
+        ),
+      );
+    }
+
+    Color bubbleColor(WidgetTester tester, String tone) {
+      final container = tester.widget<Container>(
+        find.byKey(ValueKey('error_bubble_$tone')),
+      );
+      return (container.decoration! as BoxDecoration).color!;
+    }
+
+    testWidgets('omp_notice is a warning and omp_info is neutral', (
+      tester,
+    ) async {
+      final appColors = AppTheme.darkTheme.extension<AppColors>()!;
+
+      await pump(
+        tester,
+        const ErrorMessage(
+          message: 'Retrying (1/3) in 2s: overloaded',
+          errorCode: 'omp_notice',
+        ),
+      );
+      expect(find.text('omp Notice'), findsOneWidget);
+      expect(bubbleColor(tester, 'warning'), appColors.warningBubble);
+
+      await pump(
+        tester,
+        const ErrorMessage(
+          message: 'omp asks to open https://example.test',
+          errorCode: 'omp_info',
+        ),
+      );
+      expect(find.byKey(const ValueKey('error_bubble_neutral')), findsOne);
+      expect(
+        bubbleColor(tester, 'neutral'),
+        AppTheme.darkTheme.colorScheme.surfaceContainerHigh,
+      );
+      expect(find.text('omp asks to open https://example.test'), findsOne);
+      expect(find.byIcon(Icons.error_outline), findsNothing);
+    });
+
+    testWidgets('omp_cli_not_found has a hint but no install command', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        const ErrorMessage(
+          message: 'omp CLI not found. Install omp or set BRIDGE_OMP_BIN.',
+          errorCode: 'omp_cli_not_found',
+        ),
+      );
+
+      expect(find.text('omp CLI Not Installed'), findsOneWidget);
+      expect(find.textContaining('BRIDGE_OMP_BIN, then restart'), findsOne);
+      // Codex's hint is copyable; omp has no single install line.
+      expect(find.byIcon(Icons.copy), findsNothing);
+      expect(find.byKey(const ValueKey('error_bubble_error')), findsOneWidget);
+    });
+
+    testWidgets('titles every omp error code', (tester) async {
+      const codes = {
+        'omp_start_failed': 'omp Failed to Start',
+        'omp_protocol_unsupported': 'omp Version Not Supported',
+        'omp_process_exited': 'omp Stopped',
+        'omp_unsupported_platform': 'omp Not Supported on This Platform',
+        'omp_session_not_found': 'omp Session Not Found',
+        'omp_session_already_open': 'omp Session Already Open',
+        'omp_session_busy': 'omp Session Busy',
+        'omp_history_too_large': 'omp History Too Large',
+        'omp_mode_unsupported': 'Mode Not Available in omp',
+        'omp_respawn_failed': 'omp Restart Failed',
+        'omp_sandbox_unsupported': 'omp Has No Sandbox',
+        'set_omp_model_failed': 'omp Model Change Failed',
+        'set_omp_model_unsupported': 'omp Model Change Not Supported',
+        'omp_name_cannot_be_cleared': 'omp session names cannot be cleared',
+      };
+      for (final MapEntry(key: code, value: title) in codes.entries) {
+        await pump(tester, ErrorMessage(message: 'detail', errorCode: code));
+        expect(find.text(title), findsOneWidget, reason: code);
+      }
+    });
+  });
 }

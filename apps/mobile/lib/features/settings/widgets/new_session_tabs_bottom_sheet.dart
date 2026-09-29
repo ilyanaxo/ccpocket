@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../../../l10n/app_localizations.dart';
@@ -7,10 +9,15 @@ import '../../../theme/provider_style.dart';
 import '../../../widgets/workspace_pane_chrome.dart';
 
 /// Shows a bottom sheet for configuring visible new-session tabs and their order.
+///
+/// The omp tab is offered only with [offerOmp] (the connected Bridge supports
+/// omp). A hidden omp tab keeps its stored state: an enabled omp stays
+/// enabled, at its stored position, when the other tabs are saved.
 Future<void> showNewSessionTabsBottomSheet({
   required BuildContext context,
   required List<NewSessionTab> current,
   required ValueChanged<List<NewSessionTab>> onChanged,
+  bool offerOmp = false,
 }) {
   return showModalBottomSheet(
     context: context,
@@ -22,6 +29,7 @@ Future<void> showNewSessionTabsBottomSheet({
     ),
     builder: (ctx) => _TabsBottomSheetContent(
       current: current,
+      offerOmp: offerOmp,
       onChanged: (tabs) {
         onChanged(tabs);
         Navigator.pop(ctx);
@@ -32,10 +40,12 @@ Future<void> showNewSessionTabsBottomSheet({
 
 class _TabsBottomSheetContent extends StatefulWidget {
   final List<NewSessionTab> current;
+  final bool offerOmp;
   final ValueChanged<List<NewSessionTab>> onChanged;
 
   const _TabsBottomSheetContent({
     required this.current,
+    required this.offerOmp,
     required this.onChanged,
   });
 
@@ -48,15 +58,28 @@ class _TabsBottomSheetContentState extends State<_TabsBottomSheetContent> {
   /// All tabs in display order, with enabled/disabled state.
   late List<({NewSessionTab tab, bool enabled})> _items;
 
+  /// Enabled tabs the sheet does not offer, with their index in the stored
+  /// list; saved back at that index so hiding them changes no order.
+  late List<({int index, NewSessionTab tab})> _hiddenEnabledTabs;
+
+  bool _isOffered(NewSessionTab tab) =>
+      tab != NewSessionTab.omp || widget.offerOmp;
+
   @override
   void initState() {
     super.initState();
     // Build ordered list: enabled tabs first (in order), then disabled ones.
     final enabledSet = widget.current.toSet();
+    _hiddenEnabledTabs = [
+      for (final (index, tab) in widget.current.indexed)
+        if (!_isOffered(tab)) (index: index, tab: tab),
+    ];
     _items = [
-      for (final tab in widget.current) (tab: tab, enabled: true),
+      for (final tab in widget.current)
+        if (_isOffered(tab)) (tab: tab, enabled: true),
       for (final tab in NewSessionTab.values)
-        if (!enabledSet.contains(tab)) (tab: tab, enabled: false),
+        if (!enabledSet.contains(tab) && _isOffered(tab))
+          (tab: tab, enabled: false),
     ];
   }
 
@@ -71,7 +94,10 @@ class _TabsBottomSheetContentState extends State<_TabsBottomSheetContent> {
   }
 
   void _save() {
-    final tabs = _items.where((i) => i.enabled).map((i) => i.tab).toList();
+    final tabs = [..._items.where((i) => i.enabled).map((i) => i.tab)];
+    for (final hidden in _hiddenEnabledTabs) {
+      tabs.insert(min(hidden.index, tabs.length), hidden.tab);
+    }
     widget.onChanged(tabs);
   }
 

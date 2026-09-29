@@ -1,0 +1,49 @@
+{
+  "type": "session_list",
+  "sessions": [
+    {
+      "id": "3f9c2a1b",
+      "provider": "omp",
+      "projectPath": "/home/user/project",
+      "claudeSessionId": "01a0e960-d626-7359-b8e8-44ce5c598088",
+      "name": "Fix login redirect",
+      "status": "idle",
+      "createdAt": "2026-09-28T18:57:12.000Z",
+      "lastActivityAt": "2026-09-28T19:05:40.000Z",
+      "gitBranch": "main",
+      "lastMessage": "The redirect now keeps the query string.",
+      "permissionMode": "acceptEdits",
+      "executionMode": "acceptEdits",
+      "planMode": false,
+      "ompSettings": {
+        "model": "baseten/zai-org/GLM-5.3-Fast",
+        "thinkingLevel": "high"
+      }
+    }
+  ],
+  "protocolVersion": 1,
+  "minimumProtocolVersion": 1,
+  "protocolCapabilities": [
+    "project_request_correlation_v1",
+    "session_context_v1",
+    "provider_omp_v1"
+  ],
+  "ompModels": [
+    {
+      "selector": "baseten/zai-org/GLM-5.3-Fast",
+      "provider": "baseten",
+      "name": "GLM 5.3 Fast",
+      "thinkingLevels": ["off", "high", "max"],
+      "input": ["text", "image"]
+    },
+    {
+      "selector": "baseten/MiniMaxAI/MiniMax-M3",
+      "provider": "baseten",
+      "name": "MiniMax M3",
+      "thinkingLevels": ["off"],
+      "input": ["text"]
+    }
+  ],
+  "ompAvailability": "available",
+  "ompModelsRevision": 1
+}

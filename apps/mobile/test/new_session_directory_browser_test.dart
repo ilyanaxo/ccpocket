@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/messages.dart';
+import 'package:ccpocket/models/new_session_params.dart';
 import 'package:ccpocket/services/bridge_service.dart';
 import 'package:ccpocket/theme/app_theme.dart';
 import 'package:ccpocket/widgets/new_session_sheet.dart';

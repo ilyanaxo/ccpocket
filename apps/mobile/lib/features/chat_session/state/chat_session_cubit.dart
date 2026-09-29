@@ -63,8 +63,29 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   bool? _pendingPlanRollback;
   SandboxMode? _pendingSandboxRollback;
 
+  /// omp model settings confirmed before the first unconfirmed
+  /// [setOmpModel]; restored when the Bridge rejects the change.
+  ({String? model, String? thinkingLevel, List<String> thinkingLevels})?
+  _pendingOmpModelRollback;
+
   /// Whether this session is a Codex session.
   bool get isCodex => provider == Provider.codex;
+
+  /// Whether this session is an omp session.
+  bool get isOmp => provider == Provider.omp;
+
+  /// The Bridge keeps a one-item input queue (edit, cancel, steer) for this
+  /// provider.
+  bool get supportsQueuedInput => isCodex || isOmp;
+
+  /// The model can be changed while the session runs.
+  bool get supportsRuntimeModelChange => isCodex || isOmp;
+
+  /// The session has a sandbox toggle (Claude only).
+  bool get supportsSandboxToggle =>
+      provider == null || provider == Provider.claude;
+
+  List<OmpModelInfo> get ompModels => _bridge.ompModels;
 
   List<String> get codexModels => _bridge.codexModels;
 
@@ -149,11 +170,19 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
                            )
                          : CodexPermissionsMode.defaultPermissions))
                : CodexPermissionsMode.defaultPermissions,
-           planMode: initialPermissionMode == PermissionMode.plan,
-           sandboxMode:
-               initialSandboxMode ??
-               (provider == Provider.codex ? SandboxMode.on : SandboxMode.off),
-           inPlanMode: initialPermissionMode == PermissionMode.plan,
+           // omp has neither plan mode nor a sandbox.
+           planMode:
+               provider != Provider.omp &&
+               initialPermissionMode == PermissionMode.plan,
+           sandboxMode: provider == Provider.omp
+               ? SandboxMode.off
+               : initialSandboxMode ??
+                     (provider == Provider.codex
+                         ? SandboxMode.on
+                         : SandboxMode.off),
+           inPlanMode:
+               provider != Provider.omp &&
+               initialPermissionMode == PermissionMode.plan,
            explorerCurrentPath: initialExplorerCurrentPath.trim(),
            recentPeekedFiles: initialRecentPeekedFiles
                .map((file) => file.trim())
@@ -238,9 +267,16 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         history,
         isBackground: true,
         isCodex: isCodex,
+        isOmp: isOmp,
         ignoredToolUseIds: _respondedToolUseIds,
       );
       _applyUpdate(update, history);
+      // The cached timeline has no omp_settings, so its init carries the
+      // settings from session start. The cached session summary is newer;
+      // apply it again, as the live history path does.
+      if (isOmp && _latestSessionContext != null) {
+        _applySessionContext(_latestSessionContext!);
+      }
     } catch (e, st) {
       logger.error(
         '[session:$sessionId] Failed to restore cached runtime messages',
@@ -251,7 +287,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   }
 
   void _restoreDeliveryPendingInput() {
-    if (!isCodex || state.queuedInput != null) return;
+    if (!supportsQueuedInput || state.queuedInput != null) return;
     final pending = _bridge.deliveryPendingInputForSession(
       sessionId,
       includeHidden: true,
@@ -274,6 +310,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     if (msg is ErrorMessage) {
       logger.error('[session:$sessionId] Error from bridge: ${msg.message}');
       _rollbackFailedModeChange(msg);
+      _rollbackFailedOmpModelChange(msg);
       if (_isSessionNotFound(msg)) {
         _statusRefreshTimer?.cancel();
         _statusRefreshTimer = null;
@@ -283,6 +320,10 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     }
     if (isCodex && msg is SystemMessage && msg.subtype == 'init') {
       requestGoal();
+    }
+    if (msg is SystemMessage && msg.subtype == 'omp_settings') {
+      // The Bridge confirmed the applied settings.
+      _pendingOmpModelRollback = null;
     }
 
     // Prevent duplicate past_history processing
@@ -306,12 +347,14 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       _markToolUseResponded(msg.toolUseId);
       _emitNextApprovalOrNone(msg.toolUseId);
     }
+    if (msg is RewindResultMessage) _rewindResultsController.add(msg);
 
     try {
       final update = _handler.handle(
         msg,
         isBackground: true,
         isCodex: isCodex,
+        isOmp: isOmp,
         ignoredToolUseIds: _respondedToolUseIds,
       );
       _applyUpdate(update, msg);
@@ -332,10 +375,11 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     if (context.id != sessionId) return;
     if (context.provider?.isNotEmpty == true &&
         provider != null &&
-        context.provider != provider!.value) {
+        providerFromValue(context.provider) != provider) {
       return;
     }
     _latestSessionContext = context;
+    final previousClaudeSessionId = state.claudeSessionId;
 
     final permissionMode = PermissionMode.values
         .where((mode) => mode.value == context.effectivePermissionMode)
@@ -370,6 +414,17 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
                 ? context.worktreeBranch
                 : context.gitBranch)!
             .trim();
+    // A summary with omp settings is a snapshot: an absent level means omp
+    // has none for the model. While a [setOmpModel] change is unconfirmed the
+    // summary still shows the old settings, so the optimistic ones stay.
+    final hasOmpSettings =
+        isOmp &&
+        _pendingOmpModelRollback == null &&
+        (context.ompModel != null || context.ompThinkingLevel != null);
+    final ompModel = hasOmpSettings ? context.ompModel : state.ompModel;
+    final ompThinkingLevel = hasOmpSettings
+        ? context.ompThinkingLevel
+        : state.ompThinkingLevel;
 
     emit(
       state.copyWith(
@@ -397,13 +452,65 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         codexSpeed: context.codexServiceTier == null
             ? state.codexSpeed
             : codexSpeedFromRaw(context.codexServiceTier),
-        planMode: context.resolvedPlanMode,
-        inPlanMode: context.resolvedPlanMode,
-        sandboxMode: sandboxMode ?? state.sandboxMode,
+        ompModel: ompModel,
+        ompThinkingLevel: ompThinkingLevel,
+        ompThinkingLevels: isOmp
+            ? _ompThinkingLevelsFor(ompModel)
+            : state.ompThinkingLevels,
+        planMode: !isOmp && context.resolvedPlanMode,
+        inPlanMode: !isOmp && context.resolvedPlanMode,
+        sandboxMode: isOmp ? SandboxMode.off : sandboxMode ?? state.sandboxMode,
         queuedInput: context.queuedInput,
         sessionUnavailable: false,
         sessionContextLoaded: true,
       ),
+    );
+    if (isOmp) {
+      _persistSessionIdSettings(
+        previousId: previousClaudeSessionId,
+        nextId: state.claudeSessionId,
+      );
+    }
+  }
+
+  /// Thinking levels of [model] from the Bridge's omp catalogue; falls back
+  /// to [reported] (from `init` / `omp_settings`), then to the current
+  /// levels when the catalogue does not know the model.
+  List<String> _ompThinkingLevelsFor(String? model, {List<String>? reported}) {
+    if (reported != null && reported.isNotEmpty) return reported;
+    final fromCatalogue = ompThinkingLevelsForModel(_bridge.ompModels, model);
+    if (fromCatalogue.isNotEmpty) return fromCatalogue;
+    return reported ?? state.ompThinkingLevels;
+  }
+
+  /// Writes the session's modes to the per-session settings store when the
+  /// provider session id becomes known. omp rewrites it whenever the id
+  /// changes (an approval-mode respawn before the first reply gets a new omp
+  /// id, §7.3) and stores only `permissionMode` and `executionMode`: omp
+  /// restores model and thinking level from its session file. Claude keeps
+  /// its first-id write.
+  void _persistSessionIdSettings({
+    required String? previousId,
+    required String? nextId,
+    ChatSessionState? claudeState,
+  }) {
+    if (nextId == null || nextId.isEmpty || nextId == previousId) return;
+    if (isOmp) {
+      unawaited(
+        _SessionSettingsHelper.save(nextId, {
+          'permissionMode': state.permissionMode.value,
+          'executionMode': state.executionMode.value,
+        }),
+      );
+      return;
+    }
+    if (isCodex || previousId != null) return;
+    final source = claudeState ?? state;
+    unawaited(
+      _SessionSettingsHelper.save(nextId, {
+        'permissionMode': source.permissionMode.value,
+        'sandboxMode': source.sandboxMode.value,
+      }),
     );
   }
 
@@ -805,6 +912,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       );
     }
     final usage = _calculateUsageTotals(nextEntries);
+    final nextOmpModel = update.ompModel ?? current.ompModel;
     emit(
       current.copyWith(
         status: update.status ?? current.status,
@@ -812,7 +920,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         approval: approval,
         totalCost: usage.totalCost,
         totalDuration: usage.totalDuration,
-        inPlanMode: update.inPlanMode ?? current.inPlanMode,
+        inPlanMode: isOmp ? false : update.inPlanMode ?? current.inPlanMode,
         permissionMode: update.permissionMode ?? current.permissionMode,
         executionMode: update.executionMode ?? current.executionMode,
         codexApprovalPolicy:
@@ -826,7 +934,18 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
             update.codexModelReasoningEffort ??
             current.codexModelReasoningEffort,
         codexSpeed: update.codexSpeed ?? current.codexSpeed,
-        planMode: update.planMode ?? current.planMode,
+        ompModel: nextOmpModel,
+        ompThinkingLevel: update.clearOmpThinkingLevel
+            ? null
+            : update.ompThinkingLevel ?? current.ompThinkingLevel,
+        ompThinkingLevels:
+            update.ompThinkingLevels != null || update.ompModel != null
+            ? _ompThinkingLevelsFor(
+                nextOmpModel,
+                reported: update.ompThinkingLevels,
+              )
+            : current.ompThinkingLevels,
+        planMode: isOmp ? false : update.planMode ?? current.planMode,
         slashCommands: update.slashCommands ?? current.slashCommands,
         queuedInput: nextQueuedInput,
         claudeSessionId: newClaudeSessionId,
@@ -835,15 +954,12 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       ),
     );
 
-    // Persist initial Claude settings when claudeSessionId is first known.
-    if (update.claudeSessionId != null &&
-        current.claudeSessionId == null &&
-        provider != Provider.codex) {
-      unawaited(
-        _SessionSettingsHelper.save(update.claudeSessionId!, {
-          'permissionMode': current.permissionMode.value,
-          'sandboxMode': current.sandboxMode.value,
-        }),
+    // Persist the session's modes when its provider session id is known.
+    if (update.claudeSessionId != null) {
+      _persistSessionIdSettings(
+        previousId: current.claudeSessionId,
+        nextId: update.claudeSessionId,
+        claudeState: current,
       );
     }
 
@@ -1313,6 +1429,13 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   /// Stream of side effects that the UI layer must execute (haptics, etc.).
   Stream<Set<ChatSideEffect>> get sideEffects => _sideEffectsController.stream;
 
+  final _rewindResultsController =
+      StreamController<RewindResultMessage>.broadcast();
+
+  /// The Bridge's answers to [rewind] for this session.
+  Stream<RewindResultMessage> get rewindResults =>
+      _rewindResultsController.stream;
+
   void setExplorerCurrentPath(String path) {
     final normalized = path.trim();
     if (normalized == state.explorerCurrentPath) return;
@@ -1368,7 +1491,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
           }
       }
     }
-    if (isCodex && state.queuedInput != null) return;
+    if (supportsQueuedInput && state.queuedInput != null) return;
 
     final clientMessageId = _uuid.v4();
     final isOffline = !_bridge.isConnected;
@@ -1385,9 +1508,9 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
             mentions: const <Map<String, String>>[],
           );
 
-    final shouldUseOfflineQueuePanel = isCodex && isOffline;
+    final shouldUseOfflineQueuePanel = supportsQueuedInput && isOffline;
     final shouldAddLocalEntry =
-        !isCodex ||
+        !supportsQueuedInput ||
         (!shouldUseOfflineQueuePanel && state.status == ProcessStatus.idle);
     if (shouldAddLocalEntry) {
       final entry = UserChatEntry(
@@ -1422,7 +1545,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
           .toList();
     }
 
-    final deliveryPendingItem = isCodex && !isOffline
+    final deliveryPendingItem = supportsQueuedInput && !isOffline
         ? QueuedInputItem(
             itemId: '$deliveryPendingQueuedInputPrefix$clientMessageId',
             text: text,
@@ -1455,7 +1578,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         mentions: structuredMentions.mentions,
       ),
     );
-    if (isCodex && !isOffline) {
+    if (supportsQueuedInput && !isOffline) {
       _scheduleDeliveryPendingQueue(
         clientMessageId: clientMessageId,
         item: deliveryPendingItem!,
@@ -1520,9 +1643,14 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   }
 
   void updateQueuedInput(QueuedInputItem item, String text) {
-    if (!isCodex || text.trim().isEmpty) return;
+    if (!supportsQueuedInput || text.trim().isEmpty) return;
     if (isDeliveryPendingQueuedInput(item)) return;
-    final structuredMentions = _extractCodexStructuredInputs(text);
+    final structuredMentions = isCodex
+        ? _extractCodexStructuredInputs(text)
+        : (
+            skills: const <Map<String, String>>[],
+            mentions: const <Map<String, String>>[],
+          );
     final offlineClientMessageId = offlineQueuedClientMessageId(item);
     if (offlineClientMessageId != null) {
       final updated = QueuedInputItem(
@@ -1558,7 +1686,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   }
 
   void steerQueuedInput(QueuedInputItem item) {
-    if (!isCodex ||
+    if (!supportsQueuedInput ||
         isOfflineQueuedInput(item) ||
         isDeliveryPendingQueuedInput(item)) {
       return;
@@ -1569,7 +1697,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   }
 
   void cancelQueuedInput(QueuedInputItem item) {
-    if (!isCodex) return;
+    if (!supportsQueuedInput) return;
     if (isDeliveryPendingQueuedInput(item)) {
       final clientMessageId = deliveryPendingClientMessageId(item);
       if (clientMessageId != null) {
@@ -1756,8 +1884,19 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     _bridge.interrupt(sessionId);
   }
 
-  /// Change permission mode for Claude sessions.
+  /// Change permission mode for Claude sessions. omp goes through
+  /// [setSessionModes], which also updates and stores `executionMode`: the
+  /// omp resume reads the stored `executionMode` first.
   void setPermissionMode(PermissionMode mode) {
+    if (isOmp) {
+      setSessionModes(
+        executionMode: deriveExecutionMode(
+          provider: Provider.omp.value,
+          permissionMode: mode.value,
+        ),
+      );
+      return;
+    }
     logger.info('[session:$sessionId] setPermissionMode=${mode.value}');
     _pendingPermissionRollback = state.permissionMode;
     emit(
@@ -1780,7 +1919,8 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
 
   void setSessionModes({ExecutionMode? executionMode, bool? planMode}) {
     final nextExecution = executionMode ?? state.executionMode;
-    final nextPlanMode = planMode ?? state.planMode;
+    // omp has no plan mode.
+    final nextPlanMode = !isOmp && (planMode ?? state.planMode);
     final legacyMode = legacyPermissionModeFromModes(
       provider ?? Provider.claude,
       executionMode: nextExecution,
@@ -2001,6 +2141,108 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     );
   }
 
+  /// Change the model and/or thinking level of a running omp session.
+  ///
+  /// Updates the state optimistically; the Bridge validates the change,
+  /// applies it when omp is idle and confirms it with `omp_settings`. A
+  /// rejection (`set_omp_model_failed` / `set_omp_model_unsupported`)
+  /// restores the settings confirmed before the first unconfirmed change.
+  void setOmpModel({String? model, String? thinkingLevel}) {
+    if (!isOmp) return;
+    final trimmedModel = model?.trim();
+    final requestedModel = trimmedModel == null || trimmedModel.isEmpty
+        ? null
+        : trimmedModel;
+    final requestedLevel = ompThinkingLevelFromValue(thinkingLevel)?.value;
+    if (requestedModel == null && requestedLevel == null) return;
+    final nextModel = requestedModel ?? state.ompModel;
+    final modelChanged =
+        requestedModel != null && requestedModel != state.ompModel;
+    final levels = modelChanged
+        ? ompThinkingLevelsForModel(_bridge.ompModels, nextModel)
+        : state.ompThinkingLevels;
+    var nextLevel = requestedLevel ?? state.ompThinkingLevel;
+    // Mirror the Bridge rule for a level the new model does not offer: the
+    // highest non-off level of a reasoning model, else off.
+    if (requestedLevel == null &&
+        nextLevel != null &&
+        levels.isNotEmpty &&
+        !levels.contains(nextLevel)) {
+      nextLevel = levels.lastWhere(
+        (level) => level != OmpThinkingLevel.off.value,
+        orElse: () => OmpThinkingLevel.off.value,
+      );
+    }
+    if (!modelChanged && nextLevel == state.ompThinkingLevel) return;
+
+    // While an earlier change is unconfirmed, the Bridge replaces its pending
+    // request with this one and validates a level against the model omp still
+    // runs. So the request carries the whole optimistic target: the model and
+    // a level the target model offers.
+    final unconfirmed = _pendingOmpModelRollback != null;
+    final sentModel = modelChanged || unconfirmed ? nextModel : null;
+    final sentLevel =
+        requestedLevel ??
+        (unconfirmed && levels.contains(nextLevel) ? nextLevel : null);
+    logger.info(
+      '[session:$sessionId] setOmpModel model=$sentModel '
+      'thinking=$sentLevel',
+    );
+    _pendingOmpModelRollback ??= (
+      model: state.ompModel,
+      thinkingLevel: state.ompThinkingLevel,
+      thinkingLevels: state.ompThinkingLevels,
+    );
+    emit(
+      state.copyWith(
+        ompModel: nextModel,
+        ompThinkingLevel: nextLevel,
+        ompThinkingLevels: levels.isNotEmpty ? levels : state.ompThinkingLevels,
+      ),
+    );
+    _bridge.patchSessionOmpModel(
+      sessionId,
+      model: nextModel,
+      thinkingLevel: nextLevel,
+    );
+    _bridge.send(
+      ClientMessage.setOmpModel(
+        sessionId,
+        model: sentModel,
+        thinkingLevel: sentLevel,
+      ),
+    );
+  }
+
+  void _rollbackFailedOmpModelChange(ErrorMessage msg) {
+    final previous = _pendingOmpModelRollback;
+    if (previous == null || !_isOmpModelFailure(msg)) return;
+    _pendingOmpModelRollback = null;
+    emit(
+      state.copyWith(
+        ompModel: previous.model,
+        ompThinkingLevel: previous.thinkingLevel,
+        ompThinkingLevels: previous.thinkingLevels,
+      ),
+    );
+    _bridge.patchSessionOmpModel(
+      sessionId,
+      model: previous.model,
+      thinkingLevel: previous.thinkingLevel,
+      clearModel: previous.model == null,
+      clearThinkingLevel: previous.thinkingLevel == null,
+    );
+  }
+
+  bool _isOmpModelFailure(ErrorMessage msg) {
+    return msg.errorCode == 'set_omp_model_failed' ||
+        msg.errorCode == 'set_omp_model_unsupported' ||
+        // Local answer of BridgeService when the Bridge lacks omp support.
+        msg.errorCode == 'bridge_update_required' ||
+        (msg.errorCode == 'unsupported_message' &&
+            msg.message == 'set_omp_model');
+  }
+
   /// Change sandbox mode (Claude & Codex).
   /// Bridge destroys and resumes the session with new sandbox settings.
   void setSandboxMode(SandboxMode mode) {
@@ -2105,6 +2347,8 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   bool _isPermissionModeFailure(ErrorMessage msg) {
     return msg.errorCode == 'set_permission_mode_rejected' ||
         msg.errorCode == 'auto_mode_unavailable' ||
+        msg.errorCode == 'omp_mode_unsupported' ||
+        msg.errorCode == 'omp_respawn_failed' ||
         msg.message.startsWith('Failed to set permission mode:') ||
         msg.message.startsWith(
           'Failed to restart session for permission mode change:',
@@ -2314,6 +2558,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     _subscription?.cancel();
     _sessionContextSubscription?.cancel();
     _sideEffectsController.close();
+    _rewindResultsController.close();
     return super.close();
   }
 }

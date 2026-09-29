@@ -1426,7 +1426,10 @@ class OfflinePendingSessionCard extends StatelessWidget {
     final l = AppLocalizations.of(context);
     final provider = providerFromRaw(action.provider);
     final providerStyle = providerStyleFor(context, provider);
-    final statusColor = colorScheme.tertiary;
+    final needsBridgeUpdate = action.bridgeUpdateRequired;
+    final statusColor = needsBridgeUpdate
+        ? appColors.warningText
+        : colorScheme.tertiary;
     final isProcessing = action.state == OfflinePendingActionState.processing;
     final status = isProcessing
         ? switch (action.kind) {
@@ -1435,22 +1438,32 @@ class OfflinePendingSessionCard extends StatelessWidget {
             OfflinePendingActionKind.resume => l.pendingActionProcessingStatus,
           }
         : l.pendingActionStatus;
-    final subtitle = switch ((action.state, action.kind)) {
-      (
-        OfflinePendingActionState.queuedForReconnect,
-        OfflinePendingActionKind.start,
-      ) =>
-        l.pendingActionWillCreateOnReconnect,
-      (
-        OfflinePendingActionState.queuedForReconnect,
-        OfflinePendingActionKind.resume,
-      ) =>
-        l.pendingActionWillResumeOnReconnect,
-      (OfflinePendingActionState.processing, OfflinePendingActionKind.start) =>
-        l.pendingActionProcessingStartDescription,
-      (OfflinePendingActionState.processing, OfflinePendingActionKind.resume) =>
-        l.pendingActionProcessingResumeDescription,
-    };
+    // A queued omp action waits for a Bridge with omp support; it is not
+    // sent to the connected one.
+    final subtitle = needsBridgeUpdate
+        ? l.ompStartNeedsBridgeUpdate
+        : switch ((action.state, action.kind)) {
+            (
+              OfflinePendingActionState.queuedForReconnect,
+              OfflinePendingActionKind.start,
+            ) =>
+              l.pendingActionWillCreateOnReconnect,
+            (
+              OfflinePendingActionState.queuedForReconnect,
+              OfflinePendingActionKind.resume,
+            ) =>
+              l.pendingActionWillResumeOnReconnect,
+            (
+              OfflinePendingActionState.processing,
+              OfflinePendingActionKind.start,
+            ) =>
+              l.pendingActionProcessingStartDescription,
+            (
+              OfflinePendingActionState.processing,
+              OfflinePendingActionKind.resume,
+            ) =>
+              l.pendingActionProcessingResumeDescription,
+          };
     final title = switch ((action.state, action.kind)) {
       (
         OfflinePendingActionState.queuedForReconnect,
@@ -1486,14 +1499,22 @@ class OfflinePendingSessionCard extends StatelessWidget {
             color: statusColor.withValues(alpha: 0.08),
             child: Row(
               children: [
-                SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
+                if (needsBridgeUpdate)
+                  Icon(
+                    Icons.system_update_alt,
+                    key: const ValueKey('pending_action_bridge_update_icon'),
+                    size: 14,
                     color: statusColor,
+                  )
+                else
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: statusColor,
+                    ),
                   ),
-                ),
                 const SizedBox(width: 8),
                 Text(
                   status,
@@ -1507,11 +1528,14 @@ class OfflinePendingSessionCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                     subtitle,
+                    key: needsBridgeUpdate
+                        ? const ValueKey('pending_action_bridge_update_text')
+                        : null,
                     style: TextStyle(
                       fontSize: 11,
                       color: statusColor.withValues(alpha: 0.82),
                     ),
-                    maxLines: 1,
+                    maxLines: needsBridgeUpdate ? 2 : 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),

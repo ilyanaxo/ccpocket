@@ -45,6 +45,103 @@ describe("normalizeToolResultContent", () => {
 
 // ---- parseClientMessage ----
 
+describe("parseClientMessage omp", () => {
+  const parse = (msg: Record<string, unknown>) =>
+    parseClientMessage(JSON.stringify(msg));
+
+  it("accepts provider omp wherever a provider is accepted", () => {
+    expect(parse({ type: "start", projectPath: "/p", provider: "omp" })).toMatchObject({
+      provider: "omp",
+    });
+    expect(
+      parse({ type: "resume_session", sessionId: "s", projectPath: "/p", provider: "omp" }),
+    ).toMatchObject({ provider: "omp" });
+    expect(
+      parse({ type: "resolve_session_link", requestId: "r", sessionId: "s", provider: "omp" }),
+    ).toMatchObject({ provider: "omp" });
+    expect(parse({ type: "list_recent_sessions", provider: "omp" })).toMatchObject({
+      provider: "omp",
+    });
+    expect(
+      parse({ type: "archive_session", sessionId: "s", provider: "omp", projectPath: "/p" }),
+    ).toMatchObject({ provider: "omp" });
+  });
+
+  it("still rejects unknown providers", () => {
+    expect(parse({ type: "start", projectPath: "/p", provider: "gemini" })).toBeNull();
+    expect(
+      parse({ type: "resolve_session_link", requestId: "r", sessionId: "s", provider: "x" }),
+    ).toBeNull();
+    expect(parse({ type: "list_recent_sessions", provider: "x" })).toBeNull();
+    expect(
+      parse({ type: "archive_session", sessionId: "s", provider: "x", projectPath: "/p" }),
+    ).toBeNull();
+  });
+
+  it("validates providers lists for list_recent_sessions", () => {
+    expect(parse({ type: "list_recent_sessions", providers: ["claude", "omp"] })).toMatchObject({
+      providers: ["claude", "omp"],
+    });
+    expect(parse({ type: "list_recent_sessions", providers: [] })).toBeNull();
+    expect(parse({ type: "list_recent_sessions", providers: ["omp", "x"] })).toBeNull();
+    expect(parse({ type: "list_recent_sessions", providers: "omp" })).toBeNull();
+    expect(
+      parse({ type: "list_recent_sessions", provider: "omp", providers: ["omp"] }),
+    ).toBeNull();
+  });
+
+  it("validates the omp thinking level on start and resume", () => {
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      expect(
+        parse({ type: "start", projectPath: "/p", provider: "omp", thinkingLevel: level }),
+      ).toMatchObject({ thinkingLevel: level });
+    }
+    expect(
+      parse({ type: "start", projectPath: "/p", provider: "omp", thinkingLevel: "ultra" }),
+    ).toBeNull();
+    expect(
+      parse({
+        type: "resume_session",
+        sessionId: "s",
+        projectPath: "/p",
+        provider: "omp",
+        thinkingLevel: 3,
+      }),
+    ).toBeNull();
+  });
+
+  it("validates set_omp_model", () => {
+    expect(
+      parse({ type: "set_omp_model", sessionId: "s", model: "baseten/zai-org/GLM-5.3-Fast" }),
+    ).toEqual({
+      type: "set_omp_model",
+      sessionId: "s",
+      model: "baseten/zai-org/GLM-5.3-Fast",
+    });
+    expect(parse({ type: "set_omp_model", sessionId: "s", thinkingLevel: "off" })).toMatchObject({
+      thinkingLevel: "off",
+    });
+    expect(parse({ type: "set_omp_model", sessionId: "s" })).toBeNull();
+    expect(parse({ type: "set_omp_model", sessionId: "", model: "a/b" })).toBeNull();
+    expect(parse({ type: "set_omp_model", model: "a/b" })).toBeNull();
+    expect(parse({ type: "set_omp_model", sessionId: "s", model: " " })).toBeNull();
+    expect(
+      parse({ type: "set_omp_model", sessionId: "s", model: "a/b", thinkingLevel: "ultra" }),
+    ).toBeNull();
+  });
+
+  it("accepts supportedProviders on client_capabilities and keeps unknown names", () => {
+    expect(
+      parse({ type: "client_capabilities", supportedProviders: ["claude", "codex", "omp"] }),
+    ).toMatchObject({ supportedProviders: ["claude", "codex", "omp"] });
+    expect(
+      parse({ type: "client_capabilities", supportedProviders: ["omp", "future"] }),
+    ).toMatchObject({ supportedProviders: ["omp", "future"] });
+    expect(parse({ type: "client_capabilities", supportedProviders: "omp" })).toBeNull();
+    expect(parse({ type: "client_capabilities", supportedProviders: [1] })).toBeNull();
+  });
+});
+
 describe("parseClientMessage", () => {
   it("validates loopback Finder proofs without accepting a remote host or file path", () => {
     const request = { type: "reveal_file_local", projectPath: "/p", filePath: "movie.mp4",

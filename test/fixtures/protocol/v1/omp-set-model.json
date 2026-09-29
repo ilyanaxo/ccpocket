@@ -1,0 +1,6 @@
+{
+  "type": "set_omp_model",
+  "sessionId": "3f9c2a1b",
+  "model": "baseten/MiniMaxAI/MiniMax-M3",
+  "thinkingLevel": "off"
+}

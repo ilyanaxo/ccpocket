@@ -285,8 +285,13 @@ void main() async {
           ),
           BlocProvider(create: (_) => ServerDiscoveryCubit()),
           BlocProvider(
-            create: (ctx) =>
-                SessionListCubit(bridge: ctx.read<BridgeService>()),
+            create: (ctx) => SessionListCubit(
+              bridge: ctx.read<BridgeService>(),
+              enabledTabs: settingsCubit.state.newSessionTabs,
+              enabledTabsChanges: settingsCubit.stream.map(
+                (settings) => settings.newSessionTabs,
+              ),
+            ),
           ),
           BlocProvider(
             create: (_) => MachineManagerCubit(
@@ -468,7 +473,9 @@ class _CcpocketAppState extends State<CcpocketApp> {
   }
 
   String _normalizeProvider(String? provider) {
-    return provider == 'codex' ? 'codex' : 'claude';
+    // Unknown values keep the historical Claude fallback. (`Provider` is
+    // ambiguous here: package:provider exports a class of the same name.)
+    return providerFromValue(provider)?.value ?? 'claude';
   }
 
   int _notificationId(String sessionId, String provider, String eventType) {

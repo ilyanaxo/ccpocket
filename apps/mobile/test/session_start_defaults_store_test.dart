@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:ccpocket/features/session_list/services/session_start_defaults_store.dart';
 import 'package:ccpocket/models/messages.dart';
-import 'package:ccpocket/widgets/new_session_sheet.dart';
+import 'package:ccpocket/models/new_session_params.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -10,6 +10,7 @@ const _legacyKey = 'session_start_defaults_v1';
 const _lastProviderKey = 'session_start_defaults_last_provider_v1';
 const _claudeKey = 'session_start_defaults_claude_v1';
 const _codexKey = 'session_start_defaults_codex_v1';
+const _ompKey = 'session_start_defaults_omp_v1';
 
 NewSessionParams _defaults(Provider provider, String projectPath) {
   return NewSessionParams(projectPath: projectPath, provider: provider);
@@ -161,4 +162,89 @@ void main() {
       expect(prefs.containsKey(_legacyKey), isFalse);
     },
   );
+
+  group('omp defaults', () {
+    NewSessionParams ompDefaults() => NewSessionParams(
+      projectPath: '/workspace/omp',
+      provider: Provider.omp,
+      executionMode: ExecutionMode.acceptEdits,
+      // omp has no sandbox; a value left over from another page is dropped.
+      sandboxMode: SandboxMode.on,
+      ompModel: 'baseten/zai-org/GLM-5.3-Fast',
+      ompThinkingLevel: 'high',
+    );
+
+    test('are stored under the omp key and restored as latest', () async {
+      final params = ompDefaults();
+      await store.save(params);
+
+      final prefs = await SharedPreferences.getInstance();
+      final stored =
+          jsonDecode(prefs.getString(_ompKey)!) as Map<String, dynamic>;
+      expect(stored['provider'], 'omp');
+      expect(stored['ompModel'], 'baseten/zai-org/GLM-5.3-Fast');
+      expect(stored['ompThinkingLevel'], 'high');
+      expect(stored['executionMode'], 'acceptEdits');
+      expect(stored['permissionMode'], 'acceptEdits');
+      expect(stored['planMode'], isFalse);
+      expect(stored['sandboxMode'], isNull);
+      expect(prefs.getString(_lastProviderKey), 'omp');
+
+      final latest = await store.loadInitial();
+      expect(latest?.provider, Provider.omp);
+      expect(latest?.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+      expect(latest?.ompThinkingLevel, 'high');
+      expect(latest?.executionMode, ExecutionMode.acceptEdits);
+      expect(latest?.sandboxMode, isNull);
+
+      final scoped = await store.loadFor(Provider.omp);
+      expect(scoped?.projectPath, '/workspace/omp');
+      expect(await store.loadFor(Provider.codex), isNull);
+    });
+
+    test(
+      'drop an unknown thinking level and never restore plan or sandbox',
+      () {
+        final restored = sessionStartDefaultsFromJson({
+          'projectPath': '/workspace/omp',
+          'provider': 'omp',
+          'permissionMode': 'plan',
+          'planMode': true,
+          'sandboxMode': 'on',
+          'ompModel': ' a/b ',
+          'ompThinkingLevel': 'turbo',
+        })!;
+
+        expect(restored.provider, Provider.omp);
+        expect(restored.ompModel, 'a/b');
+        expect(restored.ompThinkingLevel, isNull);
+        expect(restored.planMode, isFalse);
+        expect(restored.sandboxMode, isNull);
+        expect(restored.executionMode, ExecutionMode.defaultMode);
+        expect(restored.permissionMode, PermissionMode.defaultMode);
+
+        // Claude keeps its sandbox choice.
+        final claude = sessionStartDefaultsFromJson({
+          'projectPath': '/workspace/claude',
+          'provider': 'claude',
+          'sandboxMode': 'on',
+        })!;
+        expect(claude.sandboxMode, SandboxMode.on);
+      },
+    );
+
+    test('remove obsolete projectless omp defaults', () async {
+      SharedPreferences.setMockInitialValues({
+        _ompKey: jsonEncode({
+          'projectPath': '/tmp',
+          'provider': 'omp',
+          'workspaceKind': 'projectless',
+        }),
+      });
+
+      expect(await store.loadFor(Provider.omp), isNull);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.containsKey(_ompKey), isFalse);
+    });
+  });
 }

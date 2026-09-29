@@ -22,11 +22,18 @@ vi.mock("node:fs", () => ({
   constants: { R_OK: 4, W_OK: 2 },
 }));
 
+// omp: the model catalogue comes from `omp models --json`; never run it here.
+const mockListOmpModels = vi.fn();
+vi.mock("./omp-sessions.js", () => ({
+  listOmpModels: (...args: unknown[]) => mockListOmpModels(...args),
+}));
+
 // Import after mocks
 const {
   checkNodeVersion,
   checkGit,
   checkCliProviders,
+  checkOmpProvider,
   checkDependencies,
   checkPortAvailable,
   checkTailscale,
@@ -148,20 +155,28 @@ describe("doctor checks", () => {
       vi.unstubAllEnvs();
     });
 
-    it("passes when both CLIs are installed and authenticated", async () => {
+    it("passes when all three CLIs are installed and authenticated", async () => {
       mockExecSync.mockImplementation((cmd: string) => {
         if (cmd === "claude --version") return "1.0.23";
         if (cmd === "claude auth status") return "Logged in";
         if (cmd === "codex --version") return "0.104.0";
-        return "";
+        if (cmd === "'omp' --version") return "omp/18.3.2";
+        throw new Error("command not found");
+      });
+      mockListOmpModels.mockResolvedValue({
+        models: [
+          { selector: "a/x", provider: "a", name: "x", thinkingLevels: ["off"], input: [] },
+          { selector: "b/y", provider: "b", name: "y", thinkingLevels: ["off"], input: [] },
+        ],
+        availability: "available",
       });
       const originalEnv = process.env.OPENAI_API_KEY;
       process.env.OPENAI_API_KEY = "test-key";
       try {
         const result = await checkCliProviders();
         expect(result.status).toBe("pass");
-        expect(result.message).toBe("2 of 2 available");
-        expect(result.providers).toHaveLength(2);
+        expect(result.message).toBe("3 of 3 available");
+        expect(result.providers).toHaveLength(3);
       } finally {
         if (originalEnv === undefined) delete process.env.OPENAI_API_KEY;
         else process.env.OPENAI_API_KEY = originalEnv;
@@ -176,7 +191,7 @@ describe("doctor checks", () => {
       });
       const result = await checkCliProviders();
       expect(result.status).toBe("pass");
-      expect(result.message).toBe("1 of 2 available");
+      expect(result.message).toBe("1 of 3 available");
     });
 
     it("passes with an explicit Anthropic API key without subscription opt-in", async () => {
@@ -207,7 +222,7 @@ describe("doctor checks", () => {
         });
         const result = await checkCliProviders();
         expect(result.status).toBe("pass");
-        expect(result.message).toBe("1 of 2 available");
+        expect(result.message).toBe("1 of 3 available");
       } finally {
         if (originalEnv === undefined) delete process.env.OPENAI_API_KEY;
         else process.env.OPENAI_API_KEY = originalEnv;
@@ -323,6 +338,103 @@ describe("doctor checks", () => {
       expect(claude?.authenticated).toBe(false);
       expect(claude?.authMessage).toContain("explicit opt-in required");
       expect(claude?.remediation).toContain("BRIDGE_ALLOW_CLAUDE_OAUTH=1");
+    });
+  });
+
+  describe("checkOmpProvider", () => {
+    beforeEach(() => {
+      mockListOmpModels.mockReset();
+      mockExistsSync.mockReturnValue(false);
+    });
+
+    it("reports a missing omp CLI with an install hint", async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error("command not found");
+      });
+      const omp = await checkOmpProvider({});
+      expect(omp).toMatchObject({ name: "omp CLI", installed: false, authenticated: false });
+      expect(omp.remediation).toContain("BRIDGE_OMP_BIN");
+      expect(mockListOmpModels).not.toHaveBeenCalled();
+    });
+
+    it("uses BRIDGE_OMP_BIN and counts models and providers", async () => {
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (cmd === "'/opt/omp bin/omp' --version") return "omp/18.4.0\n";
+        throw new Error("command not found");
+      });
+      mockListOmpModels.mockResolvedValue({
+        models: [
+          { selector: "a/x", provider: "a", name: "x", thinkingLevels: ["off"], input: [] },
+          { selector: "a/y", provider: "a", name: "y", thinkingLevels: ["off"], input: [] },
+          { selector: "b/z", provider: "b", name: "z", thinkingLevels: ["off"], input: [] },
+        ],
+        availability: "available",
+      });
+      const omp = await checkOmpProvider({ BRIDGE_OMP_BIN: "/opt/omp bin/omp" });
+      expect(omp).toMatchObject({
+        installed: true,
+        version: "omp/18.4.0",
+        authenticated: true,
+        authMessage: "3 models from 2 providers",
+      });
+      expect(omp.warnings).toBeUndefined();
+      expect(omp.details).toEqual(
+        expect.arrayContaining(["profile: default", expect.stringContaining("session dir: ")]),
+      );
+    });
+
+    it("asks for a login when omp lists no model", async () => {
+      mockExecSync.mockReturnValue("omp/18.3.2");
+      mockListOmpModels.mockResolvedValue({ models: [], availability: "no_models" });
+      const omp = await checkOmpProvider({});
+      expect(omp.authenticated).toBe(false);
+      expect(omp.remediation).toBe(
+        "Run omp and log in (/login), or set a provider API key",
+      );
+    });
+
+    it("warns about an untested omp version and store overrides", async () => {
+      mockExecSync.mockReturnValue("omp/18.2.9");
+      mockListOmpModels.mockResolvedValue({
+        models: [{ selector: "a/x", provider: "a", name: "x", thinkingLevels: ["off"], input: [] }],
+        availability: "available",
+      });
+      mockExistsSync.mockImplementation((path: unknown) => String(path) === "/xdg/omp");
+      const omp = await checkOmpProvider({
+        XDG_DATA_HOME: "/xdg",
+        PI_CODING_AGENT_SESSION_DIR: "/flat/sessions",
+        OMP_PROFILE: "work",
+      });
+      expect(omp.warnings).toEqual([
+        "untested omp version (tested: 18.3.2); RPC v2 is negotiated at start",
+        "PI_CODING_AGENT_SESSION_DIR is set: every omp session is stored in /flat/sessions",
+        "omp data may live in /xdg/omp (XDG); the Bridge only lists /flat/sessions",
+      ]);
+      expect(omp.details).toContain("profile: work");
+      expect(omp.details).toContain("session dir: /flat/sessions");
+    });
+
+    it("reports a profile omp rejects", async () => {
+      mockExecSync.mockReturnValue("omp/18.3.2");
+      mockListOmpModels.mockResolvedValue({ models: [], availability: "no_models" });
+      const omp = await checkOmpProvider({ OMP_PROFILE: "Bad Name" });
+      expect(omp.warnings).toContain(
+        'omp rejects the profile "Bad Name"; the Bridge lists no omp sessions',
+      );
+    });
+
+    it("turns an installed omp with warnings into a CLI providers warning", async () => {
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (cmd === "'omp' --version") return "omp/17.0.0";
+        throw new Error("command not found");
+      });
+      mockListOmpModels.mockResolvedValue({
+        models: [{ selector: "a/x", provider: "a", name: "x", thinkingLevels: ["off"], input: [] }],
+        availability: "available",
+      });
+      const result = await checkCliProviders();
+      expect(result.status).toBe("warn");
+      expect(result.message).toBe("1 of 3 available");
     });
   });
 

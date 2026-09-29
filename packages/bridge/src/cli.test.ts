@@ -19,7 +19,9 @@ function runCli(args: string[], bridgePort?: string) {
   });
 }
 
-describe("ccpocket-bridge CLI", () => {
+// Each case spawns `tsx src/cli.ts`, which takes several seconds on a loaded
+// machine; the default 5 s test timeout is too short for that.
+describe("ccpocket-bridge CLI", { timeout: 30_000 }, () => {
   it("rejects an invalid --port value before server startup", () => {
     const result = runCli(["--port", "abc"]);
 
@@ -56,5 +58,14 @@ describe("ccpocket-bridge CLI", () => {
       '[bridge] Failed to start: Invalid BRIDGE_PORT "8.5"',
     );
     expect(result.stdout).not.toContain("Starting ccpocket bridge server");
+  });
+
+  it("documents the omp variables in the help text", () => {
+    const result = runCli(["--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("BRIDGE_OMP_BIN is the path to the omp CLI");
+    expect(result.stdout).toContain("BRIDGE_OMP_ASSIST_MODEL");
+    expect(result.stdout).toContain("PI_CODING_AGENT_SESSION_DIR");
   });
 });

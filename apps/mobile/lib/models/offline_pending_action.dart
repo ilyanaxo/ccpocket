@@ -14,6 +14,7 @@ class OfflinePendingAction {
     this.state = OfflinePendingActionState.queuedForReconnect,
     this.canCancel = true,
     this.sessionId,
+    this.bridgeUpdateRequired = false,
   });
 
   final String id;
@@ -26,6 +27,11 @@ class OfflinePendingAction {
   final OfflinePendingActionState state;
   final bool canCancel;
   final String? sessionId;
+
+  /// The action needs a provider the connected Bridge does not support
+  /// (omp without `provider_omp_v1`). It stays queued and is sent once a
+  /// Bridge that supports it is connected; the user can cancel it.
+  final bool bridgeUpdateRequired;
 
   String get projectName {
     if (workspaceProjectName?.isNotEmpty == true) {

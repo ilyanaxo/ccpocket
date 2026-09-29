@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:ccpocket/features/session_list/state/session_list_cubit.dart';
 import 'package:ccpocket/features/session_list/state/session_list_state.dart';
+import 'package:ccpocket/features/settings/state/settings_cubit.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/models/new_session_tab.dart';
 import 'package:ccpocket/services/bridge_service.dart';
@@ -19,6 +21,19 @@ class MockBridgeService extends BridgeService {
   bool _hasMore = false;
   String? _projectFilter;
   RecentSessionsMessage? _lastRecentSessionsMessage;
+  final _ompSupportController = StreamController<OmpSupport>.broadcast();
+  OmpSupport _ompSupport = OmpSupport.unknown;
+
+  @override
+  OmpSupport get ompSupport => _ompSupport;
+
+  @override
+  Stream<OmpSupport> get ompSupportStream => _ompSupportController.stream;
+
+  void setOmpSupport(OmpSupport support) {
+    _ompSupport = support;
+    _ompSupportController.add(support);
+  }
 
   @override
   Stream<List<RecentSession>> get recentSessionsStream =>
@@ -131,6 +146,7 @@ class MockBridgeService extends BridgeService {
   void switchFilter({
     String? projectPath,
     String? provider,
+    List<String>? providers,
     bool? namedOnly,
     String? searchQuery,
     int pageSize = 20,
@@ -142,6 +158,7 @@ class MockBridgeService extends BridgeService {
         offset: 0,
         projectPath: projectPath,
         provider: provider,
+        providers: providers,
         namedOnly: namedOnly,
         searchQuery: searchQuery,
       ),
@@ -153,6 +170,7 @@ class MockBridgeService extends BridgeService {
     _recentSessionsController.close();
     _projectHistoryController.close();
     _messageController.close();
+    _ompSupportController.close();
   }
 }
 
@@ -689,5 +707,248 @@ void main() {
         expect(cubit.state.isInitialLoading, isFalse);
       },
     );
+  });
+
+  group('omp provider filter', () {
+    Map<String, dynamic> lastRequest() =>
+        jsonDecode(mockBridge.sentMessages.last.toJson())
+            as Map<String, dynamic>;
+
+    Future<void> recreate({
+      Map<String, Object> prefs = const {},
+      OmpSupport support = OmpSupport.unknown,
+    }) async {
+      await cubit.close();
+      mockBridge.dispose();
+      SharedPreferences.setMockInitialValues(prefs);
+      mockBridge = MockBridgeService().._ompSupport = support;
+      cubit = SessionListCubit(bridge: mockBridge);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    Future<String?> storedFilter() async =>
+        (await SharedPreferences.getInstance()).getString(
+          'session_list_provider',
+        );
+
+    test('filters follow the effective providers', () {
+      expect(
+        providerFiltersForEnabledTabs(
+          defaultNewSessionTabs,
+          ompSupport: OmpSupport.supported,
+        ),
+        [
+          ProviderFilter.all,
+          ProviderFilter.codex,
+          ProviderFilter.claude,
+          ProviderFilter.omp,
+        ],
+      );
+      expect(
+        providerFiltersForEnabledTabs(
+          defaultNewSessionTabs,
+          ompSupport: OmpSupport.unsupported,
+        ),
+        [ProviderFilter.all, ProviderFilter.codex, ProviderFilter.claude],
+      );
+      expect(providerFiltersForEnabledTabs(defaultNewSessionTabs), [
+        ProviderFilter.all,
+        ProviderFilter.codex,
+        ProviderFilter.claude,
+      ]);
+      expect(
+        providerFiltersForEnabledTabs(const [
+          NewSessionTab.omp,
+        ], ompSupport: OmpSupport.supported),
+        [ProviderFilter.omp],
+      );
+    });
+
+    test('toggle cycles All, Codex, Claude, omp on an omp Bridge', () async {
+      await recreate(support: OmpSupport.supported);
+
+      final seen = <ProviderFilter>[];
+      for (var i = 0; i < 4; i++) {
+        cubit.toggleProviderFilter();
+        seen.add(cubit.state.providerFilter);
+      }
+      expect(seen, [
+        ProviderFilter.codex,
+        ProviderFilter.claude,
+        ProviderFilter.omp,
+        ProviderFilter.all,
+      ]);
+    });
+
+    test('the omp filter is persisted and restored', () async {
+      await recreate(support: OmpSupport.supported);
+      cubit.setProviderFilter(ProviderFilter.omp);
+      expect(lastRequest()['provider'], 'omp');
+      await Future<void>.delayed(Duration.zero);
+      expect(await storedFilter(), 'omp');
+
+      await recreate(
+        prefs: {'session_list_provider': 'omp'},
+        support: OmpSupport.supported,
+      );
+      expect(cubit.state.providerFilter, ProviderFilter.omp);
+    });
+
+    test('All names the effective providers only for a subset', () async {
+      await recreate(support: OmpSupport.supported);
+      cubit.applyEnabledAgents(const [NewSessionTab.claude, NewSessionTab.omp]);
+      cubit.selectProject(null);
+      expect(lastRequest()['providers'], ['claude', 'omp']);
+      expect(lastRequest().containsKey('provider'), isFalse);
+
+      cubit.applyEnabledAgents(defaultNewSessionTabs);
+      cubit.selectProject(null);
+      expect(lastRequest().containsKey('providers'), isFalse);
+      expect(lastRequest().containsKey('provider'), isFalse);
+    });
+
+    test('All on a Bridge without omp sends no providers', () async {
+      await recreate(support: OmpSupport.unsupported);
+      cubit.applyEnabledAgents(defaultNewSessionTabs);
+      cubit.selectProject(null);
+
+      expect(lastRequest().containsKey('providers'), isFalse);
+      expect(lastRequest().containsKey('provider'), isFalse);
+    });
+
+    test('coercion while omp support is unknown is not persisted', () async {
+      await recreate(prefs: {'session_list_provider': 'omp'});
+      cubit.applyEnabledAgents(defaultNewSessionTabs);
+
+      expect(cubit.state.providerFilter, ProviderFilter.all);
+      await Future<void>.delayed(Duration.zero);
+      expect(await storedFilter(), 'omp');
+
+      mockBridge.sentMessages.clear();
+      mockBridge.setOmpSupport(OmpSupport.supported);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(cubit.state.providerFilter, ProviderFilter.omp);
+      expect(lastRequest()['provider'], 'omp');
+      expect(await storedFilter(), 'omp');
+    });
+
+    test(
+      'a Bridge without omp shows All but keeps the stored omp filter',
+      () async {
+        await recreate(
+          prefs: {'session_list_provider': 'omp'},
+          support: OmpSupport.unsupported,
+        );
+        // Connecting to a Bridge without omp re-derives the filter.
+        mockBridge.setOmpSupport(OmpSupport.unsupported);
+        cubit.applyEnabledAgents(defaultNewSessionTabs);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(cubit.state.providerFilter, ProviderFilter.all);
+        expect(await storedFilter(), 'omp');
+
+        // A Bridge with omp brings the filter back.
+        mockBridge.sentMessages.clear();
+        mockBridge.setOmpSupport(OmpSupport.supported);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(cubit.state.providerFilter, ProviderFilter.omp);
+        expect(lastRequest()['provider'], 'omp');
+        expect(await storedFilter(), 'omp');
+      },
+    );
+
+    test('disabling an agent restricts and persists the filter', () async {
+      await recreate(
+        prefs: {'session_list_provider': 'codex'},
+        support: OmpSupport.unsupported,
+      );
+      expect(cubit.state.providerFilter, ProviderFilter.codex);
+
+      cubit.applyEnabledAgents(const [NewSessionTab.claude]);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(cubit.state.providerFilter, ProviderFilter.claude);
+      expect(await storedFilter(), 'claude');
+    });
+
+    test('All is re-requested when omp support changes its scope', () async {
+      await recreate();
+      cubit.applyEnabledAgents(const [NewSessionTab.claude, NewSessionTab.omp]);
+      // Only Claude is offered while omp support is unknown.
+      expect(cubit.state.providerFilter, ProviderFilter.claude);
+
+      await recreate();
+      cubit.applyEnabledAgents(const [
+        NewSessionTab.codex,
+        NewSessionTab.claude,
+      ]);
+      cubit.selectProject(null);
+      expect(lastRequest().containsKey('providers'), isFalse);
+
+      mockBridge.sentMessages.clear();
+      mockBridge.setOmpSupport(OmpSupport.supported);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(cubit.state.providerFilter, ProviderFilter.all);
+      expect(lastRequest()['providers'], ['codex', 'claude']);
+    });
+
+    group('enabled agents from the settings', () {
+      late SettingsCubit settings;
+
+      /// Wires the cubit to [SettingsCubit] the way `main.dart` does.
+      Future<void> createWithSettings(Map<String, Object> prefs) async {
+        await cubit.close();
+        mockBridge.dispose();
+        SharedPreferences.setMockInitialValues(prefs);
+        settings = SettingsCubit(await SharedPreferences.getInstance());
+        mockBridge = MockBridgeService().._ompSupport = OmpSupport.supported;
+        cubit = SessionListCubit(
+          bridge: mockBridge,
+          enabledTabs: settings.state.newSessionTabs,
+          enabledTabsChanges: settings.stream.map(
+            (state) => state.newSessionTabs,
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      tearDown(() => settings.close());
+
+      test('All leaves out agents disabled before the start', () async {
+        await createWithSettings({
+          'settings_new_session_tabs': '["codex","claude"]',
+          'settings_new_session_tabs_omp_migrated_v1': true,
+        });
+
+        cubit.selectProject(null);
+
+        expect(cubit.state.providerFilter, ProviderFilter.all);
+        expect(lastRequest()['providers'], ['codex', 'claude']);
+      });
+
+      test('disabling an agent in the settings narrows All', () async {
+        await createWithSettings({});
+        cubit.selectProject(null);
+        expect(lastRequest().containsKey('providers'), isFalse);
+        expect(lastRequest().containsKey('provider'), isFalse);
+
+        mockBridge.sentMessages.clear();
+        settings.setAgentEnabled(Provider.omp, false);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(cubit.state.providerFilter, ProviderFilter.all);
+        expect(lastRequest()['providers'], ['codex', 'claude']);
+
+        mockBridge.sentMessages.clear();
+        settings.setAgentEnabled(Provider.codex, false);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(cubit.state.providerFilter, ProviderFilter.claude);
+        expect(lastRequest()['provider'], 'claude');
+      });
+    });
   });
 }

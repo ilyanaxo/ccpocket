@@ -26,7 +26,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:provider/provider.dart';
+import 'package:provider/provider.dart' show ChangeNotifierProvider;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'helpers/bridge_version_test_values.dart';
@@ -35,16 +35,47 @@ class _FakeBridgeService extends BridgeService {
   final _connectionController =
       StreamController<BridgeConnectionState>.broadcast();
   final _usageController = StreamController<UsageResultMessage>.broadcast();
+  final _ompSupportController = StreamController<OmpSupport>.broadcast();
+  final _sessionListController =
+      StreamController<List<SessionInfo>>.broadcast();
   bool _connected;
   final UsageResultMessage? cachedUsage;
   final String? fakeLastUrl;
+  OmpSupport fakeOmpSupport;
+  OmpAvailability? fakeOmpAvailability;
   bool disconnectCalled = false;
 
   _FakeBridgeService({
     required bool connected,
     this.cachedUsage,
     this.fakeLastUrl,
+    this.fakeOmpSupport = OmpSupport.unknown,
+    this.fakeOmpAvailability,
   }) : _connected = connected;
+
+  @override
+  OmpSupport get ompSupport => fakeOmpSupport;
+
+  @override
+  Stream<OmpSupport> get ompSupportStream => _ompSupportController.stream;
+
+  @override
+  OmpAvailability? get ompAvailability => fakeOmpAvailability;
+
+  void emitOmpSupport(OmpSupport support) {
+    fakeOmpSupport = support;
+    _ompSupportController.add(support);
+  }
+
+  @override
+  Stream<List<SessionInfo>> get sessionList => _sessionListController.stream;
+
+  /// A `session_list` that carries [availability] but leaves [ompSupport]
+  /// unchanged, like the Bridge's second list after `client_capabilities`.
+  void emitSessionListWithOmpAvailability(OmpAvailability availability) {
+    fakeOmpAvailability = availability;
+    _sessionListController.add(const []);
+  }
 
   @override
   bool get isConnected => _connected;
@@ -76,6 +107,8 @@ class _FakeBridgeService extends BridgeService {
   void dispose() {
     _connectionController.close();
     _usageController.close();
+    _ompSupportController.close();
+    _sessionListController.close();
     super.dispose();
   }
 }
@@ -363,6 +396,14 @@ MachineManagerCubit _createMachineManagerCubit(MachineManagerService service) {
     service,
     null,
     latestVersionService: _recommendedLatestVersionService(),
+  );
+}
+
+const _ompMigratedKey = 'settings_new_session_tabs_omp_migrated_v1';
+
+FilterChip _agentChip(WidgetTester tester, Provider provider) {
+  return tester.widget<FilterChip>(
+    find.byKey(ValueKey('agent_filter_chip_${provider.value}')),
   );
 }
 
@@ -932,14 +973,20 @@ void main() {
 
       final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
       await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('enabled_agents_selector')),
+        find.byKey(const ValueKey('agent_filter_chip_codex')),
         180,
       );
       await tester.pumpAndSettle();
 
+      for (final provider in Provider.values) {
+        expect(
+          find.byKey(ValueKey('agent_filter_chip_${provider.value}')),
+          findsOneWidget,
+        );
+      }
       expect(
         find.byKey(const ValueKey('enabled_agents_selector')),
-        findsOneWidget,
+        findsNothing,
       );
       expect(find.text(l.settingsNewSessionTabs), findsOneWidget);
       expect(find.text(l.showHiddenDirectories), findsOneWidget);
@@ -950,6 +997,11 @@ void main() {
       expect(find.text(l.autoRenameCodexSessions), findsOneWidget);
       expect(find.text(l.showExtendedCodexEfforts), findsOneWidget);
       expect(find.text(l.autoRenameClaudeSessions), findsOneWidget);
+      // omp is enabled by default (lead amendment A1).
+      expect(
+        find.byKey(const ValueKey('auto_rename_omp_sessions_toggle')),
+        findsOneWidget,
+      );
 
       await settingsCubit.close();
       await machineManagerCubit.close();
@@ -1036,6 +1088,7 @@ void main() {
     ) async {
       SharedPreferences.setMockInitialValues({
         'settings_new_session_tabs': tabsToJson(const [NewSessionTab.codex]),
+        _ompMigratedKey: true,
       });
       final prefs = await SharedPreferences.getInstance();
       final settingsCubit = _SeededSettingsCubit(prefs, activeMachineId: null);
@@ -1054,19 +1107,311 @@ void main() {
 
       final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
       await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('enabled_agents_selector')),
+        find.byKey(const ValueKey('agent_filter_chip_codex')),
         180,
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(const ValueKey('enabled_agents_selector')),
-        findsOneWidget,
-      );
+      expect(_agentChip(tester, Provider.codex).selected, isTrue);
+      expect(_agentChip(tester, Provider.claude).selected, isFalse);
+      expect(_agentChip(tester, Provider.omp).selected, isFalse);
       expect(find.text(l.autoRenameCodexSessions), findsOneWidget);
       expect(find.text(l.showExtendedCodexEfforts), findsOneWidget);
       expect(find.text(l.settingsNewSessionTabs), findsNothing);
       expect(find.text(l.autoRenameClaudeSessions), findsNothing);
+      expect(find.text(l.autoRenameOmpSessions), findsNothing);
+
+      await settingsCubit.close();
+      await machineManagerCubit.close();
+      bridge.dispose();
+    });
+
+    testWidgets('last enabled agent cannot be disabled', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'settings_new_session_tabs': tabsToJson(const [NewSessionTab.codex]),
+        _ompMigratedKey: true,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final settingsCubit = _SeededSettingsCubit(prefs, activeMachineId: null);
+      final manager = MachineManagerService(prefs, _FakeSecureStorage());
+      final machineManagerCubit = _createMachineManagerCubit(manager);
+      final bridge = _FakeBridgeService(connected: false);
+
+      await tester.pumpWidget(
+        await _buildScreen(
+          bridge: bridge,
+          settingsCubit: settingsCubit,
+          machineManagerCubit: machineManagerCubit,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      final codexChip = find.byKey(const ValueKey('agent_filter_chip_codex'));
+      await tester.scrollUntilVisible(codexChip, 180);
+      await tester.pumpAndSettle();
+      await tester.tap(codexChip);
+      await tester.pumpAndSettle();
+
+      expect(settingsCubit.state.newSessionTabs, [NewSessionTab.codex]);
+      expect(find.text(l.enabledAgentsAtLeastOne), findsOneWidget);
+
+      // Enabling another agent is allowed, and then Codex can be disabled.
+      await tester.tap(find.byKey(const ValueKey('agent_filter_chip_claude')));
+      await tester.pumpAndSettle();
+      await tester.tap(codexChip);
+      await tester.pumpAndSettle();
+      expect(settingsCubit.state.newSessionTabs, [NewSessionTab.claude]);
+      expect(
+        prefs.getString('settings_new_session_tabs'),
+        tabsToJson(const [NewSessionTab.claude]),
+      );
+
+      await settingsCubit.close();
+      await machineManagerCubit.close();
+      bridge.dispose();
+    });
+
+    testWidgets(
+      'an agent stays enabled when only an unoffered omp would remain',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          'settings_new_session_tabs': tabsToJson(defaultNewSessionTabs),
+          _ompMigratedKey: true,
+        });
+        final prefs = await SharedPreferences.getInstance();
+        final settingsCubit = _SeededSettingsCubit(
+          prefs,
+          activeMachineId: null,
+        );
+        final manager = MachineManagerService(prefs, _FakeSecureStorage());
+        final machineManagerCubit = _createMachineManagerCubit(manager);
+        final bridge = _FakeBridgeService(
+          connected: true,
+          fakeOmpSupport: OmpSupport.unsupported,
+        );
+
+        await tester.pumpWidget(
+          await _buildScreen(
+            bridge: bridge,
+            settingsCubit: settingsCubit,
+            machineManagerCubit: machineManagerCubit,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+        final codexChip = find.byKey(const ValueKey('agent_filter_chip_codex'));
+        final claudeChip = find.byKey(
+          const ValueKey('agent_filter_chip_claude'),
+        );
+        await tester.scrollUntilVisible(codexChip, 180);
+        await tester.pumpAndSettle();
+        await tester.tap(codexChip);
+        await tester.pumpAndSettle();
+        expect(settingsCubit.state.newSessionTabs, [
+          NewSessionTab.claude,
+          NewSessionTab.omp,
+        ]);
+        expect(find.text(l.enabledAgentsAtLeastOne), findsNothing);
+
+        // omp is not offered on this Bridge, so Claude is the last agent.
+        await tester.tap(claudeChip);
+        await tester.pumpAndSettle();
+        expect(settingsCubit.state.newSessionTabs, [
+          NewSessionTab.claude,
+          NewSessionTab.omp,
+        ]);
+        expect(_agentChip(tester, Provider.claude).selected, isTrue);
+        expect(find.text(l.enabledAgentsAtLeastOne), findsOneWidget);
+
+        await settingsCubit.close();
+        await machineManagerCubit.close();
+        bridge.dispose();
+      },
+    );
+
+    testWidgets('omp chip is disabled on a Bridge without omp support', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final settingsCubit = _SeededSettingsCubit(prefs, activeMachineId: null);
+      final manager = MachineManagerService(prefs, _FakeSecureStorage());
+      final machineManagerCubit = _createMachineManagerCubit(manager);
+      final bridge = _FakeBridgeService(
+        connected: true,
+        fakeOmpSupport: OmpSupport.unsupported,
+      );
+
+      await tester.pumpWidget(
+        await _buildScreen(
+          bridge: bridge,
+          settingsCubit: settingsCubit,
+          machineManagerCubit: machineManagerCubit,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('agent_filter_chip_omp')),
+        180,
+      );
+      await tester.pumpAndSettle();
+
+      final ompChip = _agentChip(tester, Provider.omp);
+      expect(ompChip.onSelected, isNull);
+      // The stored choice survives: omp stays enabled, only not offered.
+      expect(ompChip.selected, isTrue);
+      expect(find.text(l.ompNotAvailableOnBridge), findsOneWidget);
+      expect(settingsCubit.state.newSessionTabs, contains(NewSessionTab.omp));
+
+      // Once the Bridge confirms omp the chip becomes usable.
+      bridge.emitOmpSupport(OmpSupport.supported);
+      await tester.pumpAndSettle();
+      expect(_agentChip(tester, Provider.omp).onSelected, isNotNull);
+      expect(find.text(l.ompNotAvailableOnBridge), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('agent_filter_chip_omp')));
+      await tester.pumpAndSettle();
+      expect(
+        settingsCubit.state.newSessionTabs,
+        isNot(contains(NewSessionTab.omp)),
+      );
+
+      await settingsCubit.close();
+      await machineManagerCubit.close();
+      bridge.dispose();
+    });
+
+    testWidgets('omp chip explains a Bridge without omp or models', (
+      tester,
+    ) async {
+      for (final (availability, expected) in [
+        (OmpAvailability.notInstalled, 'ompNotDetected'),
+        (OmpAvailability.noModels, 'ompNoModels'),
+      ]) {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final settingsCubit = _SeededSettingsCubit(
+          prefs,
+          activeMachineId: null,
+        );
+        final manager = MachineManagerService(prefs, _FakeSecureStorage());
+        final machineManagerCubit = _createMachineManagerCubit(manager);
+        final bridge = _FakeBridgeService(
+          connected: true,
+          fakeOmpSupport: OmpSupport.supported,
+          fakeOmpAvailability: availability,
+        );
+
+        await tester.pumpWidget(
+          await _buildScreen(
+            bridge: bridge,
+            settingsCubit: settingsCubit,
+            machineManagerCubit: machineManagerCubit,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+        await tester.scrollUntilVisible(
+          find.byKey(const ValueKey('agent_omp_hint')),
+          180,
+        );
+        await tester.pumpAndSettle();
+        final text = expected == 'ompNotDetected'
+            ? l.ompNotDetected
+            : l.ompNoModels;
+        expect(find.text(text), findsOneWidget);
+        // Not installed / no models only explain; the chip stays usable.
+        expect(_agentChip(tester, Provider.omp).onSelected, isNotNull);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await settingsCubit.close();
+        await machineManagerCubit.close();
+        bridge.dispose();
+      }
+    });
+
+    testWidgets('omp hint appears when availability arrives after support', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final settingsCubit = _SeededSettingsCubit(prefs, activeMachineId: null);
+      final manager = MachineManagerService(prefs, _FakeSecureStorage());
+      final machineManagerCubit = _createMachineManagerCubit(manager);
+      // First session_list of a connection: omp supported, omp data not yet
+      // sent (the app has not declared omp at that point).
+      final bridge = _FakeBridgeService(
+        connected: true,
+        fakeOmpSupport: OmpSupport.supported,
+      );
+
+      await tester.pumpWidget(
+        await _buildScreen(
+          bridge: bridge,
+          settingsCubit: settingsCubit,
+          machineManagerCubit: machineManagerCubit,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('agent_filter_chip_omp')),
+        180,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('agent_omp_hint')), findsNothing);
+
+      // The declared session_list brings the availability; ompSupport stays
+      // `supported`, so ompSupportStream does not emit.
+      bridge.emitSessionListWithOmpAvailability(OmpAvailability.notInstalled);
+      await tester.pumpAndSettle();
+      expect(find.text(l.ompNotDetected), findsOneWidget);
+
+      bridge.emitSessionListWithOmpAvailability(OmpAvailability.available);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('agent_omp_hint')), findsNothing);
+
+      await settingsCubit.close();
+      await machineManagerCubit.close();
+      bridge.dispose();
+    });
+
+    testWidgets('omp auto rename toggle follows the omp agent', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final settingsCubit = _SeededSettingsCubit(prefs, activeMachineId: null);
+      final manager = MachineManagerService(prefs, _FakeSecureStorage());
+      final machineManagerCubit = _createMachineManagerCubit(manager);
+      final bridge = _FakeBridgeService(
+        connected: false,
+        fakeOmpSupport: OmpSupport.supported,
+      );
+
+      await tester.pumpWidget(
+        await _buildScreen(
+          bridge: bridge,
+          settingsCubit: settingsCubit,
+          machineManagerCubit: machineManagerCubit,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final toggle = find.byKey(
+        const ValueKey('auto_rename_omp_sessions_toggle'),
+      );
+      await tester.scrollUntilVisible(toggle, 180);
+      await tester.pumpAndSettle();
+      expect(settingsCubit.state.autoRenameOmpSessions, isTrue);
+
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(settingsCubit.state.autoRenameOmpSessions, isFalse);
 
       await settingsCubit.close();
       await machineManagerCubit.close();

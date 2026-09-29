@@ -10,6 +10,7 @@ import '../../features/explore/explore_screen.dart';
 import '../../features/explore/state/explore_state.dart';
 import '../../features/gallery/gallery_screen.dart';
 import '../../features/git/git_screen.dart';
+import '../../features/omp_session/omp_session_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/setup_guide/setup_guide_screen.dart';
 import '../../l10n/app_localizations.dart';
@@ -244,9 +245,7 @@ class WorkspaceShellScreenState extends State<WorkspaceShellScreen> {
           routeIdentity: routeIdentity,
           owner: this,
           sessionId: id,
-          provider: _selectedSession?.provider == Provider.codex
-              ? 'codex'
-              : 'claude',
+          provider: (_selectedSession?.provider ?? Provider.claude).value,
         );
       } else {
         SessionRouteRegistry.instance.remove(
@@ -265,9 +264,7 @@ class WorkspaceShellScreenState extends State<WorkspaceShellScreen> {
       NotificationService.instance.setActiveSession(
         owner: this,
         sessionId: _state.liveSessionId!,
-        provider: _selectedSession?.provider == Provider.codex
-            ? 'codex'
-            : 'claude',
+        provider: (_selectedSession?.provider ?? Provider.claude).value,
       );
     } else {
       NotificationService.instance.clearActiveSession(owner: this);
@@ -1110,7 +1107,21 @@ class _WorkspaceContentHost extends StatelessWidget {
             shell?.clearSelectedSession(entry: sessionEntry),
         hideSessionBackButton: !(shell?.isSinglePane ?? true),
       ),
-      _ => ClaudeSessionScreen(
+      Provider.omp => OmpSessionScreen(
+        key: ValueKey('workspace_omp_${selection.sessionId}'),
+        sessionId: selection.sessionId,
+        projectPath: selection.projectPath,
+        workspace: selection.workspace,
+        gitBranch: selection.gitBranch,
+        worktreePath: selection.worktreePath,
+        isPending: selection.isPending,
+        initialPermissionMode: selection.permissionMode,
+        pendingSessionCreated: selection.pendingSessionCreated,
+        onBackToSessions: () =>
+            shell?.clearSelectedSession(entry: sessionEntry),
+        hideSessionBackButton: !(shell?.isSinglePane ?? true),
+      ),
+      Provider.claude || null => ClaudeSessionScreen(
         key: ValueKey('workspace_claude_${selection.sessionId}'),
         sessionId: selection.sessionId,
         projectPath: selection.projectPath,

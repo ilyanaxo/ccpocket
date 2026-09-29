@@ -49,6 +49,8 @@ class SessionNameTitle extends StatelessWidget {
               final newName = await showRenameSessionDialog(
                 context,
                 currentName: name,
+                allowClear:
+                    providerFromValue(session?.provider) != Provider.omp,
               );
               if (newName == null || !context.mounted) return;
               bridge.renameSession(

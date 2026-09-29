@@ -1,0 +1,32 @@
+{
+  "type": "recent_sessions",
+  "sessions": [
+    {
+      "sessionId": "01a0e960-d626-7359-b8e8-44ce5c598088",
+      "provider": "omp",
+      "name": "Fix login redirect",
+      "summary": "The redirect now keeps the query string.",
+      "firstPrompt": "Fix the login redirect so it keeps the query string",
+      "lastPrompt": "Also add a regression test",
+      "created": "2026-09-28T18:57:12.742Z",
+      "modified": "2026-09-28T19:05:40.120Z",
+      "gitBranch": "",
+      "projectPath": "/home/user/project",
+      "resumeCwd": "/home/user/project-worktrees/fix-login",
+      "isSidechain": false,
+      "ompSettings": {
+        "model": "baseten/zai-org/GLM-5.3-Fast",
+        "thinkingLevel": "high"
+      },
+      "workspace": {
+        "kind": "unassigned",
+        "rootPaths": ["/home/user/project"]
+      }
+    }
+  ],
+  "hasMore": false,
+  "limit": 20,
+  "offset": 0,
+  "requestScope": "list",
+  "requestId": "recent-2"
+}

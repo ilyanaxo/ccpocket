@@ -176,9 +176,13 @@ class ChatInputWithOverlays extends HookWidget {
     final sessionSlashCommands = completionItems
         .where((c) => c.command.startsWith('/'))
         .toList();
-    final fallbackCommands = isCodex
-        ? fallbackCodexSlashCommands
-        : fallbackSlashCommands;
+    // omp reports its own commands (`supported_commands`); Claude's built-in
+    // list would offer commands omp does not have.
+    final fallbackCommands = switch (chatCubit.provider) {
+      Provider.codex => fallbackCodexSlashCommands,
+      Provider.omp => const <SlashCommand>[],
+      Provider.claude || null => fallbackSlashCommands,
+    };
     final commands = [
       ...fallbackCommands,
       ...sessionSlashCommands.where(
@@ -203,7 +207,7 @@ class ChatInputWithOverlays extends HookWidget {
         .toList();
     final pluginTokens = pluginEntities.map((c) => c.command).toSet();
     final composerTokenConfig = ComposerTokenConfig(
-      provider: isCodex ? Provider.codex : Provider.claude,
+      provider: chatCubit.provider ?? Provider.claude,
       slashCommands: commands.map((c) => c.command).toSet(),
       skillTokens: skillTokens,
       appTokens: appTokens,

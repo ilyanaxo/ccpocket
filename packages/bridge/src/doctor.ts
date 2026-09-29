@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   isClaudeBedrockModeEnabled,
@@ -24,6 +24,9 @@ import {
   BRIDGE_STABLE_SETUP_COMMAND,
   usesUnboundedBridgeLatest,
 } from "./distribution.js";
+import { resolveOmpBin, resolveOmpStore } from "./omp-env.js";
+import { listOmpModels } from "./omp-sessions.js";
+import { ompWriters } from "./omp-writers.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +57,10 @@ export interface ProviderResult {
   authenticated: boolean;
   authMessage?: string;
   remediation?: string;
+  /** Extra findings (omp: version and session store). */
+  warnings?: string[];
+  /** Extra facts shown under the provider (omp: session store). */
+  details?: string[];
 }
 
 export interface DoctorReport {
@@ -109,7 +116,117 @@ export async function checkGit(): Promise<CheckResult> {
   }
 }
 
-/** Check both Claude Code CLI and Codex CLI. At least one must be installed. */
+/** Oldest omp version checked against the RPC contract the Bridge uses. */
+const OMP_TESTED_VERSION = [18, 3, 2] as const;
+
+function shellQuote(value: string): string {
+  if (process.platform === "win32") return `"${value.replace(/"/g, '\\"')}"`;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function parseOmpVersion(output: string): number[] | null {
+  const match = output.match(/(\d+)\.(\d+)\.(\d+)/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isBelowTestedOmpVersion(version: number[]): boolean {
+  for (let i = 0; i < OMP_TESTED_VERSION.length; i++) {
+    if (version[i] !== OMP_TESTED_VERSION[i]) {
+      return version[i] < OMP_TESTED_VERSION[i];
+    }
+  }
+  return false;
+}
+
+/** omp CLI: version, a usable model, and the session store the Bridge lists. */
+export async function checkOmpProvider(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ProviderResult> {
+  const bin = resolveOmpBin(env);
+  let version: string | undefined;
+  try {
+    version = execQuiet(`${shellQuote(bin)} --version`).split("\n")[0].trim();
+  } catch {
+    return {
+      name: "omp CLI",
+      installed: false,
+      authenticated: false,
+      remediation:
+        "Install omp (oh-my-pi), or set BRIDGE_OMP_BIN to the omp binary",
+    };
+  }
+
+  const warnings: string[] = [];
+  const parsed = parseOmpVersion(version);
+  if (!parsed || isBelowTestedOmpVersion(parsed)) {
+    warnings.push(
+      `untested omp version (tested: ${OMP_TESTED_VERSION.join(".")}); RPC v2 is negotiated at start`,
+    );
+  }
+
+  let authenticated = false;
+  let authMessage: string | undefined;
+  let remediation: string | undefined;
+  try {
+    const { models } = await listOmpModels({ env });
+    if (models.length > 0) {
+      authenticated = true;
+      const providers = new Set(models.map((model) => model.provider));
+      authMessage = `${models.length} models from ${providers.size} providers`;
+    } else {
+      authMessage = "No usable model";
+      remediation = "Run omp and log in (/login), or set a provider API key";
+    }
+  } catch (err) {
+    authMessage = `Model catalogue unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    remediation = "Run: omp models --json";
+  }
+
+  const store = resolveOmpStore(env);
+  const sessionDir = store.flatSessionDir ?? store.sessionsDir;
+  const details = [
+    `profile: ${store.profile ?? "default"}`,
+    `agent dir: ${store.agentDir}`,
+    `session dir: ${sessionDir}`,
+  ];
+  if (store.invalidProfile !== undefined) {
+    warnings.push(
+      `omp rejects the profile "${store.invalidProfile}"; the Bridge lists no omp sessions`,
+    );
+  }
+  if (store.flatSessionDir) {
+    warnings.push(
+      `PI_CODING_AGENT_SESSION_DIR is set: every omp session is stored in ${store.flatSessionDir}`,
+    );
+  }
+  const xdgDataHome = env.XDG_DATA_HOME?.trim();
+  if (xdgDataHome && existsSync(join(xdgDataHome, "omp"))) {
+    warnings.push(
+      `omp data may live in ${join(xdgDataHome, "omp")} (XDG); the Bridge only lists ${sessionDir}`,
+    );
+  }
+  for (const { file } of ompWriters.files()) {
+    const inside = relative(sessionDir, file);
+    if (inside.startsWith("..") || isAbsolute(inside)) {
+      warnings.push(
+        `a live omp session file lies outside the listed session directory: ${file}`,
+      );
+    }
+  }
+
+  return {
+    name: "omp CLI",
+    installed: true,
+    version,
+    authenticated,
+    authMessage,
+    remediation,
+    ...(warnings.length > 0 ? { warnings } : {}),
+    details,
+  };
+}
+
+/** Check the Claude Code, Codex and omp CLIs. At least one must be installed. */
 export async function checkCliProviders(): Promise<
   CheckResult & { providers: ProviderResult[] }
 > {
@@ -216,6 +333,9 @@ export async function checkCliProviders(): Promise<
     });
   }
 
+  // --- omp CLI ---
+  providers.push(await checkOmpProvider());
+
   const installedCount = providers.filter((p) => p.installed).length;
   const total = providers.length;
 
@@ -224,13 +344,15 @@ export async function checkCliProviders(): Promise<
       name: "CLI providers",
       status: "fail",
       message: "No CLI providers installed",
-      remediation: "Install at least one: https://docs.anthropic.com/en/docs/claude-code/getting-started  OR  https://github.com/openai/codex",
+      remediation: "Install at least one: https://docs.anthropic.com/en/docs/claude-code/getting-started  OR  https://github.com/openai/codex  OR  omp (oh-my-pi)",
       providers,
     };
   }
 
-  // At least one installed — check if any auth warnings
-  const hasAuthWarn = providers.some((p) => p.installed && !p.authenticated);
+  // At least one installed — check if any auth or provider warnings
+  const hasAuthWarn = providers.some(
+    (p) => p.installed && (!p.authenticated || (p.warnings?.length ?? 0) > 0),
+  );
   return {
     name: "CLI providers",
     status: hasAuthWarn ? "warn" : "pass",
@@ -744,7 +866,7 @@ function providerStatusIcon(
   sym: typeof SYMBOLS_TTY | typeof SYMBOLS_PLAIN,
 ): string {
   if (!p.installed) return sym.skip;
-  if (!p.authenticated) return sym.warn;
+  if (!p.authenticated || (p.warnings?.length ?? 0) > 0) return sym.warn;
   return sym.pass;
 }
 
@@ -785,6 +907,12 @@ export function printReport(report: DoctorReport): void {
           const pIcon = providerStatusIcon(p, sym);
           const pName = p.name.padEnd(NAME_WIDTH);
           console.log(`      ${pIcon} ${pName} ${providerStatusMessage(p)}`);
+          for (const detail of p.installed ? (p.details ?? []) : []) {
+            console.log(`          ${detail}`);
+          }
+          for (const warning of p.warnings ?? []) {
+            console.log(`          ! ${warning}`);
+          }
           if (p.remediation) {
             console.log(`          → ${p.remediation}`);
           }

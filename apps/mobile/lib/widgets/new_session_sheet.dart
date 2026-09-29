@@ -7,9 +7,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/session_list/session_list_screen.dart'
     show recentProjects, shortenPath;
+import '../features/omp_session/widgets/omp_settings_sheet.dart';
 import '../features/projects/widgets/project_manager_sheet.dart';
 import '../l10n/app_localizations.dart';
 import '../models/messages.dart';
+import '../models/new_session_params.dart';
 import '../models/new_session_tab.dart';
 import '../services/bridge_service.dart';
 import '../theme/app_theme.dart';
@@ -17,231 +19,6 @@ import '../theme/provider_style.dart';
 import 'directory_browser_sheet.dart';
 import 'workspace_pane_chrome.dart';
 import 'codex_effort_slider.dart';
-
-/// Result returned when the user submits the new session sheet.
-class NewSessionParams {
-  final String projectPath;
-  final String? projectId;
-  final String? workspaceKind;
-  final Provider provider;
-  final PermissionMode? claudePermissionMode;
-  final ExecutionMode executionMode;
-  final CodexPermissionsMode codexPermissionsMode;
-  final CodexApprovalPolicy codexApprovalPolicy;
-  final bool codexAutoReviewEnabled;
-  final String? codexProfile;
-  final bool codexApprovalPolicyOverridden;
-  final bool codexAutoReviewOverridden;
-  final bool codexModelOverridden;
-  final bool codexSandboxModeOverridden;
-  final bool codexReasoningEffortOverridden;
-  final bool codexNetworkAccessOverridden;
-  final bool codexWebSearchModeOverridden;
-  final bool planMode;
-  final bool useWorktree;
-  final String? worktreeBranch;
-  final String? existingWorktreePath;
-  final String? model;
-  final SandboxMode? sandboxMode;
-  final ReasoningEffort? modelReasoningEffort;
-  final CodexSpeed codexSpeed;
-  final bool? networkAccessEnabled;
-  final WebSearchMode? webSearchMode;
-  final List<String> additionalWritableRoots;
-  final String? claudeModel;
-  final ClaudeEffort? claudeEffort;
-  final int? claudeMaxTurns;
-  final double? claudeMaxBudgetUsd;
-  final String? claudeFallbackModel;
-  final bool? claudeForkSession;
-  final bool? claudePersistSession;
-
-  NewSessionParams({
-    required this.projectPath,
-    this.projectId,
-    this.workspaceKind,
-    this.provider = Provider.codex,
-    PermissionMode? claudePermissionMode,
-    ExecutionMode? executionMode,
-    CodexPermissionsMode? codexPermissionsMode,
-    CodexApprovalPolicy? codexApprovalPolicy,
-    this.codexAutoReviewEnabled = false,
-    this.codexProfile,
-    this.codexApprovalPolicyOverridden = false,
-    this.codexAutoReviewOverridden = false,
-    this.codexModelOverridden = false,
-    this.codexSandboxModeOverridden = false,
-    this.codexReasoningEffortOverridden = false,
-    this.codexNetworkAccessOverridden = false,
-    this.codexWebSearchModeOverridden = false,
-    bool? planMode,
-    PermissionMode? permissionMode,
-    this.useWorktree = false,
-    this.worktreeBranch,
-    this.existingWorktreePath,
-    this.model,
-    this.sandboxMode,
-    this.modelReasoningEffort,
-    this.codexSpeed = CodexSpeed.standard,
-    this.networkAccessEnabled,
-    this.webSearchMode,
-    this.additionalWritableRoots = const [],
-    this.claudeModel,
-    this.claudeEffort,
-    this.claudeMaxTurns,
-    this.claudeMaxBudgetUsd,
-    this.claudeFallbackModel,
-    this.claudeForkSession,
-    this.claudePersistSession,
-  }) : claudePermissionMode = provider == Provider.claude
-           ? (claudePermissionMode ?? permissionMode)
-           : null,
-       executionMode =
-           executionMode ??
-           deriveExecutionMode(
-             provider: provider.value,
-             permissionMode: permissionMode?.value,
-           ),
-       codexPermissionsMode =
-           codexPermissionsMode ??
-           (codexApprovalPolicy != null || sandboxMode != null
-               ? codexPermissionsModeFromSettings(
-                   approvalPolicy: codexApprovalPolicy?.value,
-                   approvalsReviewer: codexAutoReviewEnabled
-                       ? 'auto_review'
-                       : 'user',
-                   sandboxMode: sandboxMode?.value,
-                 )
-               : CodexPermissionsMode.defaultPermissions),
-       codexApprovalPolicy =
-           codexApprovalPolicy ??
-           (provider == Provider.codex
-               ? CodexApprovalPolicy.onRequest
-               : CodexApprovalPolicy.onRequest),
-       planMode = planMode ?? (permissionMode == PermissionMode.plan);
-
-  String get codexApprovalsReviewer =>
-      codexApprovalPolicy == CodexApprovalPolicy.onRequest &&
-          codexAutoReviewEnabled
-      ? 'auto_review'
-      : 'user';
-
-  PermissionMode get permissionMode {
-    if (provider == Provider.claude && claudePermissionMode != null) {
-      return claudePermissionMode!;
-    }
-    return legacyPermissionModeFromModes(
-      provider,
-      executionMode: executionMode,
-      planMode: planMode,
-    );
-  }
-
-  NewSessionParams copyWith({
-    String? projectPath,
-    String? projectId,
-    String? workspaceKind,
-    Provider? provider,
-    PermissionMode? claudePermissionMode,
-    ExecutionMode? executionMode,
-    CodexPermissionsMode? codexPermissionsMode,
-    CodexApprovalPolicy? codexApprovalPolicy,
-    bool? codexAutoReviewEnabled,
-    String? codexProfile,
-    bool? codexApprovalPolicyOverridden,
-    bool? codexAutoReviewOverridden,
-    bool? codexModelOverridden,
-    bool? codexSandboxModeOverridden,
-    bool? codexReasoningEffortOverridden,
-    bool? codexNetworkAccessOverridden,
-    bool? codexWebSearchModeOverridden,
-    bool? planMode,
-    bool? useWorktree,
-    String? worktreeBranch,
-    String? existingWorktreePath,
-    String? model,
-    SandboxMode? sandboxMode,
-    ReasoningEffort? modelReasoningEffort,
-    CodexSpeed? codexSpeed,
-    bool? networkAccessEnabled,
-    WebSearchMode? webSearchMode,
-    List<String>? additionalWritableRoots,
-    String? claudeModel,
-    ClaudeEffort? claudeEffort,
-    int? claudeMaxTurns,
-    double? claudeMaxBudgetUsd,
-    String? claudeFallbackModel,
-    bool? claudeForkSession,
-    bool? claudePersistSession,
-  }) {
-    return NewSessionParams(
-      projectPath: projectPath ?? this.projectPath,
-      projectId: projectId ?? this.projectId,
-      workspaceKind: workspaceKind ?? this.workspaceKind,
-      provider: provider ?? this.provider,
-      claudePermissionMode: claudePermissionMode ?? this.claudePermissionMode,
-      executionMode: executionMode ?? this.executionMode,
-      codexPermissionsMode: codexPermissionsMode ?? this.codexPermissionsMode,
-      codexApprovalPolicy: codexApprovalPolicy ?? this.codexApprovalPolicy,
-      codexAutoReviewEnabled:
-          codexAutoReviewEnabled ?? this.codexAutoReviewEnabled,
-      codexProfile: codexProfile ?? this.codexProfile,
-      codexApprovalPolicyOverridden:
-          codexApprovalPolicyOverridden ?? this.codexApprovalPolicyOverridden,
-      codexAutoReviewOverridden:
-          codexAutoReviewOverridden ?? this.codexAutoReviewOverridden,
-      codexModelOverridden: codexModelOverridden ?? this.codexModelOverridden,
-      codexSandboxModeOverridden:
-          codexSandboxModeOverridden ?? this.codexSandboxModeOverridden,
-      codexReasoningEffortOverridden:
-          codexReasoningEffortOverridden ?? this.codexReasoningEffortOverridden,
-      codexNetworkAccessOverridden:
-          codexNetworkAccessOverridden ?? this.codexNetworkAccessOverridden,
-      codexWebSearchModeOverridden:
-          codexWebSearchModeOverridden ?? this.codexWebSearchModeOverridden,
-      planMode: planMode ?? this.planMode,
-      useWorktree: useWorktree ?? this.useWorktree,
-      worktreeBranch: worktreeBranch ?? this.worktreeBranch,
-      existingWorktreePath: existingWorktreePath ?? this.existingWorktreePath,
-      model: model ?? this.model,
-      sandboxMode: sandboxMode ?? this.sandboxMode,
-      modelReasoningEffort: modelReasoningEffort ?? this.modelReasoningEffort,
-      codexSpeed: codexSpeed ?? this.codexSpeed,
-      networkAccessEnabled: networkAccessEnabled ?? this.networkAccessEnabled,
-      webSearchMode: webSearchMode ?? this.webSearchMode,
-      additionalWritableRoots:
-          additionalWritableRoots ?? this.additionalWritableRoots,
-      claudeModel: claudeModel ?? this.claudeModel,
-      claudeEffort: claudeEffort ?? this.claudeEffort,
-      claudeMaxTurns: claudeMaxTurns ?? this.claudeMaxTurns,
-      claudeMaxBudgetUsd: claudeMaxBudgetUsd ?? this.claudeMaxBudgetUsd,
-      claudeFallbackModel: claudeFallbackModel ?? this.claudeFallbackModel,
-      claudeForkSession: claudeForkSession ?? this.claudeForkSession,
-      claudePersistSession: claudePersistSession ?? this.claudePersistSession,
-    );
-  }
-}
-
-// ---- Serialization helpers for SharedPreferences ----
-
-T? enumByValue<T>(List<T> values, String? raw, String Function(T) readValue) {
-  if (raw == null || raw.isEmpty) return null;
-  for (final v in values) {
-    if (readValue(v) == raw) return v;
-  }
-  return null;
-}
-
-SandboxMode? sandboxModeFromRaw(String? raw) {
-  if (raw == null || raw.isEmpty) return null;
-  // Accept both external ("on"/"off") and internal ("workspace-write"/"danger-full-access") formats.
-  if (raw == 'danger-full-access') return SandboxMode.off;
-  if (raw == 'workspace-write') return SandboxMode.on;
-  return enumByValue(SandboxMode.values, raw, (v) => v.value);
-}
-
-ReasoningEffort? reasoningEffortFromRaw(String? raw) =>
-    reasoningEffortByValue(raw);
 
 const _fallbackCodexReasoningEfforts = <ReasoningEffort>[
   ReasoningEffort.low,
@@ -287,30 +64,6 @@ List<ReasoningEffort> _codexReasoningEffortsForModel(
   ];
 }
 
-WebSearchMode? webSearchModeFromRaw(String? raw) =>
-    enumByValue(WebSearchMode.values, raw, (v) => v.value);
-
-Provider _providerFromRaw(String? raw) =>
-    enumByValue(Provider.values, raw, (v) => v.value) ?? Provider.codex;
-
-PermissionMode? permissionModeFromRaw(String? raw) =>
-    enumByValue(PermissionMode.values, raw, (v) => v.value);
-
-ExecutionMode _executionModeFromRawWithDefault(
-  String? raw, {
-  String? provider,
-  String? permissionMode,
-  String? approvalPolicy,
-}) => deriveExecutionMode(
-  provider: provider,
-  executionMode: raw,
-  permissionMode: permissionMode,
-  approvalPolicy: approvalPolicy,
-);
-
-ClaudeEffort? claudeEffortFromRaw(String? raw) =>
-    enumByValue(ClaudeEffort.values, raw, (v) => v.value);
-
 const _legacyClaudeEfforts = <ClaudeEffort>[
   ClaudeEffort.low,
   ClaudeEffort.medium,
@@ -340,95 +93,6 @@ List<ClaudeEffort> _claudeEffortsForModel(
   return modelEfforts.isEmpty ? _legacyClaudeEfforts : ClaudeEffort.values;
 }
 
-/// Serialize [NewSessionParams] to JSON for SharedPreferences.
-///
-/// Session-specific values (worktree branch/path, useWorktree,
-/// maxTurns, maxBudgetUsd) are intentionally excluded to avoid
-/// dangerous or stale defaults on next session creation.
-Map<String, dynamic> sessionStartDefaultsToJson(NewSessionParams params) {
-  return {
-    'projectPath': params.projectPath,
-    'projectId': params.projectId,
-    'workspaceKind': params.workspaceKind,
-    'provider': params.provider.value,
-    'executionMode': params.executionMode.value,
-    'codexPermissionsMode': params.codexPermissionsMode.value,
-    'codexApprovalPolicy': params.codexApprovalPolicy.value,
-    'codexAutoReviewEnabled': params.codexAutoReviewEnabled,
-    'planMode': params.planMode,
-    'permissionMode': params.permissionMode.value,
-    // NOTE: useWorktree, worktreeBranch, existingWorktreePath are
-    // session-specific and intentionally NOT persisted.
-    'model': params.model,
-    'sandboxMode': params.sandboxMode?.value,
-    'modelReasoningEffort': params.modelReasoningEffort?.value,
-    'serviceTier': params.codexSpeed.value,
-    'networkAccessEnabled': params.networkAccessEnabled,
-    'webSearchMode': params.webSearchMode?.value,
-    'claudeModel': params.claudeModel,
-    'claudeEffort': params.claudeEffort?.value,
-    // NOTE: claudeMaxTurns, claudeMaxBudgetUsd are session-specific
-    // and intentionally NOT persisted.
-    'claudeFallbackModel': params.claudeFallbackModel,
-    'claudeForkSession': params.claudeForkSession,
-    'claudePersistSession': params.claudePersistSession,
-  };
-}
-
-/// Deserialize [NewSessionParams] from JSON stored in SharedPreferences.
-NewSessionParams? sessionStartDefaultsFromJson(Map<String, dynamic> json) {
-  final projectPath = json['projectPath'] as String?;
-  if (projectPath == null || projectPath.isEmpty) return null;
-  final workspaceKind = json['workspaceKind'] as String?;
-  if (workspaceKind != null && workspaceKind != 'project') return null;
-  final codexModel = normalizeCodexModelForAvailableList(
-    json['model'] as String?,
-    _defaultCodexModels,
-  );
-  return NewSessionParams(
-    projectPath: projectPath,
-    projectId: json['projectId'] as String?,
-    workspaceKind: workspaceKind,
-    provider: _providerFromRaw(json['provider'] as String?),
-    claudePermissionMode: permissionModeFromRaw(
-      json['permissionMode'] as String?,
-    ),
-    executionMode: _executionModeFromRawWithDefault(
-      json['executionMode'] as String?,
-      provider: json['provider'] as String?,
-      permissionMode: json['permissionMode'] as String?,
-    ),
-    codexPermissionsMode: codexPermissionsModeFromRaw(
-      json['codexPermissionsMode'] as String?,
-    ),
-    codexApprovalPolicy:
-        codexApprovalPolicyFromRaw(json['codexApprovalPolicy'] as String?) ??
-        codexApprovalPolicyFromLegacyExecutionMode(
-          json['executionMode'] as String?,
-        ),
-    codexAutoReviewEnabled: json['codexAutoReviewEnabled'] as bool? ?? false,
-    planMode: derivePlanMode(
-      planMode: json['planMode'] as bool?,
-      permissionMode: json['permissionMode'] as String?,
-    ),
-    // useWorktree, worktreeBranch, existingWorktreePath default to off/null
-    model: codexModel ?? json['model'] as String?,
-    sandboxMode: sandboxModeFromRaw(json['sandboxMode'] as String?),
-    modelReasoningEffort: reasoningEffortFromRaw(
-      json['modelReasoningEffort'] as String?,
-    ),
-    codexSpeed: codexSpeedFromRaw(json['serviceTier'] as String?),
-    networkAccessEnabled: json['networkAccessEnabled'] as bool?,
-    webSearchMode: webSearchModeFromRaw(json['webSearchMode'] as String?),
-    claudeModel: json['claudeModel'] as String?,
-    claudeEffort: claudeEffortFromRaw(json['claudeEffort'] as String?),
-    // claudeMaxTurns, claudeMaxBudgetUsd default to null
-    claudeFallbackModel: json['claudeFallbackModel'] as String?,
-    claudeForkSession: json['claudeForkSession'] as bool?,
-    claudePersistSession: json['claudePersistSession'] as bool?,
-  );
-}
-
 /// Shows a modal bottom sheet for creating a new Claude Code session.
 ///
 /// Returns [NewSessionParams] if the user starts a session, or null on cancel.
@@ -448,7 +112,7 @@ Future<NewSessionParams?> showNewSessionSheet({
   BridgeService? bridge,
   NewSessionParams? initialParams,
   bool lockProvider = false,
-  List<NewSessionTab> visibleTabs = defaultNewSessionTabs,
+  List<NewSessionTab> visibleTabs = _defaultVisibleTabs,
   bool showExtendedCodexEfforts = false,
   bool showHiddenDirectories = false,
 }) {
@@ -472,6 +136,10 @@ Future<NewSessionParams?> showNewSessionSheet({
     ),
   );
 }
+
+/// Tabs when the caller passes none: omp is shown only by callers that know
+/// the Bridge supports it (`visibleNewSessionTabs`).
+const _defaultVisibleTabs = [NewSessionTab.codex, NewSessionTab.claude];
 
 /// Number of recent projects shown by default (collapsed).
 const _defaultRecentProjects = 5;
@@ -532,7 +200,7 @@ class _NewSessionSheetContent extends StatefulWidget {
     this.bridge,
     this.initialParams,
     this.lockProvider = false,
-    this.visibleTabs = defaultNewSessionTabs,
+    this.visibleTabs = _defaultVisibleTabs,
     this.showExtendedCodexEfforts = false,
     this.showHiddenDirectories = false,
   });
@@ -588,6 +256,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   StreamSubscription<List<String>>? _projectHistorySub;
   StreamSubscription<ProjectsMessage>? _projectsSub;
   StreamSubscription<bool>? _codexAutoReviewPolicySub;
+  StreamSubscription<List<SessionInfo>>? _ompCatalogueSub;
   bool _codexAutoReviewDisabled = false;
   ProjectsMessage _workspaceProjectsState = const ProjectsMessage(projects: []);
   String? _selectedProjectId;
@@ -634,6 +303,14 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   var _additionalWritableRoots = <String>[];
   var _additionalWritableRootHistory = <String>[];
 
+  // omp-specific options. Kept apart from the Claude/Codex modes so that a
+  // tab switch never carries a Codex "full access" into omp's approval mode.
+  var _ompExecutionMode = ExecutionMode.defaultMode;
+  String? _selectedOmpModel; // null = omp's configured default
+  String? _ompThinkingLevel; // null = omp's default for the model
+  List<OmpModelInfo> _ompModelList = const [];
+  OmpAvailability? _ompAvailability;
+
   // Project list expansion
   bool _isProjectListExpanded = false;
 
@@ -641,14 +318,65 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   String? _maxTurnsError;
   String? _maxBudgetError;
 
-  // Provider-aware sandbox accessor (keeps existing `_sandboxMode` usage intact)
-  SandboxMode get _sandboxMode =>
-      _provider == Provider.claude ? _claudeSandboxMode : _codexSandboxMode;
+  // Provider-aware sandbox accessor (keeps existing `_sandboxMode` usage
+  // intact). omp has no process sandbox; it never sends one.
+  SandboxMode get _sandboxMode => switch (_provider) {
+    Provider.claude => _claudeSandboxMode,
+    Provider.codex => _codexSandboxMode,
+    Provider.omp => SandboxMode.off,
+  };
   set _sandboxMode(SandboxMode v) {
-    if (_provider == Provider.claude) {
-      _claudeSandboxMode = v;
-    } else {
-      _codexSandboxMode = v;
+    switch (_provider) {
+      case Provider.claude:
+        _claudeSandboxMode = v;
+      case Provider.codex:
+        _codexSandboxMode = v;
+      case Provider.omp:
+        break;
+    }
+  }
+
+  /// Thinking levels of the selected omp model; empty for "omp default" or
+  /// a model the catalogue does not list. Until a catalogue arrives a kept
+  /// model offers every level: the Bridge drops one the model lacks.
+  List<String> get _ompThinkingLevels {
+    if (_selectedOmpModel != null && _ompModelList.isEmpty) {
+      return [for (final level in OmpThinkingLevel.values) level.value];
+    }
+    return ompThinkingLevelsForModel(_ompModelList, _selectedOmpModel);
+  }
+
+  /// The first `session_list` of a connection carries no omp catalogue, so
+  /// the sheet follows the catalogue while it is open. A model the new
+  /// catalogue does not list falls back to "omp default".
+  void _onOmpCatalogueChanged() {
+    final bridge = widget.bridge;
+    if (bridge == null || !mounted) return;
+    final models = bridge.ompModels;
+    final availability = bridge.ompAvailability;
+    if (identical(models, _ompModelList) && availability == _ompAvailability) {
+      return;
+    }
+    setState(() {
+      _ompModelList = models;
+      _ompAvailability = availability;
+      final model = _selectedOmpModel;
+      _selectOmpModel(
+        model == null ||
+                models.isEmpty ||
+                models.any((info) => info.selector == model)
+            ? model
+            : null,
+      );
+    });
+  }
+
+  void _selectOmpModel(String? selector) {
+    _selectedOmpModel = selector;
+    final levels = _ompThinkingLevels;
+    if (selector == null ||
+        (_ompThinkingLevel != null && !levels.contains(_ompThinkingLevel))) {
+      _ompThinkingLevel = null;
     }
   }
 
@@ -814,6 +542,8 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
     );
     _codexModelServiceTiers = widget.bridge?.codexModelServiceTiers ?? const {};
     _codexProfiles = widget.bridge?.codexProfiles ?? const [];
+    _ompModelList = widget.bridge?.ompModels ?? const [];
+    _ompAvailability = widget.bridge?.ompAvailability;
     _codexAutoReviewDisabled = widget.bridge?.codexAutoReviewDisabled ?? false;
     final defaultCodexProfile = widget.bridge?.defaultCodexProfile;
     if (_codexProfiles.contains(defaultCodexProfile)) {
@@ -841,6 +571,9 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
       setState(() => _applyWorkspaceProjectsState(state));
     });
     widget.bridge?.requestProjects();
+    _ompCatalogueSub = widget.bridge?.sessionList.listen(
+      (_) => _onOmpCatalogueChanged(),
+    );
     _codexAutoReviewPolicySub = widget.bridge?.codexAutoReviewPolicyStream
         .listen((disabled) {
           if (!mounted) return;
@@ -877,6 +610,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
     _projectHistorySub?.cancel();
     _projectsSub?.cancel();
     _codexAutoReviewPolicySub?.cancel();
+    _ompCatalogueSub?.cancel();
     _pageController.dispose();
     _pathController.dispose();
     _branchController.dispose();
@@ -936,7 +670,11 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
       (t) => t.toProvider() == p.provider,
     );
     _provider = isVisible ? p.provider : widget.visibleTabs.first.toProvider();
-    _executionMode = p.executionMode;
+    if (p.provider == Provider.omp) {
+      _applyInitialOmpParams(p);
+    } else {
+      _executionMode = p.executionMode;
+    }
     _codexPermissionsMode = p.codexPermissionsMode;
     _claudePermissionMode = p.provider == Provider.claude
         ? p.permissionMode
@@ -961,10 +699,13 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
     _selectedCodexProfile = _codexProfiles.contains(p.codexProfile)
         ? p.codexProfile
         : null;
-    if (p.provider == Provider.claude) {
-      _claudeSandboxMode = p.sandboxMode ?? SandboxMode.off;
-    } else {
-      _codexSandboxMode = p.sandboxMode ?? SandboxMode.on;
+    switch (p.provider) {
+      case Provider.claude:
+        _claudeSandboxMode = p.sandboxMode ?? SandboxMode.off;
+      case Provider.codex:
+        _codexSandboxMode = p.sandboxMode ?? SandboxMode.on;
+      case Provider.omp:
+        break;
     }
     if (p.provider == Provider.codex) {
       _applyCodexPermissionsMode(p.codexPermissionsMode);
@@ -1010,6 +751,22 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
       );
     }
     _enforceCodexAutoReviewPolicy();
+  }
+
+  /// Restores the omp page from saved defaults or a recent omp session. A
+  /// model the catalogue does not list falls back to "omp default"; with no
+  /// catalogue yet the values are kept and the Bridge validates them.
+  void _applyInitialOmpParams(NewSessionParams p) {
+    _ompExecutionMode = p.executionMode;
+    final model = p.ompModel;
+    final known =
+        _ompModelList.isEmpty ||
+        _ompModelList.any((info) => info.selector == model);
+    _selectedOmpModel = known ? model : null;
+    final level = p.ompThinkingLevel;
+    _ompThinkingLevel = level != null && _ompThinkingLevels.contains(level)
+        ? level
+        : null;
   }
 
   void _fetchWorktrees() {
@@ -1172,6 +929,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
       context: context,
       controller: _additionalWritableRootController,
       suggestions: _addDirSuggestions,
+      provider: _provider,
     );
     if (selected == null || !mounted) return;
     _addWritableRoot(selected);
@@ -1319,6 +1077,9 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   NewSessionParams _buildParams() {
     final path = _pathController.text.trim();
     final branch = _branchController.text.trim();
+    if (_provider == Provider.omp) {
+      return _buildOmpParams(path: path, branch: branch);
+    }
     final isCodex = _provider == Provider.codex;
     final claudeMaxTurns = int.tryParse(_claudeMaxTurnsController.text.trim());
     final claudeMaxBudgetUsd = double.tryParse(
@@ -1371,6 +1132,33 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
       claudeFallbackModel: !isCodex ? _selectedClaudeFallbackModel : null,
       claudeForkSession: !isCodex ? _claudeForkSession : null,
       claudePersistSession: !isCodex ? _claudePersistSession : null,
+    );
+  }
+
+  /// omp parameters carry only what omp uses: project, worktree, extra
+  /// directories, approval mode, model and thinking level.
+  NewSessionParams _buildOmpParams({
+    required String path,
+    required String branch,
+  }) {
+    final useExisting =
+        _useWorktree && _worktreeMode == _WorktreeMode.useExisting;
+    return NewSessionParams(
+      projectPath: path,
+      projectId: _selectedProjectId,
+      workspaceKind: _workspaceKind,
+      provider: Provider.omp,
+      executionMode: _ompExecutionMode,
+      useWorktree: useExisting ? false : _useWorktree,
+      worktreeBranch: useExisting
+          ? _selectedWorktree?.branch
+          : (branch.isNotEmpty ? branch : null),
+      existingWorktreePath: useExisting
+          ? _selectedWorktree?.worktreePath
+          : null,
+      additionalWritableRoots: _additionalWritableRoots,
+      ompModel: _selectedOmpModel,
+      ompThinkingLevel: _selectedOmpModel == null ? null : _ompThinkingLevel,
     );
   }
 
@@ -1480,6 +1268,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
           if (_selectedProjectId == null) ...[
             const SizedBox(height: 12),
             _AdditionalWritableRootsSection(
+              provider: pageProvider,
               roots: _additionalWritableRoots,
               onAddPressed: _openAddWritableRootSheet,
               onDeleted: _removeWritableRoot,
@@ -1623,6 +1412,22 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
                 _networkAccessEnabled = value;
                 _codexNetworkAccessTouched = true;
               });
+            },
+            // omp
+            ompExecutionMode: _ompExecutionMode,
+            onOmpExecutionModeChanged: (value) {
+              setState(() => _ompExecutionMode = value);
+            },
+            ompModels: _ompModelList,
+            ompAvailability: _ompAvailability,
+            selectedOmpModel: _selectedOmpModel,
+            onOmpModelChanged: (value) {
+              setState(() => _selectOmpModel(value));
+            },
+            ompThinkingLevels: _ompThinkingLevels,
+            ompThinkingLevel: _ompThinkingLevel,
+            onOmpThinkingLevelChanged: (value) {
+              setState(() => _ompThinkingLevel = value);
             },
           ),
           const SizedBox(height: 16),
@@ -2200,12 +2005,26 @@ class _PathInput extends StatelessWidget {
   }
 }
 
+/// Explanation of the additional directories for [provider]. omp's
+/// `--add-dir` only adds workspace roots, so omp gets its own text instead
+/// of the Codex `config.toml` one.
+String _additionalWritableRootsInfo(
+  Provider provider,
+  AppLocalizations l,
+) => switch (provider) {
+  Provider.omp => l.ompAdditionalDirsDescription,
+  Provider.claude || Provider.codex =>
+    '${l.additionalWritableRootsDescription}\n${l.additionalWritableRootsTooltip}',
+};
+
 class _AdditionalWritableRootsSection extends StatelessWidget {
+  final Provider provider;
   final List<String> roots;
   final VoidCallback onAddPressed;
   final ValueChanged<String> onDeleted;
 
   const _AdditionalWritableRootsSection({
+    required this.provider,
     required this.roots,
     required this.onAddPressed,
     required this.onDeleted,
@@ -2216,8 +2035,8 @@ class _AdditionalWritableRootsSection extends StatelessWidget {
     final l = AppLocalizations.of(context);
     final cs = Theme.of(context).colorScheme;
     final infoButton = _AdditionalWritableRootsInfoButton(
-      message:
-          '${l.additionalWritableRootsDescription}\n${l.additionalWritableRootsTooltip}',
+      key: ValueKey('additional_writable_roots_info_${provider.value}'),
+      message: _additionalWritableRootsInfo(provider, l),
     );
     final addButton = ActionChip(
       key: const ValueKey('additional_writable_root_add_button'),
@@ -2289,7 +2108,7 @@ class _AdditionalWritableRootsSection extends StatelessWidget {
 class _AdditionalWritableRootsInfoButton extends StatefulWidget {
   final String message;
 
-  const _AdditionalWritableRootsInfoButton({required this.message});
+  const _AdditionalWritableRootsInfoButton({super.key, required this.message});
 
   @override
   State<_AdditionalWritableRootsInfoButton> createState() =>
@@ -2323,23 +2142,29 @@ Future<String?> _showAddWritableRootSheet({
   required BuildContext context,
   required TextEditingController controller,
   required List<String> suggestions,
+  required Provider provider,
 }) {
   return showModalBottomSheet<String>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
-    builder: (sheetContext) =>
-        _AddWritableRootSheet(controller: controller, suggestions: suggestions),
+    builder: (sheetContext) => _AddWritableRootSheet(
+      controller: controller,
+      suggestions: suggestions,
+      provider: provider,
+    ),
   );
 }
 
 class _AddWritableRootSheet extends StatelessWidget {
   final TextEditingController controller;
   final List<String> suggestions;
+  final Provider provider;
 
   const _AddWritableRootSheet({
     required this.controller,
     required this.suggestions,
+    required this.provider,
   });
 
   @override
@@ -2390,7 +2215,11 @@ class _AddWritableRootSheet extends StatelessWidget {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        l.additionalWritableRootsTooltip,
+                        switch (provider) {
+                          Provider.omp => l.ompAdditionalDirsDescription,
+                          Provider.claude ||
+                          Provider.codex => l.additionalWritableRootsTooltip,
+                        },
                         style: TextStyle(
                           fontSize: 12,
                           color: cs.onSurfaceVariant,
@@ -2543,6 +2372,17 @@ class _OptionsSection extends StatelessWidget {
   final bool networkAccessEnabled;
   final ValueChanged<bool> onNetworkAccessChanged;
 
+  // omp
+  final ExecutionMode ompExecutionMode;
+  final ValueChanged<ExecutionMode> onOmpExecutionModeChanged;
+  final List<OmpModelInfo> ompModels;
+  final OmpAvailability? ompAvailability;
+  final String? selectedOmpModel;
+  final ValueChanged<String?> onOmpModelChanged;
+  final List<String> ompThinkingLevels;
+  final String? ompThinkingLevel;
+  final ValueChanged<String?> onOmpThinkingLevelChanged;
+
   const _OptionsSection({
     required this.appColors,
     required this.provider,
@@ -2601,6 +2441,15 @@ class _OptionsSection extends StatelessWidget {
     required this.onWebSearchModeChanged,
     required this.networkAccessEnabled,
     required this.onNetworkAccessChanged,
+    required this.ompExecutionMode,
+    required this.onOmpExecutionModeChanged,
+    required this.ompModels,
+    required this.ompAvailability,
+    required this.selectedOmpModel,
+    required this.onOmpModelChanged,
+    required this.ompThinkingLevels,
+    required this.ompThinkingLevel,
+    required this.onOmpThinkingLevelChanged,
   });
 
   @override
@@ -2901,84 +2750,108 @@ class _OptionsSection extends StatelessWidget {
             ),
             const SizedBox(height: 20),
           ],
-          provider == Provider.codex
-              ? modeSelectorField(
-                  key: const ValueKey('dialog_codex_permissions_mode'),
-                  label: 'Permissions',
-                  icon: codexPermissionsIcon(codexPermissionsMode),
-                  title: codexPermissionsMode.label,
-                  subtitle: codexPermissionsDescription(codexPermissionsMode),
-                  accentColor:
-                      codexPermissionsMode == CodexPermissionsMode.fullAccess
-                      ? Theme.of(context).colorScheme.error
-                      : null,
-                  onTap: () => showModeSheet<CodexPermissionsMode>(
-                    title: 'Permissions',
-                    subtitle: l.sheetSubtitleApproval,
-                    modes: CodexPermissionsMode.values,
-                    currentMode: codexPermissionsMode,
-                    iconFor: codexPermissionsIcon,
-                    labelFor: (mode) => mode.label,
-                    descriptionFor: codexPermissionsDescription,
-                    enabledFor: (mode) =>
-                        !codexAutoReviewDisabled ||
-                        mode != CodexPermissionsMode.autoReview,
-                    onSelected: onCodexPermissionsModeChanged,
-                    colorFor: (mode, cs) => switch (mode) {
-                      CodexPermissionsMode.fullAccess => cs.error,
-                      CodexPermissionsMode.autoReview => cs.primary,
-                      _ => cs.primary,
-                    },
-                  ),
-                )
-              : modeSelectorField(
-                  key: const ValueKey('dialog_permission_mode'),
-                  label: l.approval,
-                  icon: permissionIcon(selectedPermissionMode),
-                  title: selectedPermissionMode.label,
-                  subtitle: permissionDescription(selectedPermissionMode),
-                  accentColor: switch (selectedPermissionMode) {
-                    PermissionMode.auto => autoModeColor,
-                    PermissionMode.bypassPermissions => Theme.of(
-                      context,
-                    ).colorScheme.error,
-                    _ => null,
-                  },
-                  onTap: () => showModeSheet<PermissionMode>(
-                    title: l.approval,
-                    subtitle: l.sheetSubtitleApproval,
-                    modes: PermissionMode.values,
-                    currentMode: selectedPermissionMode,
-                    iconFor: permissionIcon,
-                    labelFor: (m) => m.label,
-                    descriptionFor: permissionDescription,
-                    onSelected: (value) {
-                      onClaudePermissionModeChanged(value);
-                      switch (value) {
-                        case PermissionMode.defaultMode:
-                          onExecutionModeChanged(ExecutionMode.defaultMode);
-                          onPlanModeChanged(false);
-                        case PermissionMode.auto:
-                          onExecutionModeChanged(ExecutionMode.defaultMode);
-                          onPlanModeChanged(false);
-                        case PermissionMode.acceptEdits:
-                          onExecutionModeChanged(ExecutionMode.acceptEdits);
-                          onPlanModeChanged(false);
-                        case PermissionMode.plan:
-                          onExecutionModeChanged(ExecutionMode.defaultMode);
-                          onPlanModeChanged(true);
-                        case PermissionMode.bypassPermissions:
-                          onExecutionModeChanged(ExecutionMode.fullAccess);
-                          onPlanModeChanged(false);
-                      }
-                    },
-                    colorFor: (mode, cs) => switch (mode) {
-                      PermissionMode.auto => autoModeColor,
-                      PermissionMode.bypassPermissions => cs.error,
-                      _ => cs.primary,
-                    },
-                  ),
-                ),
+          switch (provider) {
+            Provider.omp => modeSelectorField(
+              key: const ValueKey('dialog_omp_approval_mode'),
+              label: l.approval,
+              icon: ompApprovalModeDetails(ompExecutionMode, l).icon,
+              title: ompApprovalModeDetails(ompExecutionMode, l).label,
+              subtitle: ompApprovalModeDetails(ompExecutionMode, l).description,
+              accentColor: ompExecutionMode == ExecutionMode.fullAccess
+                  ? Theme.of(context).colorScheme.error
+                  : null,
+              onTap: () => showModeSheet<ExecutionMode>(
+                title: l.ompApprovalMenuTitle,
+                subtitle: l.sheetSubtitleApproval,
+                modes: ExecutionMode.values,
+                currentMode: ompExecutionMode,
+                iconFor: (mode) => ompApprovalModeDetails(mode, l).icon,
+                labelFor: (mode) => ompApprovalModeDetails(mode, l).label,
+                descriptionFor: (mode) =>
+                    ompApprovalModeDetails(mode, l).description,
+                onSelected: onOmpExecutionModeChanged,
+                colorFor: (mode, cs) =>
+                    mode == ExecutionMode.fullAccess ? cs.error : cs.primary,
+              ),
+            ),
+            Provider.codex => modeSelectorField(
+              key: const ValueKey('dialog_codex_permissions_mode'),
+              label: 'Permissions',
+              icon: codexPermissionsIcon(codexPermissionsMode),
+              title: codexPermissionsMode.label,
+              subtitle: codexPermissionsDescription(codexPermissionsMode),
+              accentColor:
+                  codexPermissionsMode == CodexPermissionsMode.fullAccess
+                  ? Theme.of(context).colorScheme.error
+                  : null,
+              onTap: () => showModeSheet<CodexPermissionsMode>(
+                title: 'Permissions',
+                subtitle: l.sheetSubtitleApproval,
+                modes: CodexPermissionsMode.values,
+                currentMode: codexPermissionsMode,
+                iconFor: codexPermissionsIcon,
+                labelFor: (mode) => mode.label,
+                descriptionFor: codexPermissionsDescription,
+                enabledFor: (mode) =>
+                    !codexAutoReviewDisabled ||
+                    mode != CodexPermissionsMode.autoReview,
+                onSelected: onCodexPermissionsModeChanged,
+                colorFor: (mode, cs) => switch (mode) {
+                  CodexPermissionsMode.fullAccess => cs.error,
+                  CodexPermissionsMode.autoReview => cs.primary,
+                  _ => cs.primary,
+                },
+              ),
+            ),
+            Provider.claude => modeSelectorField(
+              key: const ValueKey('dialog_permission_mode'),
+              label: l.approval,
+              icon: permissionIcon(selectedPermissionMode),
+              title: selectedPermissionMode.label,
+              subtitle: permissionDescription(selectedPermissionMode),
+              accentColor: switch (selectedPermissionMode) {
+                PermissionMode.auto => autoModeColor,
+                PermissionMode.bypassPermissions => Theme.of(
+                  context,
+                ).colorScheme.error,
+                _ => null,
+              },
+              onTap: () => showModeSheet<PermissionMode>(
+                title: l.approval,
+                subtitle: l.sheetSubtitleApproval,
+                modes: PermissionMode.values,
+                currentMode: selectedPermissionMode,
+                iconFor: permissionIcon,
+                labelFor: (m) => m.label,
+                descriptionFor: permissionDescription,
+                onSelected: (value) {
+                  onClaudePermissionModeChanged(value);
+                  switch (value) {
+                    case PermissionMode.defaultMode:
+                      onExecutionModeChanged(ExecutionMode.defaultMode);
+                      onPlanModeChanged(false);
+                    case PermissionMode.auto:
+                      onExecutionModeChanged(ExecutionMode.defaultMode);
+                      onPlanModeChanged(false);
+                    case PermissionMode.acceptEdits:
+                      onExecutionModeChanged(ExecutionMode.acceptEdits);
+                      onPlanModeChanged(false);
+                    case PermissionMode.plan:
+                      onExecutionModeChanged(ExecutionMode.defaultMode);
+                      onPlanModeChanged(true);
+                    case PermissionMode.bypassPermissions:
+                      onExecutionModeChanged(ExecutionMode.fullAccess);
+                      onPlanModeChanged(false);
+                  }
+                },
+                colorFor: (mode, cs) => switch (mode) {
+                  PermissionMode.auto => autoModeColor,
+                  PermissionMode.bypassPermissions => cs.error,
+                  _ => cs.primary,
+                },
+              ),
+            ),
+          },
           if (isClaude) ...[
             const SizedBox(height: 8),
             modeSelectorField(
@@ -3057,6 +2930,49 @@ class _OptionsSection extends StatelessWidget {
               supportsFast: codexSupportsFast,
               onSpeedChanged: onCodexSpeedChanged,
             ),
+          if (provider == Provider.omp) ...[
+            modeSelectorField(
+              key: const ValueKey('dialog_omp_model'),
+              label: l.model,
+              icon: Icons.pie_chart_outline,
+              title: ompModelDisplayName(selectedOmpModel, ompModels, l),
+              subtitle: switch (ompAvailability) {
+                OmpAvailability.notInstalled => l.ompNotDetected,
+                OmpAvailability.noModels => l.ompNoModels,
+                OmpAvailability.available => selectedOmpModel ?? '',
+                // The catalogue has not arrived yet (§7.1).
+                null => l.loading,
+              },
+              onTap: () => showOmpModelPicker(
+                context,
+                models: ompModels,
+                selected: selectedOmpModel,
+                onSelected: onOmpModelChanged,
+              ),
+            ),
+            // omp validates the level against the chosen model, so a level is
+            // offered only once a model is chosen.
+            if (ompThinkingLevels.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              modeSelectorField(
+                key: const ValueKey('dialog_omp_thinking_level'),
+                label: l.reasoning,
+                icon: Icons.psychology_outlined,
+                title: ompThinkingLevel == null
+                    ? l.ompDefaultModel
+                    : ompThinkingLevelLabel(ompThinkingLevel!),
+                subtitle: ompThinkingLevel == null
+                    ? ''
+                    : ompThinkingLevelDescription(ompThinkingLevel!, l),
+                onTap: () => showOmpThinkingLevelPicker(
+                  context,
+                  levels: ompThinkingLevels,
+                  selected: ompThinkingLevel,
+                  onSelected: onOmpThinkingLevelChanged,
+                ),
+              ),
+            ],
+          ],
           const SizedBox(height: 8),
           // Worktree toggle (shared) + inline options when expanded
           _WorktreeToggleTile(
@@ -3075,28 +2991,31 @@ class _OptionsSection extends StatelessWidget {
                   )
                 : null,
           ),
-          const SizedBox(height: 8),
-          _AdvancedOptions(
-            provider: provider,
-            buildInputDecoration: buildInputDecoration,
-            claudeModels: claudeModels,
-            claudeMaxTurnsController: claudeMaxTurnsController,
-            maxTurnsError: maxTurnsError,
-            onMaxTurnsChanged: onMaxTurnsChanged,
-            claudeMaxBudgetController: claudeMaxBudgetController,
-            maxBudgetError: maxBudgetError,
-            onMaxBudgetChanged: onMaxBudgetChanged,
-            selectedClaudeFallbackModel: selectedClaudeFallbackModel,
-            onClaudeFallbackModelChanged: onClaudeFallbackModelChanged,
-            claudeForkSession: claudeForkSession,
-            onClaudeForkSessionChanged: onClaudeForkSessionChanged,
-            claudePersistSession: claudePersistSession,
-            onClaudePersistSessionChanged: onClaudePersistSessionChanged,
-            webSearchMode: webSearchMode,
-            onWebSearchModeChanged: onWebSearchModeChanged,
-            networkAccessEnabled: networkAccessEnabled,
-            onNetworkAccessChanged: onNetworkAccessChanged,
-          ),
+          // omp has no Claude or Codex advanced options.
+          if (provider != Provider.omp) ...[
+            const SizedBox(height: 8),
+            _AdvancedOptions(
+              provider: provider,
+              buildInputDecoration: buildInputDecoration,
+              claudeModels: claudeModels,
+              claudeMaxTurnsController: claudeMaxTurnsController,
+              maxTurnsError: maxTurnsError,
+              onMaxTurnsChanged: onMaxTurnsChanged,
+              claudeMaxBudgetController: claudeMaxBudgetController,
+              maxBudgetError: maxBudgetError,
+              onMaxBudgetChanged: onMaxBudgetChanged,
+              selectedClaudeFallbackModel: selectedClaudeFallbackModel,
+              onClaudeFallbackModelChanged: onClaudeFallbackModelChanged,
+              claudeForkSession: claudeForkSession,
+              onClaudeForkSessionChanged: onClaudeForkSessionChanged,
+              claudePersistSession: claudePersistSession,
+              onClaudePersistSessionChanged: onClaudePersistSessionChanged,
+              webSearchMode: webSearchMode,
+              onWebSearchModeChanged: onWebSearchModeChanged,
+              networkAccessEnabled: networkAccessEnabled,
+              onNetworkAccessChanged: onNetworkAccessChanged,
+            ),
+          ],
         ],
       ),
     );

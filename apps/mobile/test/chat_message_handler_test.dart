@@ -2013,4 +2013,192 @@ void main() {
       expect(message.errorCode, 'bridge_update_required');
     });
   });
+
+  group('omp sessions', () {
+    const init = SystemMessage(
+      subtype: 'init',
+      sessionId: '3f9c2a1b',
+      provider: 'omp',
+      model: 'baseten/zai-org/GLM-5.3-Fast',
+      thinkingLevel: 'high',
+      thinkingLevels: ['off', 'high', 'max'],
+      permissionMode: 'acceptEdits',
+      executionMode: 'acceptEdits',
+    );
+    const ompSettings = SystemMessage(
+      subtype: 'omp_settings',
+      sessionId: '3f9c2a1b',
+      provider: 'omp',
+      model: 'baseten/MiniMaxAI/MiniMax-M3',
+      thinkingLevels: ['off'],
+    );
+
+    test('init is metadata only and fills the omp settings', () {
+      final update = handler.handle(init, isBackground: false, isOmp: true);
+
+      expect(update.entriesToAdd, isEmpty);
+      expect(update.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+      expect(update.ompThinkingLevel, 'high');
+      expect(update.ompThinkingLevels, ['off', 'high', 'max']);
+      expect(update.clearOmpThinkingLevel, isFalse);
+      expect(update.executionMode, ExecutionMode.acceptEdits);
+      // The Bridge id is not an omp session id.
+      expect(update.claudeSessionId, isNull);
+      // omp settings never leak into the Codex fields.
+      expect(update.codexModel, isNull);
+    });
+
+    test('omp_settings updates live without a transcript entry', () {
+      final update = handler.handle(
+        ompSettings,
+        isBackground: false,
+        isOmp: true,
+      );
+
+      expect(update.entriesToAdd, isEmpty);
+      expect(update.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+      expect(update.ompThinkingLevel, isNull);
+      // A snapshot without a level means omp has none for this model.
+      expect(update.clearOmpThinkingLevel, isTrue);
+      expect(update.ompThinkingLevels, ['off']);
+    });
+
+    test('session_created reports its level without clearing', () {
+      final update = handler.handle(
+        const SystemMessage(
+          subtype: 'session_created',
+          sessionId: '7d41e0c5',
+          provider: 'omp',
+          claudeSessionId: '01a0e960-d626-7359-b8e8-44ce5c598088',
+          model: 'a/b',
+        ),
+        isBackground: false,
+        isOmp: true,
+      );
+
+      expect(update.ompModel, 'a/b');
+      expect(update.clearOmpThinkingLevel, isFalse);
+      expect(update.ompThinkingLevels, isNull);
+      expect(update.claudeSessionId, '01a0e960-d626-7359-b8e8-44ce5c598088');
+    });
+
+    test('history skips omp_settings and restores the omp settings', () {
+      final update = handler.handle(
+        const HistoryMessage(
+          messages: [
+            init,
+            ompSettings,
+            SystemMessage(
+              subtype: 'set_permission_mode',
+              provider: 'omp',
+              permissionMode: 'default',
+              executionMode: 'default',
+            ),
+          ],
+        ),
+        isBackground: false,
+        isOmp: true,
+      );
+
+      final visibleSubtypes = update.entriesToAdd
+          .whereType<ServerChatEntry>()
+          .map((entry) => entry.message)
+          .whereType<SystemMessage>()
+          .map((message) => message.subtype)
+          .toList();
+      expect(visibleSubtypes, isNot(contains('omp_settings')));
+      expect(visibleSubtypes, isNot(contains('init')));
+      expect(update.ompModel, 'baseten/MiniMaxAI/MiniMax-M3');
+      expect(update.ompThinkingLevel, isNull);
+      expect(update.clearOmpThinkingLevel, isTrue);
+      expect(update.ompThinkingLevels, ['off']);
+      expect(update.codexModel, isNull);
+      expect(update.claudeSessionId, isNull);
+    });
+
+    test('history keeps the latest thinking level', () {
+      final update = handler.handle(
+        const HistoryMessage(
+          messages: [
+            ompSettings,
+            SystemMessage(
+              subtype: 'omp_settings',
+              provider: 'omp',
+              model: 'a/b',
+              thinkingLevel: 'max',
+              thinkingLevels: ['off', 'max'],
+            ),
+          ],
+        ),
+        isBackground: false,
+        isOmp: true,
+      );
+
+      expect(update.ompModel, 'a/b');
+      expect(update.ompThinkingLevel, 'max');
+      expect(update.clearOmpThinkingLevel, isFalse);
+      expect(update.ompThinkingLevels, ['off', 'max']);
+    });
+
+    test('set_omp_model on an old Bridge shows the update hint', () {
+      final update = handler.handle(
+        const ErrorMessage(
+          message: 'set_omp_model',
+          errorCode: 'unsupported_message',
+        ),
+        isBackground: false,
+        isOmp: true,
+      );
+
+      final message =
+          (update.entriesToAdd.single as ServerChatEntry).message
+              as ErrorMessage;
+      expect(message.errorCode, 'bridge_update_required');
+    });
+
+    test('a failed omp rename that clears the name is surfaced', () {
+      final update = handler.handle(
+        const RenameResultMessage(
+          sessionId: '3f9c2a1b',
+          success: false,
+          error: 'omp session names cannot be cleared',
+        ),
+        isBackground: false,
+        isOmp: true,
+      );
+
+      final message =
+          (update.entriesToAdd.single as ServerChatEntry).message
+              as ErrorMessage;
+      expect(message.errorCode, 'omp_name_cannot_be_cleared');
+      expect(message.message, 'omp session names cannot be cleared');
+    });
+
+    test('other rename failures stay logged only', () {
+      expect(
+        handler
+            .handle(
+              const RenameResultMessage(
+                sessionId: '3f9c2a1b',
+                name: 'New name',
+                success: false,
+                error: 'rename failed',
+              ),
+              isBackground: false,
+              isOmp: true,
+            )
+            .entriesToAdd,
+        isEmpty,
+      );
+      expect(
+        handler
+            .handle(
+              const RenameResultMessage(sessionId: 'c1', success: false),
+              isBackground: false,
+            )
+            .entriesToAdd,
+        isEmpty,
+      );
+    });
+  });
 }

@@ -1,6 +1,6 @@
 # エージェント向けプロジェクト参照
 
-Claude Code / Codex 対応モバイルクライアント
+Claude Code / Codex / omp (oh-my-pi) 対応モバイルクライアント
 
 ## プロジェクト構成
 
@@ -13,6 +13,8 @@ ccpocket/
 │       ├── session.ts         # セッション管理 (SessionManager)
 │       ├── claude-process.ts  # Claude CLIプロセス管理 (SDK経由)
 │       ├── codex-process.ts   # Codex CLIプロセス管理 (SDK経由)
+│       ├── omp-process.ts     # omp プロセス管理 (`omp --mode rpc-ui`, RPC v2)
+│       ├── omp-*.ts           # omp の転送・ツール変換・セッションストア・履歴・writer 登録
 │       └── parser.ts          # stream-json パース・型定義
 ├── apps/mobile/        # Flutter Mobile App
 │   └── lib/
@@ -21,6 +23,7 @@ ccpocket/
 │       │   ├── chat_session/              # 共通チャットセッション (state/widgets)
 │       │   ├── claude_session/            # Claude Code セッション画面
 │       │   ├── codex_session/             # Codex セッション画面
+│       │   ├── omp_session/               # omp セッション画面
 │       │   ├── session_list/              # セッション一覧 (ホーム)
 │       │   ├── connection/                # 接続・マシン管理
 │       │   ├── diff/                      # Diff表示画面
@@ -72,14 +75,18 @@ Flutterアプリ終了時にBridge Serverも自動停止する。
 
 ```
                                          ┌→ claude-process.ts ←SDK→ Claude Code CLI
-Flutter App ←WebSocket→ websocket.ts ←→ session.ts ─┤
-                                              ↕      └→ codex-process.ts ←SDK→ Codex CLI
+Flutter App ←WebSocket→ websocket.ts ←→ session.ts ─┼→ codex-process.ts ←SDK→ Codex CLI
+                                              ↕      └→ omp-process.ts ←stdio RPC v2→ omp --mode rpc-ui
                                           parser.ts
 ```
 
 - `parser.ts` - Claude CLI stream-json出力のパースと型定義 (stream_event含む)
 - `claude-process.ts` - Claude Code CLIプロセス管理 (Claude Agent SDK経由)
 - `codex-process.ts` - Codex CLIプロセス管理 (Codex SDK経由)
+- `omp-process.ts` - omp セッション管理。`omp --mode rpc-ui` を1 Bridgeセッションにつき1プロセス起動し、omp のフレームを `ServerMessage` に変換する
+- `omp-rpc-transport.ts` / `omp-tool-mapping.ts` / `omp-env.ts` - omp の起動・フレーミング・v2 ネゴシエーション、ツール名/入力の変換、環境変数とストアの解決
+- `omp-sessions.ts` / `omp-history.ts` / `omp-writers.ts` / `omp-print.ts` - omp のセッションストア一覧・履歴変換・1ファイル1 writer の登録・`omp -p` アシスト
+- 設計と互換性方針: `docs/omp-integration.md`、プロトコル capability: `docs/protocol-versioning.md`
 - `session.ts` - マルチセッション管理 (SessionManager)
 - `websocket.ts` - WebSocket接続管理・認証・メッセージルーティング
 - `index.ts` - エントリーポイント
@@ -97,6 +104,9 @@ Flutter App ←WebSocket→ websocket.ts ←→ session.ts ─┤
 | `DIFF_IMAGE_AUTO_DISPLAY_KB` | `1024` (1MB) | Diff画像の自動表示閾値 (KB単位) |
 | `DIFF_IMAGE_MAX_SIZE_MB` | `5` (5MB) | Diff画像の最大サイズ (MB単位、超過はテキストのみ) |
 | `HTTPS_PROXY` | (なし) | プロキシ設定 (`http://`, `socks5://` 対応) |
+| `BRIDGE_OMP_BIN` | `omp` (PATH) | omp CLI のパス |
+| `BRIDGE_OMP_ASSIST_MODEL` | セッションのモデル | omp の自動 Rename / コミットメッセージ生成に使うモデル (`<provider>/<id>`) |
+| `OMP_PROFILE` / `PI_PROFILE` / `PI_CONFIG_DIR` / `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` | omp の既定 | omp のプロファイルとセッションストア。Bridge は omp と同じ規則で解決する |
 
 ### プッシュ通知 (FCM)
 
@@ -106,7 +116,11 @@ Cloud Functions (relay) がFCMトークンの管理とプッシュ送信を担�
 ## WebSocket プロトコル
 
 ### Client → Server メッセージ
-- `start` - 新規セッション開始 (projectPath, sessionId?, continue?, permissionMode?)
+- `client_capabilities` - プロトコル範囲、opt-in メッセージ、`supportedProviders` (omp を表示できるクライアントは `omp` を含める)
+- `start` - 新規セッション開始 (projectPath, provider?, sessionId?, continue?, permissionMode?, omp: model?, thinkingLevel?, executionMode?)
+- `resume_session` - 過去セッション再開 (provider `omp` は model / thinkingLevel を検証し、未知の値は落とす)
+- `set_omp_model` - omp セッションのモデル / thinking level 変更 (sessionId, model?, thinkingLevel?)
+- `list_recent_sessions` - 最近のセッション (provider? または providers[])
 - `input` - ユーザーメッセージ送信 (text, sessionId?)
 - `approve` - ツール実行承認 (id, sessionId?)
 - `reject` - ツール実行拒否 (id, message?, sessionId?)
@@ -118,7 +132,7 @@ Cloud Functions (relay) がFCMトークンの管理とプッシュ送信を担�
 - `list_directory` - 許可ルート配下のディレクトリ一覧取得 (path, requestId?)
 
 ### Server → Client メッセージ
-- `system` - システムイベント (init, session_created)
+- `system` - システムイベント (init, session_created, omp_settings: omp のモデル・thinking level のスナップショット)
 - `assistant` - エージェントの応答メッセージ (Claude Code / Codex)
 - `tool_result` - ツール実行結果
 - `result` - 最終結果 (コスト・所要時間含む)
@@ -127,7 +141,7 @@ Cloud Functions (relay) がFCMトークンの管理とプッシュ送信を担�
 - `history` - メッセージ履歴
 - `permission_request` - パーミッション要求
 - `stream_delta` - ストリーミングテキスト差分
-- `session_list` - セッション一覧
+- `session_list` - セッション一覧 (`protocolCapabilities`、omp を宣言したクライアントには `ompModels` / `ompAvailability` / `ompModelsRevision`)
 - `diff_result` - git diff結果 (diff, error?)
 - `directory_listing` - ディレクトリ一覧結果 (path, directories, requestId?)
 

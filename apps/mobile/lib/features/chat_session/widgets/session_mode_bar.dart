@@ -8,6 +8,8 @@ import '../../../l10n/app_localizations.dart';
 import '../../../models/messages.dart';
 import '../../../theme/app_theme.dart';
 import '../../../widgets/codex_effort_slider.dart';
+import '../../omp_session/widgets/omp_model_chip.dart';
+import '../../omp_session/widgets/omp_settings_sheet.dart';
 import '../state/chat_session_state.dart';
 import '../state/chat_session_cubit.dart';
 import 'codex_settings_sheet.dart';
@@ -36,6 +38,7 @@ class SessionModeBar extends StatelessWidget {
     final sandboxMode = chatCubit.state.sandboxMode;
     final permissionMode = chatCubit.state.permissionMode;
     final isCodex = chatCubit.provider == Provider.codex;
+    final isOmp = chatCubit.isOmp;
     final codexModel = isCodex ? _currentCodexModel(chatCubit) : null;
     final codexReasoningEffort = codexModel == null
         ? null
@@ -116,6 +119,29 @@ class SessionModeBar extends StatelessWidget {
                       onBeforeRestart: onBeforeRestart,
                     ),
                   ),
+                ] else if (isOmp) ...[
+                  OmpModelChip(
+                    model: chatCubit.state.ompModel,
+                    thinkingLevel: chatCubit.state.ompThinkingLevel,
+                    models: chatCubit.ompModels,
+                    onTap: chatCubit.supportsRuntimeModelChange
+                        ? () => showOmpSettingsSheet(context, chatCubit)
+                        : null,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: VerticalDivider(
+                      width: 1,
+                      thickness: 1,
+                      color: cs.outlineVariant.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  ExecutionModeChip(
+                    key: const ValueKey('omp_approval_chip'),
+                    currentMode: executionMode,
+                    provider: chatCubit.provider,
+                    onTap: () => showOmpApprovalMenu(context, chatCubit),
+                  ),
                 ] else ...[
                   PermissionModeChip(
                     currentMode: permissionMode,
@@ -126,7 +152,7 @@ class SessionModeBar extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (!isCodex) ...[
+                if (chatCubit.supportsSandboxToggle) ...[
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     child: VerticalDivider(
@@ -492,6 +518,79 @@ void showCodexPermissionsMenu(
                       mode,
                       onBeforeRestart: onBeforeRestart,
                     );
+                  },
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Approval mode menu of an omp session (`always-ask`, `write`, `yolo`).
+///
+/// The Bridge applies a change by restarting omp on the same session file
+/// once omp is idle, so the screen and history stay; no confirmation is
+/// needed. A deferred change is announced by the Bridge tip
+/// `omp_change_deferred`.
+void showOmpApprovalMenu(BuildContext context, ChatSessionCubit chatCubit) {
+  final currentMode = chatCubit.state.executionMode;
+  final l = AppLocalizations.of(context);
+  const purple = Color(0xFFBB86FC);
+
+  showModalBottomSheet<void>(
+    context: context,
+    builder: (sheetContext) {
+      final sheetCs = Theme.of(sheetContext).colorScheme;
+      Color accentFor(ExecutionMode mode) => switch (mode) {
+        ExecutionMode.defaultMode => sheetCs.primary,
+        ExecutionMode.acceptEdits => purple,
+        ExecutionMode.fullAccess => sheetCs.error,
+      };
+      return SafeArea(
+        child: SingleChildScrollView(
+          key: const ValueKey('omp_approval_menu'),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    l.ompApprovalMenuTitle,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: sheetCs.onSurface,
+                    ),
+                  ),
+                ),
+              ),
+              for (final mode in ExecutionMode.values)
+                ListTile(
+                  key: ValueKey('omp_approval_mode_${mode.value}'),
+                  leading: Icon(
+                    ompApprovalModeDetails(mode, l).icon,
+                    color: mode == currentMode
+                        ? accentFor(mode)
+                        : sheetCs.onSurfaceVariant,
+                  ),
+                  title: Text(ompApprovalModeDetails(mode, l).label),
+                  subtitle: Text(
+                    ompApprovalModeDetails(mode, l).description,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: mode == currentMode
+                      ? Icon(Icons.check, color: accentFor(mode), size: 20)
+                      : null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    if (mode == currentMode) return;
+                    HapticFeedback.lightImpact();
+                    chatCubit.setSessionModes(executionMode: mode);
                   },
                 ),
               const SizedBox(height: 8),
@@ -976,25 +1075,38 @@ class ExecutionModeChip extends StatelessWidget {
     // Colors aligned with Claude Code CLI
     const purple = Color(0xFFBB86FC);
 
-    final (IconData icon, String label, Color fg) = provider == Provider.codex
-        ? _codexPermissionsChipStyle(
-            codexPermissionsMode ??
-                codexPermissionsModeFromSettings(
-                  approvalPolicy: codexApprovalPolicy?.value,
-                  approvalsReviewer: codexApprovalsReviewer,
-                  sandboxMode: null,
-                ),
-            cs,
-          )
-        : switch (currentMode) {
-            ExecutionMode.defaultMode => (
-              Icons.tune,
-              'Default',
-              cs.onSurfaceVariant,
+    final (IconData icon, String label, Color fg) = switch (provider) {
+      Provider.codex => _codexPermissionsChipStyle(
+        codexPermissionsMode ??
+            codexPermissionsModeFromSettings(
+              approvalPolicy: codexApprovalPolicy?.value,
+              approvalsReviewer: codexApprovalsReviewer,
+              sandboxMode: null,
             ),
-            ExecutionMode.acceptEdits => (Icons.edit_note, 'Edits', purple),
-            ExecutionMode.fullAccess => (Icons.flash_on, 'Full', cs.error),
-          };
+        cs,
+      ),
+      Provider.omp => (
+        ompApprovalModeDetails(currentMode, AppLocalizations.of(context)).icon,
+        ompApprovalModeDetails(
+          currentMode,
+          AppLocalizations.of(context),
+        ).chipLabel,
+        switch (currentMode) {
+          ExecutionMode.defaultMode => cs.onSurfaceVariant,
+          ExecutionMode.acceptEdits => purple,
+          ExecutionMode.fullAccess => cs.error,
+        },
+      ),
+      Provider.claude || null => switch (currentMode) {
+        ExecutionMode.defaultMode => (
+          Icons.tune,
+          'Default',
+          cs.onSurfaceVariant,
+        ),
+        ExecutionMode.acceptEdits => (Icons.edit_note, 'Edits', purple),
+        ExecutionMode.fullAccess => (Icons.flash_on, 'Full', cs.error),
+      },
+    };
 
     return Material(
       color: Colors.transparent,

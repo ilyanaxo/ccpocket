@@ -22,5 +22,10 @@ sealed class SessionLinkState with _$SessionLinkState {
 
   const factory SessionLinkState.openLegacy() = SessionLinkOpenLegacy;
 
+  /// The link names an omp session, but the connected Bridge does not
+  /// support omp (`provider_omp_v1`).
+  const factory SessionLinkState.bridgeUpdateRequired() =
+      SessionLinkBridgeUpdateRequired;
+
   const factory SessionLinkState.unavailable() = SessionLinkUnavailable;
 }

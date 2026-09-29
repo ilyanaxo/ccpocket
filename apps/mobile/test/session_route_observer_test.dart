@@ -101,6 +101,28 @@ void main() {
     );
   });
 
+  test('tracks omp session route', () {
+    observer.didPush(
+      _route(name: OmpSessionRoute.name, arguments: _SessionArgs('omp-1')),
+      null,
+    );
+
+    expect(
+      NotificationService.instance.isActiveSession(
+        sessionId: 'omp-1',
+        provider: 'omp',
+      ),
+      isTrue,
+    );
+    expect(
+      NotificationService.instance.isActiveSession(
+        sessionId: 'omp-1',
+        provider: 'claude',
+      ),
+      isFalse,
+    );
+  });
+
   test('supports map-style arguments', () {
     observer.didPush(
       _route(

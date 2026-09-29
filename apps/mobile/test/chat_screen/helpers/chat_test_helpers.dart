@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:ccpocket/features/claude_session/claude_session_screen.dart';
 import 'package:ccpocket/features/codex_session/codex_session_screen.dart';
+import 'package:ccpocket/features/omp_session/omp_session_screen.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/providers/bridge_cubits.dart';
 import 'package:ccpocket/services/bridge_service.dart';
@@ -188,6 +189,19 @@ Future<Widget> buildTestCodexSessionScreen({
 }) => _buildTestSessionScreen(
   bridge: bridge,
   child: CodexSessionScreen(sessionId: sessionId, projectPath: projectPath),
+);
+
+Future<Widget> buildTestOmpSessionScreen({
+  required MockBridgeService bridge,
+  String sessionId = testSessionId,
+  String? projectPath,
+}) => _buildTestSessionScreen(
+  bridge: bridge,
+  child: OmpSessionScreen(
+    sessionId: sessionId,
+    projectPath: projectPath,
+    initialPermissionMode: PermissionMode.defaultMode.value,
+  ),
 );
 
 // ---------------------------------------------------------------------------

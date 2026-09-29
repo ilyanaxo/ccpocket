@@ -3067,4 +3067,97 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get finderRevealFailed => '无法在 Finder 中显示文件。请检查文件和 Bridge 连接。';
+
+  @override
+  String get ompMessagePlaceholder => '给 omp 发消息...';
+
+  @override
+  String get autoRenameOmpSessions => '自动 Rename (omp)';
+
+  @override
+  String get autoRenameOmpSessionsSubtitle => '在首次智能体回复后自动为 omp 会话命名';
+
+  @override
+  String get ompDefaultModel => 'omp 默认';
+
+  @override
+  String get ompApprovalMenuTitle => 'omp 审批模式';
+
+  @override
+  String get ompApprovalAlwaysAsk => '每次询问';
+
+  @override
+  String get ompApprovalAlwaysAskDescription => '编辑、命令和 MCP 工具执行前先询问';
+
+  @override
+  String get ompApprovalWrite => '允许写入';
+
+  @override
+  String get ompApprovalWriteDescription =>
+      '编辑和 MCP 工具无需询问即可执行，命令仍需询问。omp 的允许规则同样生效';
+
+  @override
+  String get ompApprovalYolo => '全部执行';
+
+  @override
+  String get ompApprovalYoloDescription => '无需询问，全部执行';
+
+  @override
+  String get ompApprovalChipAlwaysAsk => '询问';
+
+  @override
+  String get ompApprovalChipWrite => '写入';
+
+  @override
+  String get ompApprovalChipYolo => '全部';
+
+  @override
+  String get ompApproveAlwaysScope => '在此会话中允许此工具的所有调用';
+
+  @override
+  String ompRewindFailed(String error) {
+    return '回退失败：$error';
+  }
+
+  @override
+  String get ompAskDeclineAborts => '拒绝将停止 omp 当前的回合';
+
+  @override
+  String get ompChangeDeferredTip => '将在 omp 空闲且后台任务结束后生效';
+
+  @override
+  String get ompAdditionalDirsDescription => 'omp 可读取并在其中工作的额外目录。其本身不授予写入权限';
+
+  @override
+  String get ompNotDetected => '此 Bridge 上未找到 omp';
+
+  @override
+  String get ompNoModels => 'omp 没有可用模型。请先在 omp 中登录';
+
+  @override
+  String get ompNotAvailableOnBridge => '请更新 Bridge 以使用 omp';
+
+  @override
+  String get ompStartNeedsBridgeUpdate => '此 Bridge 无法启动 omp 会话。请更新 Bridge';
+
+  @override
+  String get bridgeUpdateRequiredForOmp => '此 omp 会话需要更新的 Bridge';
+
+  @override
+  String get ompNameCannotBeCleared => '无法清除 omp 会话名称';
+
+  @override
+  String get ompSessionDone => 'omp 会话已完成';
+
+  @override
+  String get ompCwdMissingTip => '记录的目录已不存在，omp 将在项目目录中继续';
+
+  @override
+  String get ompModelIgnoredTip => '请求的模型在 omp 中不可用，会话保留原模型';
+
+  @override
+  String get ompModeMappedTip => 'omp 没有 plan/auto 模式，会话将在操作前询问';
+
+  @override
+  String get enabledAgentsAtLeastOne => '请至少保留一个已启用的智能体';
 }

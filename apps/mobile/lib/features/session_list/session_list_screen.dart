@@ -13,6 +13,8 @@ import '../../utils/platform_helper.dart';
 
 import '../../models/messages.dart';
 import '../../models/machine.dart';
+import '../../models/new_session_params.dart';
+import '../../models/new_session_tab.dart';
 import '../../models/offline_pending_action.dart';
 import '../../models/protocol_version.dart';
 import '../../providers/bridge_cubits.dart';
@@ -29,6 +31,7 @@ import '../../services/server_discovery_service.dart';
 import '../../services/ssh_bridge_tunnel_service.dart';
 import '../../widgets/workspace_pane_chrome.dart';
 import '../../widgets/adaptive_context_menu.dart';
+import '../../widgets/bubbles/error_bubble.dart';
 import '../../widgets/new_session_sheet.dart';
 import '../../widgets/rename_session_dialog.dart';
 import '../settings/state/settings_cubit.dart';
@@ -108,7 +111,31 @@ bool autoRenameForProvider(SettingsState settings, Provider provider) {
   return switch (provider) {
     Provider.codex => settings.autoRenameCodexSessions,
     Provider.claude => settings.autoRenameClaudeSessions,
+    Provider.omp => settings.autoRenameOmpSessions,
   };
+}
+
+/// omp `--approval-mode` value for an [ExecutionMode].
+String ompApprovalModeArg(ExecutionMode mode) => switch (mode) {
+  ExecutionMode.defaultMode => 'always-ask',
+  ExecutionMode.acceptEdits => 'write',
+  ExecutionMode.fullAccess => 'yolo',
+};
+
+/// The omp approval mode stored for [sessionId] in the per-session settings
+/// (`claude_session_settings_<ompId>`): `executionMode`, else derived from
+/// the legacy `permissionMode`, else [ExecutionMode.defaultMode].
+ExecutionMode ompExecutionModeFromSessionSettings(
+  Map<String, dynamic>? settings,
+) {
+  final stored = executionModeFromRaw(settings?['executionMode'] as String?);
+  if (stored != null) return stored;
+  final permissionMode = settings?['permissionMode'] as String?;
+  if (permissionMode == null) return ExecutionMode.defaultMode;
+  return deriveExecutionMode(
+    provider: Provider.omp.value,
+    permissionMode: permissionMode,
+  );
 }
 
 /// Quote a shell argument so it can be pasted safely into POSIX shells.
@@ -116,23 +143,61 @@ String shellQuote(String value) {
   return "'${value.replaceAll("'", r"'\''")}'";
 }
 
+/// `start` for omp: only the fields omp uses (no sandbox, plan mode, Claude
+/// or Codex options). `model`/`thinkingLevel` are omitted for "omp default".
+ClientMessage buildOmpStartMessage(
+  NewSessionParams params, {
+  String? projectName,
+  required bool autoRename,
+  required String requestId,
+}) {
+  return ClientMessage.start(
+    params.projectPath,
+    projectId: params.projectId,
+    projectName: projectName,
+    workspaceKind: params.workspaceKind,
+    permissionMode: params.permissionMode.value,
+    executionMode: params.executionMode.value,
+    useWorktree: params.useWorktree ? true : null,
+    worktreeBranch: params.worktreeBranch,
+    existingWorktreePath: params.existingWorktreePath,
+    provider: Provider.omp.value,
+    model: params.ompModel,
+    thinkingLevel: params.ompModel == null ? null : params.ompThinkingLevel,
+    additionalWritableRoots: params.additionalWritableRoots,
+    autoRename: autoRename,
+    requestId: requestId,
+  );
+}
+
 /// Build a provider-specific CLI resume command for handoff to another machine.
 /// Uses resumeCwd (worktree path) when available so the CLI finds the session
 /// in the correct project slug directory.
-String buildResumeCommand(RecentSession session) {
+///
+/// omp: `omp --resume <id> --approval-mode <mode>`, with the mode from
+/// [ompExecutionMode] (the caller loads the per-session settings; default
+/// `always-ask`), so the CLI does not fall back to the user's configured
+/// mode. omp restores additional directories from the session file.
+String buildResumeCommand(
+  RecentSession session, {
+  ExecutionMode ompExecutionMode = ExecutionMode.defaultMode,
+}) {
   final cwd = (session.resumeCwd?.isNotEmpty ?? false)
       ? session.resumeCwd!
       : session.projectPath;
-  final provider = session.provider == Provider.codex.value
-      ? Provider.codex
-      : Provider.claude;
+  final provider = providerFromValue(session.provider) ?? Provider.claude;
 
   String resumeCommand;
   final additionalRoots = (session.workspace?.rootPaths ?? const <String>[])
       .skip(1)
       .where((root) => root.isNotEmpty && root != cwd)
       .toList();
-  if (provider == Provider.codex) {
+  if (provider == Provider.omp) {
+    resumeCommand = [
+      'omp --resume ${shellQuote(session.sessionId)}',
+      '--approval-mode ${ompApprovalModeArg(ompExecutionMode)}',
+    ].join(' ');
+  } else if (provider == Provider.codex) {
     final addDirs = additionalRoots
         .map((root) => '--add-dir ${shellQuote(root)}')
         .join(' ');
@@ -238,6 +303,7 @@ class _SessionListScreenState extends State<SessionListScreen>
   String? _pendingResumeRequestId;
   String? _failedResumeSessionId;
   String? _failedResumeRequestId;
+  String? _failedResumeProvider;
   NewSessionParams? _pendingClaudeDefaultsCorrection;
 
   // Flag: already navigated to chat for pending session creation
@@ -354,6 +420,7 @@ class _SessionListScreenState extends State<SessionListScreen>
           _matchesPendingResumeFailure(msg)) {
         _failedResumeSessionId = msg.sourceSessionId;
         _failedResumeRequestId = msg.resumeRequestId;
+        _failedResumeProvider = msg.provider;
         _clearPendingResumeState();
         return;
       }
@@ -361,11 +428,29 @@ class _SessionListScreenState extends State<SessionListScreen>
       if (msg is ErrorMessage && _matchesFailedResumeError(msg)) {
         final showWriterConflict =
             msg.errorCode == 'codex_thread_writer_conflict';
+        // A resume from the list opens no chat whose error bubble would
+        // explain an omp failure (busy, not found, already open, ...).
+        final showOmpFailure = _failedResumeProvider == Provider.omp.value;
         _clearFailedResumeCorrelation();
-        if (showWriterConflict && mounted) {
-          final l = AppLocalizations.of(context);
+        if (!mounted) return;
+        final l = AppLocalizations.of(context);
+        if (showWriterConflict) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(l.codexWriterConflictGuidance)),
+          );
+        } else if (showOmpFailure) {
+          final hint = errorHintForCode(msg.errorCode, l, msg);
+          final lines = [
+            ?errorTitleForCode(msg.errorCode, l),
+            if (msg.message.isNotEmpty) msg.message,
+            // Skip a hint the Bridge message already states.
+            if (hint != null && !msg.message.startsWith(hint)) hint,
+          ];
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              key: const ValueKey('omp_resume_failed_snackbar'),
+              content: Text(lines.join('\n')),
+            ),
           );
         }
         return;
@@ -843,7 +928,10 @@ class _SessionListScreenState extends State<SessionListScreen>
       bridge: bridge,
       initialParams: initialParams,
       lockProvider: lockProvider,
-      visibleTabs: settings.newSessionTabs,
+      visibleTabs: visibleNewSessionTabs(
+        settings.newSessionTabs,
+        bridge.ompSupport,
+      ),
       showExtendedCodexEfforts: settings.showExtendedCodexEfforts,
       showHiddenDirectories: settings.showHiddenDirectories,
     );
@@ -851,6 +939,17 @@ class _SessionListScreenState extends State<SessionListScreen>
 
   void _startNewSession(NewSessionParams result) {
     final bridge = context.read<BridgeService>();
+    if (result.provider == Provider.omp && _rejectsOmpStart(bridge)) {
+      // BridgeService.send() would answer the start with a local error before
+      // the pending page subscribes, leaving it on "Creating session..."
+      // (§9.5). Tell the user here and open nothing.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppLocalizations.of(context).ompStartNeedsBridgeUpdate),
+        ),
+      );
+      return;
+    }
     final settings = context.read<SettingsCubit>().state;
     final workspace = _workspaceForNewSession(result);
     final isOffline = !bridge.isConnected;
@@ -869,85 +968,99 @@ class _SessionListScreenState extends State<SessionListScreen>
     _pendingResumeSessionId = null;
     _pendingResumeRequestId = null;
     bridge.send(
-      ClientMessage.start(
-        result.projectPath,
-        projectId: result.projectId,
-        projectName: workspace?.projectName,
-        workspaceKind: result.workspaceKind,
-        permissionMode: result.provider == Provider.codex && useCodexProfile
-            ? null
-            : result.permissionMode.value,
-        executionMode: result.provider == Provider.codex && useCodexProfile
-            ? null
-            : result.executionMode.value,
-        approvalPolicy: result.provider == Provider.codex
-            ? (useCodexCustomPermissions
+      result.provider == Provider.omp
+          ? buildOmpStartMessage(
+              result,
+              projectName: workspace?.projectName,
+              autoRename: autoRenameForProvider(settings, result.provider),
+              requestId: pendingId,
+            )
+          : ClientMessage.start(
+              result.projectPath,
+              projectId: result.projectId,
+              projectName: workspace?.projectName,
+              workspaceKind: result.workspaceKind,
+              permissionMode:
+                  result.provider == Provider.codex && useCodexProfile
                   ? null
-                  : result.codexApprovalPolicy.value)
-            : null,
-        approvalsReviewer: result.provider == Provider.codex
-            ? (useCodexCustomPermissions ? null : result.codexApprovalsReviewer)
-            : null,
-        codexPermissionsMode: result.provider == Provider.codex
-            ? (useCodexCustomPermissions
-                  ? CodexPermissionsMode.custom.value
-                  : result.codexPermissionsMode.value)
-            : null,
-        planMode: result.provider == Provider.codex && useCodexProfile
-            ? null
-            : result.planMode,
-        effort: result.provider == Provider.claude
-            ? result.claudeEffort?.value
-            : null,
-        maxTurns: result.provider == Provider.claude
-            ? result.claudeMaxTurns
-            : null,
-        maxBudgetUsd: result.provider == Provider.claude
-            ? result.claudeMaxBudgetUsd
-            : null,
-        fallbackModel: result.provider == Provider.claude
-            ? result.claudeFallbackModel
-            : null,
-        // --fork-session applies to resume/continue only.
-        forkSession: null,
-        persistSession: result.provider == Provider.claude
-            ? result.claudePersistSession
-            : null,
-        useWorktree: result.useWorktree ? true : null,
-        worktreeBranch: result.worktreeBranch,
-        existingWorktreePath: result.existingWorktreePath,
-        provider: result.provider.value,
-        profile: result.provider == Provider.codex ? result.codexProfile : null,
-        model: result.provider == Provider.claude
-            ? result.claudeModel
-            : (useCodexProfile ? null : result.model),
-        sandboxMode:
-            result.provider == Provider.codex && useCodexCustomPermissions
-            ? null
-            : result.sandboxMode?.value,
-        modelReasoningEffort:
-            result.provider == Provider.codex && useCodexProfile
-            ? null
-            : result.modelReasoningEffort?.value,
-        serviceTier: result.provider == Provider.codex
-            ? result.codexSpeed.value
-            : null,
-        networkAccessEnabled:
-            result.provider == Provider.codex && useCodexCustomPermissions
-            ? null
-            : result.networkAccessEnabled,
-        webSearchMode: result.provider == Provider.codex && useCodexProfile
-            ? null
-            : result.webSearchMode?.value,
-        additionalWritableRoots:
-            result.provider == Provider.claude ||
-                result.projectId != null ||
-                !useCodexCustomPermissions
-            ? result.additionalWritableRoots
-            : null,
-        autoRename: autoRenameForProvider(settings, result.provider),
-        requestId: pendingId,
-      ),
+                  : result.permissionMode.value,
+              executionMode:
+                  result.provider == Provider.codex && useCodexProfile
+                  ? null
+                  : result.executionMode.value,
+              approvalPolicy: result.provider == Provider.codex
+                  ? (useCodexCustomPermissions
+                        ? null
+                        : result.codexApprovalPolicy.value)
+                  : null,
+              approvalsReviewer: result.provider == Provider.codex
+                  ? (useCodexCustomPermissions
+                        ? null
+                        : result.codexApprovalsReviewer)
+                  : null,
+              codexPermissionsMode: result.provider == Provider.codex
+                  ? (useCodexCustomPermissions
+                        ? CodexPermissionsMode.custom.value
+                        : result.codexPermissionsMode.value)
+                  : null,
+              planMode: result.provider == Provider.codex && useCodexProfile
+                  ? null
+                  : result.planMode,
+              effort: result.provider == Provider.claude
+                  ? result.claudeEffort?.value
+                  : null,
+              maxTurns: result.provider == Provider.claude
+                  ? result.claudeMaxTurns
+                  : null,
+              maxBudgetUsd: result.provider == Provider.claude
+                  ? result.claudeMaxBudgetUsd
+                  : null,
+              fallbackModel: result.provider == Provider.claude
+                  ? result.claudeFallbackModel
+                  : null,
+              // --fork-session applies to resume/continue only.
+              forkSession: null,
+              persistSession: result.provider == Provider.claude
+                  ? result.claudePersistSession
+                  : null,
+              useWorktree: result.useWorktree ? true : null,
+              worktreeBranch: result.worktreeBranch,
+              existingWorktreePath: result.existingWorktreePath,
+              provider: result.provider.value,
+              profile: result.provider == Provider.codex
+                  ? result.codexProfile
+                  : null,
+              model: result.provider == Provider.claude
+                  ? result.claudeModel
+                  : (useCodexProfile ? null : result.model),
+              sandboxMode:
+                  result.provider == Provider.codex && useCodexCustomPermissions
+                  ? null
+                  : result.sandboxMode?.value,
+              modelReasoningEffort:
+                  result.provider == Provider.codex && useCodexProfile
+                  ? null
+                  : result.modelReasoningEffort?.value,
+              serviceTier: result.provider == Provider.codex
+                  ? result.codexSpeed.value
+                  : null,
+              networkAccessEnabled:
+                  result.provider == Provider.codex && useCodexCustomPermissions
+                  ? null
+                  : result.networkAccessEnabled,
+              webSearchMode:
+                  result.provider == Provider.codex && useCodexProfile
+                  ? null
+                  : result.webSearchMode?.value,
+              additionalWritableRoots:
+                  result.provider == Provider.claude ||
+                      result.projectId != null ||
+                      !useCodexCustomPermissions
+                  ? result.additionalWritableRoots
+                  : null,
+              autoRename: autoRenameForProvider(settings, result.provider),
+              requestId: pendingId,
+            ),
     );
     if (isOffline) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1136,9 +1249,8 @@ class _SessionListScreenState extends State<SessionListScreen>
   Future<NewSessionParams> _newSessionFromRecentSession(
     RecentSession session,
   ) async {
-    final provider = session.provider == Provider.codex.value
-        ? Provider.codex
-        : Provider.claude;
+    final provider = providerFromValue(session.provider) ?? Provider.claude;
+    if (provider == Provider.omp) return _ompSessionFromRecentSession(session);
     final codexModels = context.read<BridgeService>().codexModels;
     final existingWorktreePath = session.resumeCwd;
     final hasExistingWorktree =
@@ -1220,6 +1332,33 @@ class _SessionListScreenState extends State<SessionListScreen>
     );
   }
 
+  /// New omp session parameters from a recent omp session: its approval
+  /// mode (per-session settings), model and thinking level (recorded in the
+  /// session file), worktree and extra directories.
+  Future<NewSessionParams> _ompSessionFromRecentSession(
+    RecentSession session,
+  ) async {
+    final sessionSettings = await loadClaudeSessionSettings(session.sessionId);
+    final existingWorktreePath = session.resumeCwd;
+    final hasExistingWorktree =
+        existingWorktreePath != null && existingWorktreePath.isNotEmpty;
+    return NewSessionParams(
+      projectPath: session.projectPath,
+      projectId: session.workspace?.projectId,
+      workspaceKind: session.workspaceKind == 'unassigned'
+          ? null
+          : session.workspaceKind,
+      provider: Provider.omp,
+      executionMode: ompExecutionModeFromSessionSettings(sessionSettings),
+      useWorktree: hasExistingWorktree,
+      worktreeBranch: session.gitBranch.isNotEmpty ? session.gitBranch : null,
+      existingWorktreePath: hasExistingWorktree ? existingWorktreePath : null,
+      additionalWritableRoots: session.workspaceRootPaths.skip(1).toList(),
+      ompModel: session.ompModel,
+      ompThinkingLevel: session.ompThinkingLevel,
+    );
+  }
+
   void _showRunningSessionActions(
     SessionInfo session, [
     Offset? position,
@@ -1248,6 +1387,7 @@ class _SessionListScreenState extends State<SessionListScreen>
       final newName = await showRenameSessionDialog(
         context,
         currentName: session.name,
+        allowClear: providerFromValue(session.provider) != Provider.omp,
       );
       if (newName == null || !mounted) return;
       context.read<BridgeService>().renameSession(
@@ -1307,6 +1447,7 @@ class _SessionListScreenState extends State<SessionListScreen>
       final newName = await showRenameSessionDialog(
         context,
         currentName: session.name,
+        allowClear: providerFromValue(session.provider) != Provider.omp,
       );
       if (newName == null || !mounted) return;
       final effectiveName = newName.isEmpty ? null : newName;
@@ -1337,7 +1478,17 @@ class _SessionListScreenState extends State<SessionListScreen>
     }
 
     if (action == 'copy_resume_command') {
-      await Clipboard.setData(ClipboardData(text: buildResumeCommand(session)));
+      final ompExecutionMode = session.provider == Provider.omp.value
+          ? ompExecutionModeFromSessionSettings(
+              await loadClaudeSessionSettings(session.sessionId),
+            )
+          : ExecutionMode.defaultMode;
+      if (!mounted) return;
+      await Clipboard.setData(
+        ClipboardData(
+          text: buildResumeCommand(session, ompExecutionMode: ompExecutionMode),
+        ),
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(l.resumeCommandCopied)));
@@ -1439,7 +1590,17 @@ class _SessionListScreenState extends State<SessionListScreen>
         initialApprovalsReviewer: approvalsReviewer,
         pendingSessionCreated: pendingNotifier,
       ),
-      _ => ClaudeSessionRoute(
+      Provider.omp => OmpSessionRoute(
+        sessionId: sessionId,
+        projectPath: projectPath,
+        workspace: workspace,
+        gitBranch: gitBranch,
+        worktreePath: worktreePath,
+        isPending: isPending,
+        initialPermissionMode: permissionMode,
+        pendingSessionCreated: pendingNotifier,
+      ),
+      Provider.claude || null => ClaudeSessionRoute(
         sessionId: sessionId,
         projectPath: projectPath,
         workspace: workspace,
@@ -1516,6 +1677,17 @@ class _SessionListScreenState extends State<SessionListScreen>
       gitBranch: session.gitBranch,
       workspace: workspace,
     );
+
+    if (edited.provider == Provider.omp) {
+      _resumeOmpSessionWithParams(
+        session,
+        edited,
+        resumeProjectPath: resumeProjectPath,
+        workspace: workspace,
+        resumeRequestId: resumeRequestId,
+      );
+      return;
+    }
 
     final isCodex = edited.provider == Provider.codex;
     final useCodexProfile =
@@ -1606,6 +1778,48 @@ class _SessionListScreenState extends State<SessionListScreen>
     }
   }
 
+  /// Edited omp resume: approval mode plus the chosen model and thinking
+  /// level (none for "omp default", so omp keeps the recorded model). The
+  /// per-session settings keep only the modes; omp restores model and
+  /// thinking level from its session file.
+  void _resumeOmpSessionWithParams(
+    RecentSession session,
+    NewSessionParams edited, {
+    required String resumeProjectPath,
+    required SessionWorkspaceInfo? workspace,
+    required String resumeRequestId,
+  }) {
+    final bridge = context.read<BridgeService>();
+    bridge.resumeSession(
+      session.sessionId,
+      resumeProjectPath,
+      executionMode: edited.executionMode.value,
+      provider: Provider.omp.value,
+      model: edited.ompModel,
+      thinkingLevel: edited.ompModel == null ? null : edited.ompThinkingLevel,
+      additionalWritableRoots: edited.additionalWritableRoots.isEmpty
+          ? null
+          : edited.additionalWritableRoots,
+      projectId: edited.projectId,
+      projectName: workspace?.projectName,
+      workspaceKind: edited.workspaceKind,
+      resumeRequestId: resumeRequestId,
+    );
+    if (!bridge.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppLocalizations.of(context).resumeQueuedForReconnect),
+        ),
+      );
+    }
+    unawaited(
+      saveClaudeSessionSettings(session.sessionId, {
+        'permissionMode': edited.permissionMode.value,
+        'executionMode': edited.executionMode.value,
+      }),
+    );
+  }
+
   bool _isResumePending(BridgeService bridge, RecentSession session) {
     final provider = session.provider ?? Provider.claude.value;
     return bridge.offlinePendingActions.any((action) {
@@ -1664,6 +1878,17 @@ class _SessionListScreenState extends State<SessionListScreen>
   void _clearFailedResumeCorrelation() {
     _failedResumeSessionId = null;
     _failedResumeRequestId = null;
+    _failedResumeProvider = null;
+  }
+
+  /// Whether the connected Bridge has answered this connection's
+  /// `session_list` without omp support, i.e. `send()` would reject an omp
+  /// start at once. Before that answer an omp start is queued offline and
+  /// resolved by the pending card instead.
+  bool _rejectsOmpStart(BridgeService bridge) {
+    return bridge.isConnected &&
+        (bridge.protocolCompatibility?.isCompatible ?? false) &&
+        bridge.ompSupport != OmpSupport.supported;
   }
 
   bool _hasPendingStart(BridgeService bridge, NewSessionParams params) {
@@ -1950,19 +2175,15 @@ class _SessionListScreenState extends State<SessionListScreen>
       final settingsState = context.watch<SettingsCubit>().state;
       final allowedProviderFilters = providerFiltersForEnabledTabs(
         settingsState.newSessionTabs,
+        ompSupport: bridge.ompSupport,
       );
+      // SessionListCubit follows the enabled agents and the Bridge's omp
+      // support itself; this only keeps the chip consistent with the filters
+      // offered in this frame.
       final effectiveProviderFilter = coerceProviderFilter(
         slState.providerFilter,
         allowedProviderFilters,
       );
-      if (effectiveProviderFilter != slState.providerFilter) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          context.read<SessionListCubit>().applyEnabledAgents(
-            settingsState.newSessionTabs,
-          );
-        });
-      }
       final content = StreamBuilder<List<OfflinePendingAction>>(
         stream: bridge.offlinePendingActionsStream,
         initialData: bridge.offlinePendingActions,
@@ -2013,7 +2234,7 @@ class _SessionListScreenState extends State<SessionListScreen>
                     workspace: workspace,
                     gitBranch: gitBranch,
                     worktreePath: worktreePath,
-                    provider: provider == 'codex' ? Provider.codex : null,
+                    provider: providerFromValue(provider),
                     permissionMode: permissionMode,
                     sandboxMode: sandboxMode,
                     approvalPolicy: approvalPolicy,

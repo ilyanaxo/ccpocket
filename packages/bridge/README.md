@@ -1,6 +1,6 @@
 # @ccpocket/bridge
 
-Bridge server that connects Claude sessions powered by the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) and [Codex CLI](https://github.com/openai/codex) to mobile devices via WebSocket.
+Bridge server that connects Claude sessions powered by the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk), [Codex CLI](https://github.com/openai/codex) and omp (oh-my-pi) sessions to mobile devices via WebSocket.
 
 This is the server component of [ccpocket](https://github.com/K9i-0/ccpocket) — a mobile client for Claude and Codex.
 
@@ -49,6 +49,10 @@ ccpocket-bridge --version
 | `BRIDGE_CODEX_SHARED_APP_SERVER_URL` | `ws://127.0.0.1:8767` in `managed` mode | Experimental shared Codex app-server URL for Codex CLI co-presence |
 | `BRIDGE_CODEX_ASSIST_MODEL` | `gpt-5.6-luna` | Codex model used for auto-rename and commit-message assist calls |
 | `BRIDGE_CODEX_ASSIST_REASONING_EFFORT` | `none` | Reasoning effort used for Codex assist calls |
+| `BRIDGE_OMP_BIN` | `omp` on `PATH` | Path to the omp (oh-my-pi) CLI used for omp sessions, the model catalogue and assist calls |
+| `BRIDGE_OMP_ASSIST_MODEL` | the session's model | omp model selector (`<provider>/<id>`) used for omp auto-rename and commit-message assist calls |
+| `OMP_PROFILE` / `PI_PROFILE` | default profile | omp profile; the Bridge lists the session store of the same profile omp uses |
+| `PI_CONFIG_DIR` / `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` | `~/.omp`, `~/.omp/agent`, per-cwd buckets | omp's own store overrides; the Bridge resolves them the way omp does |
 | `BRIDGE_DEMO_MODE` | (none) | Demo mode: hide Tailscale IPs and API key from QR code / logs |
 | `BRIDGE_RECORDING` | (none) | Enable session recording for debugging (enabled when set) |
 | `BRIDGE_DISABLE_MDNS` | (none) | Disable mDNS auto-discovery advertisement (macOS disables it automatically) |
@@ -197,7 +201,7 @@ configured.
 
 ### Amazon Bedrock with the background service
 
-`ccpocket-bridge setup` persists only the `BRIDGE_*` settings listed below, so
+`ccpocket-bridge setup` persists only the settings listed below, so
 make the Bedrock configuration reachable from the service environment:
 
 - macOS launchd: the generated plist starts the Bridge through a login shell
@@ -234,6 +238,10 @@ that affect startup:
 - `BRIDGE_CODEX_SHARED_APP_SERVER_URL` / `--codex-shared-app-server-url`
 - `BRIDGE_CODEX_ASSIST_MODEL`
 - `BRIDGE_CODEX_ASSIST_REASONING_EFFORT`
+- `BRIDGE_OMP_BIN`, `BRIDGE_OMP_ASSIST_MODEL`, `OMP_PROFILE`, `PI_PROFILE`,
+  `PI_CONFIG_DIR`, `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`
+  when they are set, so the service uses the same omp binary and session
+  store as the shell that ran setup
 
 Example:
 
