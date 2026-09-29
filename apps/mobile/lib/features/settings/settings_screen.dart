@@ -1397,8 +1397,9 @@ String _imagePasteShortcutDescription(
 /// and, with more than one agent offered, the new-session tab order.
 ///
 /// omp can be enabled only on a Bridge that supports it; the stored choice
-/// is kept while the Bridge does not confirm omp. The last enabled agent
-/// cannot be disabled.
+/// is kept while the Bridge does not confirm omp. An agent cannot be
+/// disabled when no other enabled agent would be offered (omp counts only
+/// while the Bridge supports it, as in [effectiveProviders]).
 class _EnabledAgentsTiles extends StatelessWidget {
   final List<NewSessionTab> enabledTabs;
   final OmpSupport ompSupport;
@@ -1425,7 +1426,12 @@ class _EnabledAgentsTiles extends StatelessWidget {
           };
 
     void toggle(Provider provider, bool value) {
-      if (!value && enabled.length == 1 && enabled.contains(provider)) {
+      final othersOffered = enabled.any(
+        (other) =>
+            other != provider &&
+            (other != Provider.omp || ompSupport == OmpSupport.supported),
+      );
+      if (!value && !othersOffered) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
           ..showSnackBar(SnackBar(content: Text(l.enabledAgentsAtLeastOne)));
@@ -1433,15 +1439,6 @@ class _EnabledAgentsTiles extends StatelessWidget {
       }
       context.read<SettingsCubit>().setAgentEnabled(provider, value);
     }
-
-    final visibleTabs = [
-      for (final tab in enabledTabs)
-        if (offered.contains(tab.toProvider())) tab,
-      // Fallback of effectiveProviders (only omp enabled, Bridge without omp).
-      for (final tab in defaultNewSessionTabs)
-        if (offered.contains(tab.toProvider()) && !enabledTabs.contains(tab))
-          tab,
-    ];
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -1511,7 +1508,10 @@ class _EnabledAgentsTiles extends StatelessWidget {
             leading: Icon(Icons.tab, color: cs.primary),
             title: Text(l.settingsNewSessionTabs),
             subtitle: Text(
-              visibleTabs.map((t) => t.localizedLabel(l)).join(', '),
+              visibleNewSessionTabs(
+                enabledTabs,
+                ompSupport,
+              ).map((t) => t.localizedLabel(l)).join(', '),
             ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showNewSessionTabsBottomSheet(

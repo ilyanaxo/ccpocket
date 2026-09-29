@@ -1172,6 +1172,65 @@ void main() {
       bridge.dispose();
     });
 
+    testWidgets(
+      'an agent stays enabled when only an unoffered omp would remain',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          'settings_new_session_tabs': tabsToJson(defaultNewSessionTabs),
+          _ompMigratedKey: true,
+        });
+        final prefs = await SharedPreferences.getInstance();
+        final settingsCubit = _SeededSettingsCubit(
+          prefs,
+          activeMachineId: null,
+        );
+        final manager = MachineManagerService(prefs, _FakeSecureStorage());
+        final machineManagerCubit = _createMachineManagerCubit(manager);
+        final bridge = _FakeBridgeService(
+          connected: true,
+          fakeOmpSupport: OmpSupport.unsupported,
+        );
+
+        await tester.pumpWidget(
+          await _buildScreen(
+            bridge: bridge,
+            settingsCubit: settingsCubit,
+            machineManagerCubit: machineManagerCubit,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+        final codexChip = find.byKey(const ValueKey('agent_filter_chip_codex'));
+        final claudeChip = find.byKey(
+          const ValueKey('agent_filter_chip_claude'),
+        );
+        await tester.scrollUntilVisible(codexChip, 180);
+        await tester.pumpAndSettle();
+        await tester.tap(codexChip);
+        await tester.pumpAndSettle();
+        expect(settingsCubit.state.newSessionTabs, [
+          NewSessionTab.claude,
+          NewSessionTab.omp,
+        ]);
+        expect(find.text(l.enabledAgentsAtLeastOne), findsNothing);
+
+        // omp is not offered on this Bridge, so Claude is the last agent.
+        await tester.tap(claudeChip);
+        await tester.pumpAndSettle();
+        expect(settingsCubit.state.newSessionTabs, [
+          NewSessionTab.claude,
+          NewSessionTab.omp,
+        ]);
+        expect(_agentChip(tester, Provider.claude).selected, isTrue);
+        expect(find.text(l.enabledAgentsAtLeastOne), findsOneWidget);
+
+        await settingsCubit.close();
+        await machineManagerCubit.close();
+        bridge.dispose();
+      },
+    );
+
     testWidgets('omp chip is disabled on a Bridge without omp support', (
       tester,
     ) async {

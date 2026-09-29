@@ -1311,6 +1311,12 @@
   "ompApprovalChipWrite": "書込",
   "ompApprovalChipYolo": "全て",
   "ompApproveAlwaysScope": "このセッションでこのツールのすべての呼び出しを許可します",
+  "ompRewindFailed": "巻き戻しに失敗しました: {error}",
+  "@ompRewindFailed": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
   "ompAskDeclineAborts": "断ると omp の現在のターンが停止します",
   "ompChangeDeferredTip": "omp が待機状態になり、バックグラウンド処理が終わったら適用されます",
   "ompAdditionalDirsDescription": "omp が参照・作業できる追加ディレクトリ。これ自体は書き込み権限を与えません",

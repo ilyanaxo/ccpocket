@@ -1281,6 +1281,12 @@
   "ompApprovalChipWrite": "Writes",
   "ompApprovalChipYolo": "All",
   "ompApproveAlwaysScope": "Allows every call of this tool in this session",
+  "ompRewindFailed": "Rewind failed: {error}",
+  "@ompRewindFailed": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
   "ompAskDeclineAborts": "Declining stops omp's current turn",
   "ompChangeDeferredTip": "The change applies when omp is idle and its background jobs have finished",
   "ompAdditionalDirsDescription": "Extra directories omp may read and work in. They do not grant write access by themselves.",

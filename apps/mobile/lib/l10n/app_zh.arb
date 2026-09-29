@@ -1386,6 +1386,12 @@
   "ompApprovalChipWrite": "写入",
   "ompApprovalChipYolo": "全部",
   "ompApproveAlwaysScope": "在此会话中允许此工具的所有调用",
+  "ompRewindFailed": "回退失败：{error}",
+  "@ompRewindFailed": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
   "ompAskDeclineAborts": "拒绝将停止 omp 当前的回合",
   "ompChangeDeferredTip": "将在 omp 空闲且后台任务结束后生效",
   "ompAdditionalDirsDescription": "omp 可读取并在其中工作的额外目录。其本身不授予写入权限",

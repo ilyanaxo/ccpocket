@@ -256,6 +256,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   StreamSubscription<List<String>>? _projectHistorySub;
   StreamSubscription<ProjectsMessage>? _projectsSub;
   StreamSubscription<bool>? _codexAutoReviewPolicySub;
+  StreamSubscription<List<SessionInfo>>? _ompCatalogueSub;
   bool _codexAutoReviewDisabled = false;
   ProjectsMessage _workspaceProjectsState = const ProjectsMessage(projects: []);
   String? _selectedProjectId;
@@ -307,7 +308,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   var _ompExecutionMode = ExecutionMode.defaultMode;
   String? _selectedOmpModel; // null = omp's configured default
   String? _ompThinkingLevel; // null = omp's default for the model
-  late final List<OmpModelInfo> _ompModelList;
+  List<OmpModelInfo> _ompModelList = const [];
   OmpAvailability? _ompAvailability;
 
   // Project list expansion
@@ -336,9 +337,39 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   }
 
   /// Thinking levels of the selected omp model; empty for "omp default" or
-  /// a model the catalogue does not list.
-  List<String> get _ompThinkingLevels =>
-      ompThinkingLevelsForModel(_ompModelList, _selectedOmpModel);
+  /// a model the catalogue does not list. Until a catalogue arrives a kept
+  /// model offers every level: the Bridge drops one the model lacks.
+  List<String> get _ompThinkingLevels {
+    if (_selectedOmpModel != null && _ompModelList.isEmpty) {
+      return [for (final level in OmpThinkingLevel.values) level.value];
+    }
+    return ompThinkingLevelsForModel(_ompModelList, _selectedOmpModel);
+  }
+
+  /// The first `session_list` of a connection carries no omp catalogue, so
+  /// the sheet follows the catalogue while it is open. A model the new
+  /// catalogue does not list falls back to "omp default".
+  void _onOmpCatalogueChanged() {
+    final bridge = widget.bridge;
+    if (bridge == null || !mounted) return;
+    final models = bridge.ompModels;
+    final availability = bridge.ompAvailability;
+    if (identical(models, _ompModelList) && availability == _ompAvailability) {
+      return;
+    }
+    setState(() {
+      _ompModelList = models;
+      _ompAvailability = availability;
+      final model = _selectedOmpModel;
+      _selectOmpModel(
+        model == null ||
+                models.isEmpty ||
+                models.any((info) => info.selector == model)
+            ? model
+            : null,
+      );
+    });
+  }
 
   void _selectOmpModel(String? selector) {
     _selectedOmpModel = selector;
@@ -540,6 +571,9 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
       setState(() => _applyWorkspaceProjectsState(state));
     });
     widget.bridge?.requestProjects();
+    _ompCatalogueSub = widget.bridge?.sessionList.listen(
+      (_) => _onOmpCatalogueChanged(),
+    );
     _codexAutoReviewPolicySub = widget.bridge?.codexAutoReviewPolicyStream
         .listen((disabled) {
           if (!mounted) return;
@@ -576,6 +610,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
     _projectHistorySub?.cancel();
     _projectsSub?.cancel();
     _codexAutoReviewPolicySub?.cancel();
+    _ompCatalogueSub?.cancel();
     _pageController.dispose();
     _pathController.dispose();
     _branchController.dispose();
@@ -729,10 +764,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
         _ompModelList.any((info) => info.selector == model);
     _selectedOmpModel = known ? model : null;
     final level = p.ompThinkingLevel;
-    _ompThinkingLevel =
-        _selectedOmpModel != null &&
-            level != null &&
-            (_ompModelList.isEmpty || _ompThinkingLevels.contains(level))
+    _ompThinkingLevel = level != null && _ompThinkingLevels.contains(level)
         ? level
         : null;
   }
@@ -2907,7 +2939,9 @@ class _OptionsSection extends StatelessWidget {
               subtitle: switch (ompAvailability) {
                 OmpAvailability.notInstalled => l.ompNotDetected,
                 OmpAvailability.noModels => l.ompNoModels,
-                OmpAvailability.available || null => selectedOmpModel ?? '',
+                OmpAvailability.available => selectedOmpModel ?? '',
+                // The catalogue has not arrived yet (§7.1).
+                null => l.loading,
               },
               onTap: () => showOmpModelPicker(
                 context,

@@ -5945,6 +5945,12 @@ abstract class AppLocalizations {
   /// **'このセッションでこのツールのすべての呼び出しを許可します'**
   String get ompApproveAlwaysScope;
 
+  /// No description provided for @ompRewindFailed.
+  ///
+  /// In ja, this message translates to:
+  /// **'巻き戻しに失敗しました: {error}'**
+  String ompRewindFailed(String error);
+
   /// No description provided for @ompAskDeclineAborts.
   ///
   /// In ja, this message translates to:

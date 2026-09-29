@@ -751,6 +751,28 @@ void main() {
       expect(ompCubit.state.ompThinkingLevel, 'max');
     });
 
+    testWidgets('the selected rows of the settings sheet change nothing', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(ompCubit));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byKey(const ValueKey('omp_model_chip')));
+      await tester.pumpAndSettle();
+      final sentBefore = bridge.sentMessages.length;
+      await tester.tap(find.byKey(const ValueKey('omp_thinking_level_high')));
+      final opusOption = find.byKey(
+        const ValueKey('omp_model_option_anthropic/claude-opus-4-7'),
+      );
+      await tester.ensureVisible(opusOption);
+      await tester.pumpAndSettle();
+      await tester.tap(opusOption);
+      await tester.pumpAndSettle();
+
+      expect(bridge.sentMessages, hasLength(sentBefore));
+      expect(find.byKey(const ValueKey('omp_settings_sheet')), findsOneWidget);
+    });
+
     testWidgets('choosing a model shows that model\'s thinking levels', (
       tester,
     ) async {

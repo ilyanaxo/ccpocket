@@ -720,7 +720,19 @@ class BridgeService implements BridgeServiceBase {
               ):
                 final compatibility = announcedCompatibility!;
                 _protocolCompatibility = compatibility;
-                _sessions = _applyLocalDeliveryPendingInputs(sessions);
+                // An omp Bridge sends a connection's first session_list before
+                // it reads client_capabilities, so that list leaves omp
+                // sessions out; the full list follows once the app declared omp
+                // (docs/omp-integration.md §9.5). Until then the omp sessions
+                // cached from the previous connection stay listed.
+                final withholdsOmpSessions =
+                    _connectionOmpSupport == null &&
+                    protocolCapabilities.contains(ompProviderCapability);
+                _sessions = _applyLocalDeliveryPendingInputs(
+                  withholdsOmpSessions
+                      ? _withCachedOmpSessions(sessions)
+                      : sessions,
+                );
                 _clearPendingStartActionsForSessions(_sessions);
                 _publishSessionList();
                 _allowedDirs = allowedDirs;
@@ -4104,6 +4116,18 @@ class BridgeService implements BridgeServiceBase {
       _runtimeStore.applySessionContext(session);
     }
     _sessionListController.add(_sessions);
+  }
+
+  /// [sessions] plus the cached omp sessions it does not list.
+  List<SessionInfo> _withCachedOmpSessions(List<SessionInfo> sessions) {
+    final listedIds = {for (final session in sessions) session.id};
+    final cachedOmp = _sessions.where(
+      (session) =>
+          session.provider == Provider.omp.value &&
+          !listedIds.contains(session.id),
+    );
+    if (cachedOmp.isEmpty) return sessions;
+    return [...sessions, ...cachedOmp];
   }
 
   /// Update the cached [_sessions] list when a [StatusMessage] arrives,

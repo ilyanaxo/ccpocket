@@ -2,10 +2,12 @@ import 'dart:convert';
 
 import 'package:expandable_page_view/expandable_page_view.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../features/omp_session/widgets/omp_settings_sheet.dart';
 import '../l10n/app_localizations.dart';
 import '../models/messages.dart';
+import '../services/bridge_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/provider_style.dart';
 import '../utils/command_parser.dart';
@@ -449,6 +451,9 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                     Text(
                       buildOmpSettingsSummary(
                         AppLocalizations.of(context),
+                        models:
+                            context.read<BridgeService?>()?.ompModels ??
+                            const [],
                         model: session.ompModel,
                         thinkingLevel: session.ompThinkingLevel,
                         executionMode: session.resolvedExecutionMode,
@@ -2825,6 +2830,9 @@ class RecentSessionCard extends StatelessWidget {
                     Text(
                       buildOmpSettingsSummary(
                         AppLocalizations.of(context),
+                        models:
+                            context.read<BridgeService?>()?.ompModels ??
+                            const [],
                         model: session.ompModel,
                         thinkingLevel: session.ompThinkingLevel,
                       ),
@@ -2985,14 +2993,16 @@ class RecentSessionCard extends StatelessWidget {
 }
 
 /// Compact settings summary of an omp session card: "model · thinking" and,
-/// for running sessions, the approval mode chip label.
+/// for running sessions, the approval mode chip label. The model shows its
+/// name from [models] (the Bridge's catalogue), else its selector id.
 String buildOmpSettingsSummary(
   AppLocalizations l, {
+  required List<OmpModelInfo> models,
   String? model,
   String? thinkingLevel,
   ExecutionMode? executionMode,
 }) {
-  final name = ompModelDisplayName(model, const [], l);
+  final name = ompModelDisplayName(model, models, l);
   final modelPart = thinkingLevel == null
       ? name
       : '$name · ${ompThinkingLevelLabel(thinkingLevel)}';

@@ -99,6 +99,27 @@ Set<Provider> effectiveProviders(
   return {Provider.claude, Provider.codex};
 }
 
+/// Tabs of the new session sheet: the enabled tabs in their order, limited
+/// to [effectiveProviders]. When the fallback of [effectiveProviders] offers
+/// a provider that has no enabled tab (only omp enabled on a Bridge without
+/// omp), its tab is appended.
+List<NewSessionTab> visibleNewSessionTabs(
+  List<NewSessionTab> enabledTabs,
+  OmpSupport ompSupport,
+) {
+  final providers = effectiveProviders(enabledTabs, ompSupport);
+  final tabs = [
+    for (final tab in enabledTabs)
+      if (providers.contains(tab.toProvider())) tab,
+  ];
+  for (final tab in defaultNewSessionTabs) {
+    if (providers.contains(tab.toProvider()) && !tabs.contains(tab)) {
+      tabs.add(tab);
+    }
+  }
+  return tabs;
+}
+
 bool isNewSessionTabEnabled(
   List<NewSessionTab> enabledTabs,
   NewSessionTab tab,

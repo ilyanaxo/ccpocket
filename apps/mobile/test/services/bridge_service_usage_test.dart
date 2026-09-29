@@ -8,6 +8,7 @@ import 'package:ccpocket/features/omp_session/state/omp_session_cubit.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/models/offline_pending_action.dart';
 import 'package:ccpocket/models/protocol_version.dart';
+import 'package:ccpocket/providers/unseen_sessions_cubit.dart';
 import 'package:ccpocket/services/bridge_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -4894,6 +4895,66 @@ void main() {
 
       await sub.cancel();
       await sessionSub.cancel();
+      bridge.dispose();
+      await server.stop();
+    });
+
+    test('a reconnect keeps omp sessions and their seen state until the full '
+        'session_list', () async {
+      final server = await _OmpTestServer.start(supportsOmp: true)
+        ..announce = false;
+      final bridge = BridgeService();
+      final unseen = UnseenSessionsCubit();
+      final published = <List<String>>[];
+      final sub = bridge.sessionList.listen((sessions) {
+        published.add([for (final session in sessions) session.id]);
+        unseen.updateSessions(sessions);
+      });
+      Map<String, dynamic> session(String id, String provider) => {
+        'id': id,
+        'provider': provider,
+        'projectPath': '/p',
+        'status': 'idle',
+        'createdAt': '2026-09-29T00:00:00.000Z',
+        'lastActivityAt': '2026-09-29T00:10:00.000Z',
+      };
+      final claude = session('c1', 'claude');
+      final omp = session('omp1', 'omp');
+
+      bridge.connect(server.url);
+      var socket = await server.nextSocket();
+      // Connect-time list without omp sessions, then the full list that
+      // answers client_capabilities.
+      server.sendSessionList(socket, sessions: [claude]);
+      server.sendSessionList(socket, sessions: [claude, omp]);
+      await _settle();
+      unseen
+        ..markSeen('c1')
+        ..markSeen('omp1');
+      expect(unseen.isUnseen('omp1'), isFalse);
+
+      // The app returns from the background: same Bridge, new socket.
+      published.clear();
+      bridge.connect(server.url);
+      socket = await server.nextSocket();
+      server.sendSessionList(socket, sessions: [claude]);
+      await _settle();
+      expect(published, [
+        ['c1', 'omp1'],
+      ]);
+      server.sendSessionList(socket, sessions: [claude, omp]);
+      await _settle();
+      expect(published.last, ['c1', 'omp1']);
+      expect(unseen.isUnseen('omp1'), isFalse);
+
+      // The second list of a connection is complete: an omp session it
+      // does not list is gone.
+      server.sendSessionList(socket, sessions: [claude]);
+      await _settle();
+      expect(published.last, ['c1']);
+
+      await sub.cancel();
+      await unseen.close();
       bridge.dispose();
       await server.stop();
     });

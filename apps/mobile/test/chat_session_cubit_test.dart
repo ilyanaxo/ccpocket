@@ -3396,6 +3396,61 @@ void main() {
       });
     }
 
+    test(
+      'a level picked before omp_settings carries the pending model',
+      () async {
+        final cubit = createCubit('s1', provider: Provider.omp);
+        addTearDown(cubit.close);
+        mockBridge.emitSessionList([
+          ompContext(
+            model: 'baseten/MiniMaxAI/MiniMax-M3',
+            thinkingLevel: null,
+            status: 'running',
+          ),
+        ]);
+        await Future.microtask(() {});
+
+        // omp is busy, so the Bridge defers this change.
+        cubit.setOmpModel(model: 'baseten/zai-org/GLM-5.3-Fast');
+        expect(lastPayload(), {
+          'type': 'set_omp_model',
+          'sessionId': 's1',
+          'model': 'baseten/zai-org/GLM-5.3-Fast',
+        });
+        expect(cubit.state.ompThinkingLevels, ['off', 'high', 'max']);
+
+        // The sheet now offers the levels of the new model.
+        cubit.setOmpModel(thinkingLevel: 'max');
+        expect(lastPayload(), {
+          'type': 'set_omp_model',
+          'sessionId': 's1',
+          'model': 'baseten/zai-org/GLM-5.3-Fast',
+          'thinkingLevel': 'max',
+        });
+        expect(cubit.state.ompModel, 'baseten/zai-org/GLM-5.3-Fast');
+        expect(cubit.state.ompThinkingLevel, 'max');
+      },
+    );
+
+    test('a model picked before omp_settings carries the pending level', () async {
+      final cubit = createCubit('s1', provider: Provider.omp);
+      addTearDown(cubit.close);
+      mockBridge.emitSessionList([ompContext(status: 'running')]);
+      await Future.microtask(() {});
+
+      cubit.setOmpModel(thinkingLevel: 'max');
+      cubit.setOmpModel(model: 'baseten/MiniMaxAI/MiniMax-M3');
+
+      // MiniMax offers no `max`; the request names the fallback the app shows.
+      expect(lastPayload(), {
+        'type': 'set_omp_model',
+        'sessionId': 's1',
+        'model': 'baseten/MiniMaxAI/MiniMax-M3',
+        'thinkingLevel': 'off',
+      });
+      expect(cubit.state.ompThinkingLevel, 'off');
+    });
+
     test('an unrelated error keeps the pending omp change', () async {
       final cubit = createCubit('s1', provider: Provider.omp);
       addTearDown(cubit.close);

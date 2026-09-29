@@ -805,6 +805,8 @@ class _OmpChatBody extends HookWidget {
       case ApprovalNone():
         break;
     }
+    final showApproveAlwaysScope =
+        pendingPermission?.canApproveForSession ?? true;
 
     void approveToolUse() {
       if (pendingToolUseId == null) return;
@@ -1072,16 +1074,22 @@ class _OmpChatBody extends HookWidget {
                             },
                             child: SingleChildScrollView(
                               reverse: true,
+                              // Each bar pads for the bottom safe area; only
+                              // the lowest one keeps that inset.
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   if (askToolUseId case final askId?
                                       when askInput != null) ...[
-                                    AskUserQuestionWidget(
-                                      toolUseId: askId,
-                                      input: askInput,
-                                      agentName: Provider.omp.label,
-                                      onAnswer: answerQuestion,
+                                    MediaQuery.removePadding(
+                                      context: context,
+                                      removeBottom: true,
+                                      child: AskUserQuestionWidget(
+                                        toolUseId: askId,
+                                        input: askInput,
+                                        agentName: Provider.omp.label,
+                                        onAnswer: answerQuestion,
+                                      ),
                                     ),
                                     OmpAskDeclineBar(
                                       abortsTurn: !_isOmpGenericDialogId(askId),
@@ -1089,24 +1097,26 @@ class _OmpChatBody extends HookWidget {
                                     ),
                                   ],
                                   if (pendingToolUseId != null) ...[
-                                    ApprovalBar(
-                                      key: ValueKey(
-                                        'approval_$pendingToolUseId',
+                                    MediaQuery.removePadding(
+                                      context: context,
+                                      removeBottom: showApproveAlwaysScope,
+                                      child: ApprovalBar(
+                                        key: ValueKey(
+                                          'approval_$pendingToolUseId',
+                                        ),
+                                        appColors: appColors,
+                                        pendingPermission: pendingPermission,
+                                        isPlanApproval: false,
+                                        planApprovalUiMode:
+                                            PlanApprovalUiMode.codex,
+                                        planFeedbackController:
+                                            planFeedbackController,
+                                        onApprove: approveToolUse,
+                                        onReject: rejectToolUse,
+                                        onApproveAlways: approveAlwaysToolUse,
                                       ),
-                                      appColors: appColors,
-                                      pendingPermission: pendingPermission,
-                                      isPlanApproval: false,
-                                      planApprovalUiMode:
-                                          PlanApprovalUiMode.codex,
-                                      planFeedbackController:
-                                          planFeedbackController,
-                                      onApprove: approveToolUse,
-                                      onReject: rejectToolUse,
-                                      onApproveAlways: approveAlwaysToolUse,
                                     ),
-                                    if (pendingPermission
-                                            ?.canApproveForSession ??
-                                        true)
+                                    if (showApproveAlwaysScope)
                                       const OmpApproveAlwaysScopeNote(),
                                   ],
                                 ],
@@ -1728,6 +1738,8 @@ void _showUserMessageHistory(
 
 /// Conversation rewind (omp has no file rewind): the Bridge branches the
 /// session before the message and the message goes back to the composer.
+/// When omp refuses (busy, queued input, ...) the conversation is unchanged:
+/// the composer gets its previous text back and the reason is shown.
 void _showOmpRewindDialog(
   BuildContext context,
   UserChatEntry message, {
@@ -1746,6 +1758,29 @@ void _showOmpRewindDialog(
         messageText: message.text,
         onConfirm: () {
           Navigator.of(dialogContext).pop();
+          final messenger = ScaffoldMessenger.of(context);
+          final l = AppLocalizations.of(context);
+          final previousText = inputController.text;
+          // The cubit closes with the screen; its closed stream ends the wait.
+          unawaited(
+            cubit.rewindResults.first.then((result) {
+              if (result.success) return;
+              if (inputController.text == message.text) {
+                _restoreRewindMessageToComposer(
+                  inputController: inputController,
+                  draftService: draftService,
+                  sessionId: sessionId,
+                  text: previousText,
+                );
+              }
+              messenger.showSnackBar(
+                SnackBar(
+                  key: const ValueKey('omp_rewind_failed_snackbar'),
+                  content: Text(l.ompRewindFailed(result.error ?? '')),
+                ),
+              );
+            }, onError: (Object _) {}),
+          );
           _restoreRewindMessageToComposer(
             inputController: inputController,
             draftService: draftService,

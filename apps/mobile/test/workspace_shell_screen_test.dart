@@ -703,6 +703,88 @@ void main() {
     );
   });
 
+  for (final (code, message, shown) in const [
+    (
+      'omp_session_busy',
+      'The omp session file is still in use by another process.',
+      'omp Session Busy\n'
+          'The omp session file is still in use by another process.\n'
+          'Wait until the previous omp process has exited, then try again',
+    ),
+    // The Bridge message already states the hint.
+    (
+      'omp_session_already_open',
+      'Stop the running session before resuming it with other settings.',
+      'omp Session Already Open\n'
+          'Stop the running session before resuming it with other settings.',
+    ),
+  ]) {
+    testWidgets('shows the omp resume failure $code from the recent list', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _MockBridgeService()
+        ..fakeOmpSupport = OmpSupport.supported;
+      final settingsCubit = await _createSettingsCubit(bridge);
+      final draftService = DraftService(await SharedPreferences.getInstance());
+      final revenueCatService = _FakeRevenueCatService();
+      final supportBannerService = await _createSupportBannerService();
+      const ompRecent = RecentSession(
+        sessionId: 'one',
+        provider: 'omp',
+        firstPrompt: 'Prompt one',
+        created: '2025-01-01T00:00:00Z',
+        modified: '2025-01-01T00:00:00Z',
+        gitBranch: 'main',
+        projectPath: '/Users/demo/project-one',
+        isSidechain: false,
+      );
+
+      await tester.pumpWidget(
+        _buildWorkspaceApp(
+          bridge: bridge,
+          settingsCubit: settingsCubit,
+          draftService: draftService,
+          revenueCatService: revenueCatService,
+          supportBannerService: supportBannerService,
+          debugRecentSessions: const [ompRecent],
+          sessionListOnly: true,
+        ),
+      );
+      bridge.emitRecentSessions(const [ompRecent]);
+      await _pumpUi(tester);
+
+      await tester.tap(find.byKey(const ValueKey('recent_session_one')));
+      await _pumpUi(tester);
+      final sent =
+          jsonDecode(bridge.sentMessages.last.toJson()) as Map<String, dynamic>;
+      expect(sent['provider'], 'omp');
+      final resumeRequestId = sent['resumeRequestId'] as String;
+
+      // What the Bridge's failResumeOperation sends.
+      bridge.emitMessage(
+        SystemMessage(
+          subtype: 'session_resume_failed',
+          provider: 'omp',
+          sourceSessionId: 'one',
+          resumeRequestId: resumeRequestId,
+        ),
+      );
+      bridge.emitMessage(
+        ErrorMessage(
+          message: message,
+          errorCode: code,
+          sessionId: 'one',
+          requestId: resumeRequestId,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text(shown), findsOneWidget);
+    });
+  }
+
   testWidgets(
     'matching resume creation selects session and clears correlation',
     (tester) async {

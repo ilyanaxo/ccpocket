@@ -120,7 +120,8 @@ void showOmpSettingsSheet(BuildContext context, ChatSessionCubit chatCubit) {
 ///
 /// A running session cannot switch back to omp's configured default (the
 /// Bridge needs a selector), so the "omp default" row only marks a session
-/// whose model is not known yet.
+/// whose model is not known yet. The sheet stays open; tapping the selected
+/// row changes nothing.
 class OmpSettingsSheet extends StatelessWidget {
   final List<OmpModelInfo> models;
   final String? model;
@@ -162,7 +163,9 @@ class OmpSettingsSheet extends StatelessWidget {
                       levels: thinkingLevels,
                       selected: thinkingLevel,
                       onSelected: (level) {
-                        if (level != null) onThinkingLevelSelected(level);
+                        if (level != null && level != thinkingLevel) {
+                          onThinkingLevelSelected(level);
+                        }
                       },
                     ),
                     const Divider(height: 16),
@@ -178,7 +181,9 @@ class OmpSettingsSheet extends StatelessWidget {
                   entry: entries[index],
                   selected: model,
                   onSelected: (selector) {
-                    if (selector != null) onModelSelected(selector);
+                    if (selector != null && selector != model) {
+                      onModelSelected(selector);
+                    }
                   },
                 ),
               ),
@@ -214,6 +219,7 @@ class OmpSheetSectionTitle extends StatelessWidget {
 
 /// Thinking levels as selectable rows (`omp_thinking_level_<level>`), with
 /// an optional "omp default" row (`omp_thinking_level_default`, level null).
+/// [onSelected] also fires for the selected row, so a picker can close.
 class OmpThinkingLevelList extends StatelessWidget {
   final List<String> levels;
   final String? selected;
@@ -231,49 +237,18 @@ class OmpThinkingLevelList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context);
-    final cs = Theme.of(context).colorScheme;
-    Widget row({
-      required Key key,
-      required String title,
-      required String subtitle,
-      required bool isSelected,
-      required VoidCallback onTap,
-    }) {
-      return ListTile(
-        key: key,
-        dense: true,
-        leading: Icon(
-          Icons.psychology_outlined,
-          color: isSelected ? cs.primary : cs.onSurfaceVariant,
-        ),
-        title: Text(title),
-        subtitle: subtitle.isEmpty
-            ? null
-            : Text(subtitle, style: const TextStyle(fontSize: 12)),
-        trailing: isSelected
-            ? Icon(Icons.check, color: cs.primary, size: 20)
-            : null,
-        onTap: () {
-          if (isSelected) return;
-          HapticFeedback.selectionClick();
-          onTap();
-        },
-      );
-    }
-
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         if (showDefault)
-          row(
+          _OmpThinkingLevelTile(
             key: const ValueKey('omp_thinking_level_default'),
             title: l.ompDefaultModel,
-            subtitle: '',
             isSelected: selected == null,
             onTap: () => onSelected(null),
           ),
         for (final level in levels)
-          row(
+          _OmpThinkingLevelTile(
             key: ValueKey('omp_thinking_level_$level'),
             title: ompThinkingLevelLabel(level),
             subtitle: ompThinkingLevelDescription(level, l),
@@ -281,6 +256,44 @@ class OmpThinkingLevelList extends StatelessWidget {
             onTap: () => onSelected(level),
           ),
       ],
+    );
+  }
+}
+
+class _OmpThinkingLevelTile extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _OmpThinkingLevelTile({
+    super.key,
+    required this.title,
+    this.subtitle = '',
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return ListTile(
+      dense: true,
+      leading: Icon(
+        Icons.psychology_outlined,
+        color: isSelected ? cs.primary : cs.onSurfaceVariant,
+      ),
+      title: Text(title),
+      subtitle: subtitle.isEmpty
+          ? null
+          : Text(subtitle, style: const TextStyle(fontSize: 12)),
+      trailing: isSelected
+          ? Icon(Icons.check, color: cs.primary, size: 20)
+          : null,
+      onTap: () {
+        HapticFeedback.selectionClick();
+        onTap();
+      },
     );
   }
 }
@@ -494,7 +507,6 @@ class _OmpModelOptionTile extends StatelessWidget {
           ? Icon(Icons.check, color: cs.primary, size: 20)
           : null,
       onTap: () {
-        if (isSelected) return;
         HapticFeedback.selectionClick();
         onTap();
       },

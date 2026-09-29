@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/models/new_session_params.dart';
@@ -38,6 +40,35 @@ class _OmpBridge extends BridgeService {
 
   @override
   OmpAvailability? get ompAvailability => availability;
+}
+
+/// A Bridge whose omp catalogue arrives after the sheet opened, like the
+/// second `session_list` of a connection.
+class _LateCatalogueBridge extends BridgeService {
+  final _sessionLists = StreamController<List<SessionInfo>>.broadcast();
+  List<OmpModelInfo> models = const [];
+  OmpAvailability? availability;
+
+  @override
+  List<OmpModelInfo> get ompModels => models;
+
+  @override
+  OmpAvailability? get ompAvailability => availability;
+
+  @override
+  Stream<List<SessionInfo>> get sessionList => _sessionLists.stream;
+
+  void deliverCatalogue(List<OmpModelInfo> catalogue) {
+    models = catalogue;
+    availability = OmpAvailability.available;
+    _sessionLists.add(const []);
+  }
+
+  @override
+  void dispose() {
+    _sessionLists.close();
+    super.dispose();
+  }
 }
 
 const _allTabs = [NewSessionTab.codex, NewSessionTab.claude, NewSessionTab.omp];
@@ -250,6 +281,45 @@ void main() {
       );
     });
 
+    testWidgets('tapping the selected row closes the omp pickers', (
+      tester,
+    ) async {
+      _enlargeViewport(tester);
+      final bridge = _OmpBridge();
+      addTearDown(bridge.dispose);
+      await _openSheet(
+        tester,
+        bridge: bridge,
+        initialParams: _ompInitial(
+          ompModel: _opus.selector,
+          ompThinkingLevel: 'high',
+        ),
+        visibleTabs: _allTabs,
+      );
+
+      await _tapVisible(tester, find.byKey(const ValueKey('dialog_omp_model')));
+      await tester.tap(
+        find.byKey(
+          const ValueKey('omp_model_option_anthropic/claude-opus-4-7'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('omp_model_picker')), findsNothing);
+      expect(find.text('Claude Opus 4.7'), findsOneWidget);
+
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('dialog_omp_thinking_level')),
+      );
+      await tester.tap(find.byKey(const ValueKey('omp_thinking_level_high')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('omp_thinking_level_picker')),
+        findsNothing,
+      );
+      expect(find.text('High'), findsOneWidget);
+    });
+
     testWidgets('offers the three omp approval modes', (tester) async {
       _enlargeViewport(tester);
       final bridge = _OmpBridge();
@@ -380,6 +450,96 @@ void main() {
         onResult: (params) => result = params,
       );
 
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('dialog_start_button')),
+      );
+      expect(result!.ompModel, isNull);
+      expect(result!.ompThinkingLevel, isNull);
+    });
+
+    testWidgets('a kept level stays visible until the catalogue arrives', (
+      tester,
+    ) async {
+      _enlargeViewport(tester);
+      final bridge = _LateCatalogueBridge();
+      addTearDown(bridge.dispose);
+      NewSessionParams? result;
+      await _openSheet(
+        tester,
+        bridge: bridge,
+        initialParams: _ompInitial(
+          ompModel: _opus.selector,
+          ompThinkingLevel: 'high',
+        ),
+        visibleTabs: _allTabs,
+        onResult: (params) => result = params,
+      );
+
+      final l = _l(tester);
+      final levelField = find.byKey(
+        const ValueKey('dialog_omp_thinking_level'),
+      );
+      Finder levelTitle(String title) =>
+          find.descendant(of: levelField, matching: find.text(title));
+      expect(find.text(l.loading), findsOneWidget);
+      expect(levelTitle('High'), findsOneWidget);
+
+      // The kept level can be changed before the catalogue arrives.
+      await _tapVisible(tester, levelField);
+      await tester.tap(find.byKey(const ValueKey('omp_thinking_level_max')));
+      await tester.pumpAndSettle();
+      expect(levelTitle('Max'), findsOneWidget);
+
+      // The catalogue arrives while the sheet is open.
+      bridge.deliverCatalogue(const [_opus, _glm]);
+      await tester.pumpAndSettle();
+      expect(find.text(l.loading), findsNothing);
+      expect(find.text('Claude Opus 4.7'), findsOneWidget);
+      expect(levelTitle('Max'), findsOneWidget);
+
+      await _tapVisible(tester, find.byKey(const ValueKey('dialog_omp_model')));
+      await tester.tap(
+        find.byKey(
+          const ValueKey('omp_model_option_baseten/zai-org/GLM-5.3-Fast'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // GLM offers only "off": the level falls back to omp's default.
+      expect(levelTitle(l.ompDefaultModel), findsOneWidget);
+
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('dialog_start_button')),
+      );
+      expect(result!.ompModel, _glm.selector);
+      expect(result!.ompThinkingLevel, isNull);
+    });
+
+    testWidgets('a late catalogue drops a kept model it does not list', (
+      tester,
+    ) async {
+      _enlargeViewport(tester);
+      final bridge = _LateCatalogueBridge();
+      addTearDown(bridge.dispose);
+      NewSessionParams? result;
+      await _openSheet(
+        tester,
+        bridge: bridge,
+        initialParams: _ompInitial(
+          ompModel: 'retired/model',
+          ompThinkingLevel: 'high',
+        ),
+        visibleTabs: _allTabs,
+        onResult: (params) => result = params,
+      );
+
+      bridge.deliverCatalogue(const [_opus, _glm]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('dialog_omp_thinking_level')),
+        findsNothing,
+      );
       await _tapVisible(
         tester,
         find.byKey(const ValueKey('dialog_start_button')),

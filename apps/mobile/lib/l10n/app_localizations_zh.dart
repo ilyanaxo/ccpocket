@@ -3115,6 +3115,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get ompApproveAlwaysScope => '在此会话中允许此工具的所有调用';
 
   @override
+  String ompRewindFailed(String error) {
+    return '回退失败：$error';
+  }
+
+  @override
   String get ompAskDeclineAborts => '拒绝将停止 omp 当前的回合';
 
   @override

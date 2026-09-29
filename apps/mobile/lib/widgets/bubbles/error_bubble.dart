@@ -11,7 +11,7 @@ import '../../theme/app_theme.dart';
 import '../../utils/structured_error_inference.dart';
 
 /// Maps errorCode to a localized title for the error bubble header.
-String? _errorTitle(String? errorCode, AppLocalizations l) {
+String? errorTitleForCode(String? errorCode, AppLocalizations l) {
   return switch (errorCode) {
     'auth_login_required' ||
     'auth_token_expired' ||
@@ -47,7 +47,7 @@ String? _errorTitle(String? errorCode, AppLocalizations l) {
 }
 
 /// Maps errorCode to a short remedy hint shown below the message.
-String? _errorHint(
+String? errorHintForCode(
   String? errorCode,
   AppLocalizations l,
   ErrorMessage message,
@@ -150,8 +150,8 @@ class ErrorBubble extends StatelessWidget {
       explicitErrorCode: message.errorCode,
     );
     final l = AppLocalizations.of(context);
-    final title = _errorTitle(resolvedErrorCode, l);
-    final hint = _errorHint(resolvedErrorCode, l, message);
+    final title = errorTitleForCode(resolvedErrorCode, l);
+    final hint = errorHintForCode(resolvedErrorCode, l, message);
     final hasStructured = title != null;
     final tone = _toneFor(resolvedErrorCode);
     final isWarn = tone != _ErrorTone.error;

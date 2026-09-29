@@ -149,6 +149,86 @@ void main() {
       expect(sent?.containsKey('message'), isFalse);
     });
 
+    Future<void> setBottomInset(WidgetTester tester, double inset) async {
+      tester.view.padding = FakeViewPadding(
+        bottom: inset * tester.view.devicePixelRatio,
+      );
+      await pumpN(tester);
+    }
+
+    testWidgets('the scope note alone pads for the bottom safe area', (
+      tester,
+    ) async {
+      addTearDown(tester.view.resetPadding);
+      double top(Finder finder) => tester.getTopLeft(finder).dy;
+      double bottom(Finder finder) => tester.getBottomLeft(finder).dy;
+      final screen = find.byType(Scaffold).first;
+
+      await _pumpOmpScreen(tester, bridge);
+      await emitAndPump(tester, bridge, [
+        makeAssistantMessage(
+          'a1',
+          'Running a command.',
+          toolUses: const [
+            ToolUseContent(
+              id: 'call-1',
+              name: 'Bash',
+              input: {'command': 'echo hi'},
+            ),
+          ],
+        ),
+        const PermissionRequestMessage(
+          toolUseId: 'call-1',
+          toolName: 'Bash',
+          input: {'command': 'echo hi'},
+        ),
+        const StatusMessage(status: ProcessStatus.waitingApproval),
+      ]);
+      await pumpN(tester);
+      final approve = find.byKey(const ValueKey('approve_button'));
+      final scope = find.byKey(const ValueKey('omp_approve_always_scope'));
+
+      await setBottomInset(tester, 0);
+      final gap = top(scope) - bottom(approve);
+      await setBottomInset(tester, 34);
+      expect(top(scope) - bottom(approve), gap);
+      expect(bottom(screen) - bottom(scope), greaterThanOrEqualTo(34));
+    });
+
+    testWidgets('the decline bar alone pads for the bottom safe area', (
+      tester,
+    ) async {
+      addTearDown(tester.view.resetPadding);
+      double top(Finder finder) => tester.getTopLeft(finder).dy;
+      double bottom(Finder finder) => tester.getBottomLeft(finder).dy;
+      final screen = find.byType(Scaffold).first;
+
+      await _pumpOmpScreen(tester, bridge);
+      await emitAndPump(tester, bridge, [
+        makeAskQuestionMessage('ask-1', const [
+          {
+            'id': 'color',
+            'question': 'Which color do you prefer?',
+            'options': [
+              {'label': 'red'},
+              {'label': 'blue'},
+            ],
+            'multiSelect': false,
+          },
+        ]),
+        const StatusMessage(status: ProcessStatus.waitingApproval),
+      ]);
+      await pumpN(tester);
+      final lastOption = find.text('blue').last;
+      final decline = find.byKey(const ValueKey('omp_ask_decline_button'));
+
+      await setBottomInset(tester, 0);
+      final gap = top(decline) - bottom(lastOption);
+      await setBottomInset(tester, 34);
+      expect(top(decline) - bottom(lastOption), gap);
+      expect(bottom(screen) - bottom(decline), greaterThanOrEqualTo(34));
+    });
+
     testWidgets('generic omp dialog declines without the abort note', (
       tester,
     ) async {
@@ -189,6 +269,61 @@ void main() {
 
       final sent = findSentMessage(bridge, 'reject');
       expect(sent?['id'], 'omp-dialog:d1');
+    });
+
+    testWidgets('a refused rewind explains why and keeps the composer', (
+      tester,
+    ) async {
+      await _pumpOmpScreen(tester, bridge);
+      await emitAndPump(tester, bridge, [
+        const UserInputMessage(
+          text: 'Rename the helper',
+          userMessageUuid: 'omp:entry:e1',
+        ),
+        makeAssistantMessage('a1', 'Done.'),
+        const ResultMessage(subtype: 'success'),
+        const StatusMessage(status: ProcessStatus.idle),
+        const UserInputMessage(text: 'Second prompt'),
+        const StatusMessage(status: ProcessStatus.running),
+      ]);
+      await pumpN(tester);
+      final input = find.byKey(const ValueKey('message_input'));
+      await tester.enterText(input, 'draft in progress');
+      await pumpN(tester);
+
+      final l = _l(tester);
+      // The chat list is reversed: the last button belongs to the first
+      // user message.
+      await tester.tap(
+        find.byKey(const ValueKey('user_message_actions_button')).last,
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text(l.rewindToHere));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(
+        find.byKey(const ValueKey('codex_rewind_confirm_button')),
+      );
+      await pumpN(tester);
+      expect(findSentMessage(bridge, 'rewind')?['targetUuid'], 'omp:entry:e1');
+      String composerText() => tester.widget<TextField>(input).controller!.text;
+      expect(composerText(), 'Rename the helper');
+
+      await emitAndPump(tester, bridge, [
+        const RewindResultMessage(
+          success: false,
+          mode: 'conversation',
+          error: 'Cannot rewind while omp is running',
+        ),
+      ]);
+      await pumpN(tester);
+
+      expect(
+        find.text(l.ompRewindFailed('Cannot rewind while omp is running')),
+        findsOneWidget,
+      );
+      expect(composerText(), 'draft in progress');
     });
 
     testWidgets('queue panel steers the queued message', (tester) async {

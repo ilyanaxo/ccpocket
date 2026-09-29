@@ -3153,6 +3153,11 @@ class AppLocalizationsJa extends AppLocalizations {
   String get ompApproveAlwaysScope => 'このセッションでこのツールのすべての呼び出しを許可します';
 
   @override
+  String ompRewindFailed(String error) {
+    return '巻き戻しに失敗しました: $error';
+  }
+
+  @override
   String get ompAskDeclineAborts => '断ると omp の現在のターンが停止します';
 
   @override

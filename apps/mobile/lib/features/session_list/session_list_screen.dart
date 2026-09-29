@@ -31,6 +31,7 @@ import '../../services/server_discovery_service.dart';
 import '../../services/ssh_bridge_tunnel_service.dart';
 import '../../widgets/workspace_pane_chrome.dart';
 import '../../widgets/adaptive_context_menu.dart';
+import '../../widgets/bubbles/error_bubble.dart';
 import '../../widgets/new_session_sheet.dart';
 import '../../widgets/rename_session_dialog.dart';
 import '../settings/state/settings_cubit.dart';
@@ -112,27 +113,6 @@ bool autoRenameForProvider(SettingsState settings, Provider provider) {
     Provider.claude => settings.autoRenameClaudeSessions,
     Provider.omp => settings.autoRenameOmpSessions,
   };
-}
-
-/// Tabs of the new session sheet: the enabled tabs in their order, limited
-/// to [effectiveProviders]. When the fallback of [effectiveProviders] offers
-/// a provider that has no enabled tab (only omp enabled on a Bridge without
-/// omp), its tab is appended.
-List<NewSessionTab> visibleNewSessionTabs(
-  List<NewSessionTab> enabledTabs,
-  OmpSupport ompSupport,
-) {
-  final providers = effectiveProviders(enabledTabs, ompSupport);
-  final tabs = [
-    for (final tab in enabledTabs)
-      if (providers.contains(tab.toProvider())) tab,
-  ];
-  for (final tab in defaultNewSessionTabs) {
-    if (providers.contains(tab.toProvider()) && !tabs.contains(tab)) {
-      tabs.add(tab);
-    }
-  }
-  return tabs;
 }
 
 /// omp `--approval-mode` value for an [ExecutionMode].
@@ -323,6 +303,7 @@ class _SessionListScreenState extends State<SessionListScreen>
   String? _pendingResumeRequestId;
   String? _failedResumeSessionId;
   String? _failedResumeRequestId;
+  String? _failedResumeProvider;
   NewSessionParams? _pendingClaudeDefaultsCorrection;
 
   // Flag: already navigated to chat for pending session creation
@@ -439,6 +420,7 @@ class _SessionListScreenState extends State<SessionListScreen>
           _matchesPendingResumeFailure(msg)) {
         _failedResumeSessionId = msg.sourceSessionId;
         _failedResumeRequestId = msg.resumeRequestId;
+        _failedResumeProvider = msg.provider;
         _clearPendingResumeState();
         return;
       }
@@ -446,11 +428,29 @@ class _SessionListScreenState extends State<SessionListScreen>
       if (msg is ErrorMessage && _matchesFailedResumeError(msg)) {
         final showWriterConflict =
             msg.errorCode == 'codex_thread_writer_conflict';
+        // A resume from the list opens no chat whose error bubble would
+        // explain an omp failure (busy, not found, already open, ...).
+        final showOmpFailure = _failedResumeProvider == Provider.omp.value;
         _clearFailedResumeCorrelation();
-        if (showWriterConflict && mounted) {
-          final l = AppLocalizations.of(context);
+        if (!mounted) return;
+        final l = AppLocalizations.of(context);
+        if (showWriterConflict) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(l.codexWriterConflictGuidance)),
+          );
+        } else if (showOmpFailure) {
+          final hint = errorHintForCode(msg.errorCode, l, msg);
+          final lines = [
+            ?errorTitleForCode(msg.errorCode, l),
+            if (msg.message.isNotEmpty) msg.message,
+            // Skip a hint the Bridge message already states.
+            if (hint != null && !msg.message.startsWith(hint)) hint,
+          ];
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              key: const ValueKey('omp_resume_failed_snackbar'),
+              content: Text(lines.join('\n')),
+            ),
           );
         }
         return;
@@ -1878,6 +1878,7 @@ class _SessionListScreenState extends State<SessionListScreen>
   void _clearFailedResumeCorrelation() {
     _failedResumeSessionId = null;
     _failedResumeRequestId = null;
+    _failedResumeProvider = null;
   }
 
   /// Whether the connected Bridge has answered this connection's

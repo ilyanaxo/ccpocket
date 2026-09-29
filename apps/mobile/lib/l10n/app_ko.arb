@@ -1245,6 +1245,12 @@
   "ompApprovalChipWrite": "쓰기",
   "ompApprovalChipYolo": "전체",
   "ompApproveAlwaysScope": "이 세션에서 이 도구의 모든 호출을 허용합니다",
+  "ompRewindFailed": "되돌리기 실패: {error}",
+  "@ompRewindFailed": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
   "ompAskDeclineAborts": "거절하면 omp의 현재 턴이 중지됩니다",
   "ompChangeDeferredTip": "omp가 대기 상태가 되고 백그라운드 작업이 끝나면 적용됩니다",
   "ompAdditionalDirsDescription": "omp가 읽고 작업할 수 있는 추가 디렉터리입니다. 이것만으로 쓰기 권한이 부여되지는 않습니다",

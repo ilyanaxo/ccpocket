@@ -3178,6 +3178,11 @@ class AppLocalizationsKo extends AppLocalizations {
   String get ompApproveAlwaysScope => '이 세션에서 이 도구의 모든 호출을 허용합니다';
 
   @override
+  String ompRewindFailed(String error) {
+    return '되돌리기 실패: $error';
+  }
+
+  @override
   String get ompAskDeclineAborts => '거절하면 omp의 현재 턴이 중지됩니다';
 
   @override

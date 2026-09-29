@@ -3280,6 +3280,11 @@ class AppLocalizationsEn extends AppLocalizations {
       'Allows every call of this tool in this session';
 
   @override
+  String ompRewindFailed(String error) {
+    return 'Rewind failed: $error';
+  }
+
+  @override
   String get ompAskDeclineAborts => 'Declining stops omp\'s current turn';
 
   @override

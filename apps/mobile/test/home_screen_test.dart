@@ -8,7 +8,6 @@ import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/features/session_list/session_list_screen.dart';
 import 'package:ccpocket/features/settings/state/settings_state.dart';
 import 'package:ccpocket/models/new_session_params.dart';
-import 'package:ccpocket/models/new_session_tab.dart';
 import 'package:ccpocket/theme/app_theme.dart';
 import 'package:ccpocket/theme/provider_style.dart';
 
@@ -398,33 +397,6 @@ void main() {
       ]) {
         expect(json.containsKey(key), isFalse, reason: key);
       }
-    });
-  });
-
-  group('visibleNewSessionTabs', () {
-    const all = [NewSessionTab.claude, NewSessionTab.omp, NewSessionTab.codex];
-
-    test('offers omp only when the Bridge supports it', () {
-      expect(visibleNewSessionTabs(all, OmpSupport.supported), all);
-      expect(visibleNewSessionTabs(all, OmpSupport.unknown), [
-        NewSessionTab.claude,
-        NewSessionTab.codex,
-      ]);
-      expect(visibleNewSessionTabs(all, OmpSupport.unsupported), [
-        NewSessionTab.claude,
-        NewSessionTab.codex,
-      ]);
-    });
-
-    test('falls back to Claude and Codex when only omp is enabled', () {
-      expect(
-        visibleNewSessionTabs(const [NewSessionTab.omp], OmpSupport.unknown),
-        [NewSessionTab.codex, NewSessionTab.claude],
-      );
-      expect(
-        visibleNewSessionTabs(const [NewSessionTab.omp], OmpSupport.supported),
-        [NewSessionTab.omp],
-      );
     });
   });
 

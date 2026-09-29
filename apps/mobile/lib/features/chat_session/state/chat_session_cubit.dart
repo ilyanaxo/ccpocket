@@ -347,6 +347,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       _markToolUseResponded(msg.toolUseId);
       _emitNextApprovalOrNone(msg.toolUseId);
     }
+    if (msg is RewindResultMessage) _rewindResultsController.add(msg);
 
     try {
       final update = _handler.handle(
@@ -1428,6 +1429,13 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   /// Stream of side effects that the UI layer must execute (haptics, etc.).
   Stream<Set<ChatSideEffect>> get sideEffects => _sideEffectsController.stream;
 
+  final _rewindResultsController =
+      StreamController<RewindResultMessage>.broadcast();
+
+  /// The Bridge's answers to [rewind] for this session.
+  Stream<RewindResultMessage> get rewindResults =>
+      _rewindResultsController.stream;
+
   void setExplorerCurrentPath(String path) {
     final normalized = path.trim();
     if (normalized == state.explorerCurrentPath) return;
@@ -2167,9 +2175,18 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     }
     if (!modelChanged && nextLevel == state.ompThinkingLevel) return;
 
+    // While an earlier change is unconfirmed, the Bridge replaces its pending
+    // request with this one and validates a level against the model omp still
+    // runs. So the request carries the whole optimistic target: the model and
+    // a level the target model offers.
+    final unconfirmed = _pendingOmpModelRollback != null;
+    final sentModel = modelChanged || unconfirmed ? nextModel : null;
+    final sentLevel =
+        requestedLevel ??
+        (unconfirmed && levels.contains(nextLevel) ? nextLevel : null);
     logger.info(
-      '[session:$sessionId] setOmpModel model=$requestedModel '
-      'thinking=$requestedLevel',
+      '[session:$sessionId] setOmpModel model=$sentModel '
+      'thinking=$sentLevel',
     );
     _pendingOmpModelRollback ??= (
       model: state.ompModel,
@@ -2191,8 +2208,8 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     _bridge.send(
       ClientMessage.setOmpModel(
         sessionId,
-        model: modelChanged ? requestedModel : null,
-        thinkingLevel: requestedLevel,
+        model: sentModel,
+        thinkingLevel: sentLevel,
       ),
     );
   }
@@ -2541,6 +2558,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     _subscription?.cancel();
     _sessionContextSubscription?.cancel();
     _sideEffectsController.close();
+    _rewindResultsController.close();
     return super.close();
   }
 }
