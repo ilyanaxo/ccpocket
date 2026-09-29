@@ -1,0 +1,13 @@
+{"dir": "IN", "frame": {"id": "p", "type": "prompt", "message": "Reply with exactly: OK"}}
+{"dir": "OUT", "frame": {"id": "p", "type": "response", "command": "prompt", "success": true}}
+{"dir": "OUT", "frame": {"type": "agent_start"}}
+{"dir": "OUT", "frame": {"type": "turn_start"}}
+{"dir": "OUT", "frame": {"type": "message_start", "message": {"role": "user", "content": [{"type": "text", "text": "Reply with exactly: OK"}], "attribution": "user", "timestamp": 1790622316957}, "messageId": "msg-1"}}
+{"dir": "OUT", "frame": {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "Reply with exactly: OK"}], "attribution": "user", "timestamp": 1790622316957}, "messageId": "msg-1"}}
+{"dir": "OUT", "frame": {"type": "notice", "level": "info", "message": "xd://: mounted mcp__example_tool…", "source": "xdev"}}
+{"dir": "OUT", "frame": {"type": "message_start", "message": {"role": "assistant", "content": [], "api": "openai-completions", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "error", "timestamp": 1790622317008, "errorStatus": 403, "errorId": 16781312, "errorMessage": "403 please check the api-key you provided", "duration": 228.24929799999995}, "messageId": "msg-2"}}
+{"dir": "OUT", "frame": {"type": "message_end", "message": {"role": "assistant", "content": [], "api": "openai-completions", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "error", "timestamp": 1790622317008, "errorStatus": 403, "errorId": 16781312, "errorMessage": "403 please check the api-key you provided", "duration": 228.24929799999995, "completedAt": 1790622317258}, "messageId": "msg-2"}}
+{"dir": "OUT", "frame": {"type": "turn_end"}}
+{"dir": "OUT", "frame": {"type": "extension_ui_request", "id": "1591a762b455ed72", "method": "setWidget", "widgetKey": "autoresearch"}}
+{"dir": "OUT", "frame": {"type": "agent_end", "messages": [], "isTerminal": true, "yielded": true}}
+{"dir": "OUT", "frame": {"type": "prompt_result", "id": "p", "agentInvoked": true, "status": "error", "sessionSettled": true, "error": {"message": "403 please check the api-key you provided", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "retryable": false, "httpStatus": 403}}}
