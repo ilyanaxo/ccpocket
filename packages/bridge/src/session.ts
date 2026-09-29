@@ -22,6 +22,14 @@ import {
   normalizeCodexReasoningEffortForModel,
   type CodexStartOptions,
 } from "./codex-process.js";
+import { OmpProcess } from "./omp-process.js";
+import {
+  ompEntryIdFromUuid,
+  ompEntryUuid,
+  type OmpSettings,
+  type OmpStartOptions,
+  type OmpThinkingLevel,
+} from "./omp-types.js";
 import type {
   ServerMessage,
   ProcessStatus,
@@ -50,7 +58,7 @@ export interface WorktreeOptions {
 
 export interface SessionInfo {
   id: string;
-  process: SdkProcess | CodexProcess;
+  process: SdkProcess | CodexProcess | OmpProcess;
   provider: Provider;
   history: ServerMessage[];
   historyEntries: HistoryEntry[];
@@ -92,8 +100,25 @@ export interface SessionInfo {
   };
   /** Claude sandbox enabled state (for resume). */
   sandboxEnabled?: boolean;
-  /** Codex-only pending input waiting for the next turn. */
+  /** omp model and thinking level (from `system/init` and `system/omp_settings`). */
+  ompSettings?: OmpSettings;
+  /** omp's `--cwd` for this session (the recorded cwd on resume). */
+  ompCwd?: string;
+  /** omp `--add-dir` roots this session was started with. */
+  ompAdditionalDirectories?: string[];
+  /** Thinking levels offered by the current omp model. */
+  ompThinkingLevels?: OmpThinkingLevel[];
+  /**
+   * Live omp `user_input` history entries that still wait for their omp entry
+   * id (`omp:entry:<id>`, docs/omp-integration.md §6.6), in history order.
+   */
+  ompAwaitingUserEntries?: Array<Extract<ServerMessage, { type: "user_input" }>>;
+  /** omp entry ids already given to a `user_input` of this session. */
+  ompAssignedEntryIds?: Set<string>;
+  /** Pending input waiting for the next turn (Codex and omp, see providerSupportsQueuedInput). */
   codexQueuedInput?: QueuedCodexInput;
+  /** omp: the queued item whose `steer` is in flight; drain, edit and cancel skip it. */
+  steeringQueuedItemId?: string;
   /** Latest Codex goal state. Kept out of chat history. */
   codexGoal?: CodexGoal | null;
   /** Synthetic Codex user UUIDs waiting for their app-server echo. */
@@ -138,6 +163,8 @@ export type HistoryDeltaResult =
 
 export interface QueuedCodexInput extends QueuedInputItem {
   userMessageUuid?: string;
+  /** The app's id of the message, echoed on the drained or steered `user_input`. */
+  clientMessageId?: string;
   images?: Array<{
     base64: string;
     mimeType: string;
@@ -176,6 +203,8 @@ export interface SessionSummary {
     webSearchMode?: string;
     additionalWritableRoots?: string[];
   };
+  /** omp model and thinking level. */
+  ompSettings?: OmpSettings;
   agentNickname?: string;
   agentRole?: string;
   /** Claude sandbox enabled state. */
@@ -191,6 +220,17 @@ export interface SessionSummary {
 export const MAX_HISTORY_PER_SESSION = 100;
 const MAX_IDLE_SESSIONS = 30;
 
+/** Providers that use the Bridge's 1-slot input queue (edit, cancel, steer). */
+export function providerSupportsQueuedInput(provider: Provider): boolean {
+  return provider === "codex" || provider === "omp";
+}
+
+export interface SessionCreationOptions {
+  deferProcessMessages?: boolean;
+  /** omp start options; `bridgeSessionId` is filled by `create()`. */
+  ompOptions?: Omit<OmpStartOptions, "bridgeSessionId">;
+}
+
 export type GalleryImageCallback = (meta: GalleryImageMeta) => void;
 export type SessionUpdatedCallback = (sessionId: string) => void;
 
@@ -198,6 +238,13 @@ type ProcessMessageDeliveryState = {
   deferred: boolean;
   discarded: boolean;
   messages: ServerMessage[];
+  /** Process messages are being processed asynchronously, in order. */
+  processingAsync: boolean;
+  /**
+   * A queue drain requested while `processingAsync`: it runs after those
+   * messages, so a drained user_input never lands inside the previous turn.
+   */
+  drainQueueAfterProcessing: boolean;
 };
 
 function mergeCodexSettings(
@@ -318,10 +365,18 @@ export class SessionManager {
     worktreeOpts?: WorktreeOptions,
     provider?: Provider,
     codexOptions?: CodexStartOptions,
-    creationOptions?: { deferProcessMessages?: boolean },
+    creationOptions?: SessionCreationOptions,
   ): string {
     const id = randomUUID().slice(0, 8);
     const effectiveProvider = provider ?? "claude";
+    const ompOptions: OmpStartOptions | undefined =
+      effectiveProvider === "omp"
+        ? {
+            executionMode: "default",
+            ...creationOptions?.ompOptions,
+            bridgeSessionId: id,
+          }
+        : undefined;
     const effectiveCodexOptions = codexOptions
       ? {
           ...codexOptions,
@@ -332,11 +387,17 @@ export class SessionManager {
         }
       : undefined;
     const proc =
-      effectiveProvider === "codex" ? new CodexProcess() : new SdkProcess();
+      effectiveProvider === "codex"
+        ? new CodexProcess()
+        : effectiveProvider === "omp"
+          ? new OmpProcess()
+          : new SdkProcess();
     const messageDelivery: ProcessMessageDeliveryState = {
       deferred: creationOptions?.deferProcessMessages === true,
       discarded: false,
       messages: [],
+      processingAsync: false,
+      drainQueueAfterProcessing: false,
     };
     this.processMessageDelivery.set(id, messageDelivery);
 
@@ -406,13 +467,29 @@ export class SessionManager {
         options?.autoRename === true &&
         !options.sessionId &&
         !options.continueMode &&
-        !effectiveCodexOptions?.threadId,
+        !effectiveCodexOptions?.threadId &&
+        !ompOptions?.resumeSessionFile,
       // Pre-populate claudeSessionId for resumed sessions so that get_history
       // can return it immediately (before the SDK sends a system/result event).
-      claudeSessionId: options?.sessionId,
+      claudeSessionId: options?.sessionId ?? ompOptions?.resumeSessionId,
     };
     if (effectiveProvider === "codex") {
       this.seedCodexPastUserTurnUuidMap(session);
+    }
+    if (ompOptions) {
+      session.ompCwd = ompOptions.cwd ?? effectiveCwd;
+      if (ompOptions.additionalDirectories?.length) {
+        session.ompAdditionalDirectories = [...ompOptions.additionalDirectories];
+      }
+      session.ompSettings = {
+        ...(ompOptions.model ? { model: ompOptions.model } : {}),
+        ...(ompOptions.thinkingLevel
+          ? { thinkingLevel: ompOptions.thinkingLevel }
+          : {}),
+      };
+      // The omp id is known before the handshake on resume: past_history,
+      // get_message_images, link resolution and workspace lookups see it now.
+      if (session.claudeSessionId) this.saveWorktreeMapping(session);
     }
 
     // Cache tool_use id → name for enriching tool_result messages
@@ -420,7 +497,6 @@ export class SessionManager {
 
     const goalNotifications = new GoalNotifications();
     const pendingProcessMessages: ServerMessage[] = [];
-    let processingAsyncProcessMessage = false;
 
     const processMessage = async (msg: ServerMessage): Promise<void> => {
       try {
@@ -507,7 +583,37 @@ export class SessionManager {
           });
         }
 
-        if (effectiveProvider === "claude") {
+        if (effectiveProvider === "omp") {
+          if (msg.type === "system" && msg.sessionId) {
+            session.claudeSessionId = msg.sessionId;
+            this.saveWorktreeMapping(session);
+          }
+          if (
+            msg.type === "system" &&
+            (msg.subtype === "init" || msg.subtype === "omp_settings")
+          ) {
+            session.ompSettings = {
+              ...((msg.model ?? session.ompSettings?.model)
+                ? { model: msg.model ?? session.ompSettings?.model }
+                : {}),
+              ...(msg.thinkingLevel ? { thinkingLevel: msg.thinkingLevel } : {}),
+            };
+            if (msg.thinkingLevels) {
+              session.ompThinkingLevels = [...msg.thinkingLevels];
+            }
+          }
+          if (msg.type === "system" && msg.subtype === "omp_settings") {
+            // Settings are state, not transcript: delivered live and sent as a
+            // snapshot with get_history, never appended to history.
+            deliverProcessMessage(msg);
+            this.onSessionUpdated?.(session.id);
+            return;
+          }
+          if (msg.type === "system" && msg.subtype === "set_permission_mode") {
+            // A respawn finished: the session list carries the new mode.
+            this.onSessionUpdated?.(session.id);
+          }
+        } else if (effectiveProvider === "claude") {
           // Capture Claude session_id from result events
           if (msg.type === "result" && "sessionId" in msg && msg.sessionId) {
             session.claudeSessionId = msg.sessionId;
@@ -686,7 +792,9 @@ export class SessionManager {
         // in-memory user_input entries lack UUIDs.  The disk
         // conversation file always has them.
         if (msg.type === "result") {
-          this.backfillUserUuidsFromDisk(session);
+          if (session.provider === "claude") {
+            this.backfillUserUuidsFromDisk(session);
+          }
           this.scheduleAutoRename(session);
         }
       } catch (err) {
@@ -700,13 +808,17 @@ export class SessionManager {
     const drainProcessMessages = async (
       firstMessage: ServerMessage,
     ): Promise<void> => {
-      processingAsyncProcessMessage = true;
+      messageDelivery.processingAsync = true;
       let nextMessage: ServerMessage | undefined = firstMessage;
       while (nextMessage) {
         await processMessage(nextMessage);
         nextMessage = pendingProcessMessages.shift();
       }
-      processingAsyncProcessMessage = false;
+      messageDelivery.processingAsync = false;
+      if (messageDelivery.drainQueueAfterProcessing) {
+        messageDelivery.drainQueueAfterProcessing = false;
+        this.drainCodexQueue(session);
+      }
     };
 
     const processMessageMayAwait = (msg: ServerMessage): boolean => {
@@ -726,7 +838,7 @@ export class SessionManager {
     };
 
     proc.on("message", (msg) => {
-      if (processingAsyncProcessMessage) {
+      if (messageDelivery.processingAsync) {
         pendingProcessMessages.push(msg);
         return;
       }
@@ -744,21 +856,34 @@ export class SessionManager {
       }
     });
 
-    if (proc instanceof CodexProcess) {
+    if (proc instanceof CodexProcess || proc instanceof OmpProcess) {
       proc.on("input_ready", () => {
         this.drainCodexQueue(session);
+      });
+    }
+
+    if (proc instanceof OmpProcess) {
+      proc.on("session_name", (name) => {
+        // A name set inside omp (`/rename`).
+        session.name = name;
+        session.autoRenameAttempted = true;
+        this.onSessionUpdated?.(session.id);
+      });
+      proc.on("user_entries", (entries) => {
+        this.backfillOmpUserUuids(session, entries);
       });
     }
 
     proc.on("exit", () => {
       session.status = "idle";
       session.codexQueuedInput = undefined;
+      session.steeringQueuedItemId = undefined;
       // Add status message to history so it stays in sync with session.status
       this.appendHistoryToSession(session, {
         type: "status",
         status: "idle",
       } as ServerMessage);
-      if (session.provider === "codex") {
+      if (providerSupportsQueuedInput(session.provider)) {
         this.broadcastCodexQueue(session);
       }
       this.evictStaleIdleSessions();
@@ -828,10 +953,12 @@ export class SessionManager {
     }
 
     try {
-      if (effectiveProvider === "codex") {
-        (proc as CodexProcess).start(effectiveCwd, effectiveCodexOptions);
+      if (proc instanceof CodexProcess) {
+        proc.start(effectiveCwd, effectiveCodexOptions);
+      } else if (proc instanceof OmpProcess) {
+        proc.start(effectiveCwd, ompOptions!);
       } else {
-        (proc as SdkProcess).start(effectiveCwd, options);
+        proc.start(effectiveCwd, options);
       }
     } catch (error) {
       messageDelivery.discarded = true;
@@ -872,7 +999,82 @@ export class SessionManager {
     if (!session) return undefined;
     const entry = this.appendHistoryToSession(session, msg);
     this.markPendingCodexUserEcho(session, msg);
+    this.markOmpUserInputAwaitingEntry(session, msg);
     return entry;
+  }
+
+  /**
+   * Append a Bridge-originated `user_input` (for example the message of an
+   * omp approval denial) to history and broadcast it. Never merged into an
+   * older entry with the same text; omp entries get their entry id later
+   * through the backfill (docs/omp-integration.md §4.1, §6.6).
+   */
+  appendUserInput(
+    sessionId: string,
+    input: { text: string; clientMessageId?: string },
+  ): HistoryEntry | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    const msg = {
+      type: "user_input",
+      text: input.text,
+      ...(input.clientMessageId
+        ? { clientMessageId: input.clientMessageId }
+        : {}),
+      timestamp: new Date().toISOString(),
+    } as ServerMessage;
+    const entry = this.appendHistoryToSession(session, msg);
+    this.markOmpUserInputAwaitingEntry(session, msg);
+    this.onMessage(session.id, msg);
+    return entry;
+  }
+
+  /**
+   * Give live omp `user_input` entries their omp entry uuid
+   * (`omp:entry:<id>`) so they become rewind targets.
+   *
+   * Monotonic: each entry id goes to the first awaiting `user_input` after the
+   * previously assigned one whose text equals the entry text. Ids already
+   * assigned or present in the resumed history are never reused, so a live
+   * "yes" never gets the id of an earlier "yes".
+   */
+  backfillOmpUserUuids(
+    session: SessionInfo,
+    entries: ReadonlyArray<{ entryId: string; text: string }>,
+  ): void {
+    if (session.provider !== "omp") return;
+    const awaiting = session.ompAwaitingUserEntries;
+    if (!awaiting || awaiting.length === 0) return;
+    const assigned = (session.ompAssignedEntryIds ??= new Set<string>());
+    const pastIds = new Set<string>();
+    for (const message of session.pastMessages ?? []) {
+      const uuid = (message as { uuid?: unknown } | null)?.uuid;
+      const entryId =
+        typeof uuid === "string" ? ompEntryIdFromUuid(uuid) : null;
+      if (entryId) pastIds.add(entryId);
+    }
+
+    for (const entry of entries) {
+      if (assigned.has(entry.entryId) || pastIds.has(entry.entryId)) continue;
+      const index = awaiting.findIndex((msg) => msg.text === entry.text);
+      if (index === -1) continue;
+      const msg = awaiting[index];
+      msg.userMessageUuid = ompEntryUuid(entry.entryId);
+      assigned.add(entry.entryId);
+      // Inputs before the assigned one can no longer receive an id (monotonic).
+      awaiting.splice(0, index + 1);
+      // Re-broadcast so the app updates UserChatEntry.messageUuid.
+      this.onMessage(session.id, msg);
+    }
+  }
+
+  private markOmpUserInputAwaitingEntry(
+    session: SessionInfo,
+    msg: ServerMessage,
+  ): void {
+    if (session.provider !== "omp" || msg.type !== "user_input") return;
+    if (msg.userMessageUuid) return;
+    (session.ompAwaitingUserEntries ??= []).push(msg);
   }
 
   getHistorySince(
@@ -964,13 +1166,17 @@ export class SessionManager {
               session.process.approvalPolicy) === "never"
             ? "fullAccess"
             : "default"
-          : undefined;
+          : session.process instanceof OmpProcess
+            ? session.process.executionMode
+            : undefined;
     const planMode =
       session.process instanceof SdkProcess
         ? session.process.permissionMode === "plan"
         : session.process instanceof CodexProcess
           ? session.process.collaborationMode === "plan"
-          : undefined;
+          : session.process instanceof OmpProcess
+            ? false
+            : undefined;
     return {
       id: session.id,
       provider: session.provider,
@@ -994,7 +1200,9 @@ export class SessionManager {
                   session.process.approvalPolicy) === "never"
                 ? "bypassPermissions"
                 : "acceptEdits"
-            : undefined,
+            : session.process instanceof OmpProcess
+              ? session.process.permissionMode
+              : undefined,
       executionMode,
       planMode,
       model:
@@ -1002,6 +1210,9 @@ export class SessionManager {
           ? session.process.model
           : undefined,
       codexSettings,
+      ...(session.provider === "omp" && session.ompSettings
+        ? { ompSettings: { ...session.ompSettings } }
+        : {}),
       agentNickname:
         session.process instanceof CodexProcess
           ? (session.process.agentNickname ?? undefined)
@@ -1012,10 +1223,9 @@ export class SessionManager {
           : undefined,
       sandboxEnabled: session.sandboxEnabled,
       pendingPermission,
-      queuedInput:
-        session.provider === "codex"
-          ? publicQueuedInput(session.codexQueuedInput)
-          : undefined,
+      queuedInput: providerSupportsQueuedInput(session.provider)
+        ? publicQueuedInput(session.codexQueuedInput)
+        : undefined,
     };
   }
 
@@ -1353,7 +1563,7 @@ export class SessionManager {
     const transcript = buildAutoRenameTranscript(session.history);
     if (!transcript) return;
 
-    const name = generateAutoRenameName({
+    const name = await generateAutoRenameName({
       provider: session.provider,
       projectPath: session.worktreePath ?? session.projectPath,
       model:
@@ -1361,7 +1571,9 @@ export class SessionManager {
           ? session.process instanceof SdkProcess
             ? session.process.model
             : undefined
-          : session.codexSettings?.model,
+          : session.provider === "omp"
+            ? session.ompSettings?.model
+            : session.codexSettings?.model,
       transcript,
     });
     if (!name || session.name) return;
@@ -1383,6 +1595,17 @@ export class SessionManager {
         name,
       );
       return true;
+    }
+
+    if (session.provider === "omp") {
+      if (!(session.process instanceof OmpProcess)) return false;
+      try {
+        await session.process.setSessionName(name);
+        return true;
+      } catch (err) {
+        console.warn(`[session] Failed to name omp session:`, err);
+        return false;
+      }
     }
 
     if (session.provider !== "codex") return false;
@@ -1438,7 +1661,7 @@ export class SessionManager {
 
   queueCodexInput(id: string, input: QueuedCodexInput): boolean {
     const session = this.sessions.get(id);
-    if (!session || session.provider !== "codex") return false;
+    if (!session || !providerSupportsQueuedInput(session.provider)) return false;
     if (session.codexQueuedInput) return false;
     session.codexQueuedInput = input;
     session.lastActivityAt = new Date();
@@ -1456,9 +1679,10 @@ export class SessionManager {
     },
   ): boolean {
     const session = this.sessions.get(id);
-    if (!session || session.provider !== "codex") return false;
+    if (!session || !providerSupportsQueuedInput(session.provider)) return false;
     const current = session.codexQueuedInput;
     if (!current || current.itemId !== itemId) return false;
+    if (session.steeringQueuedItemId === itemId) return false;
     session.codexQueuedInput = {
       ...current,
       text,
@@ -1473,10 +1697,11 @@ export class SessionManager {
 
   cancelCodexQueuedInput(id: string, itemId: string): boolean {
     const session = this.sessions.get(id);
-    if (!session || session.provider !== "codex") return false;
+    if (!session || !providerSupportsQueuedInput(session.provider)) return false;
     if (!session.codexQueuedInput || session.codexQueuedInput.itemId !== itemId) {
       return false;
     }
+    if (session.steeringQueuedItemId === itemId) return false;
     session.codexQueuedInput = undefined;
     session.lastActivityAt = new Date();
     this.broadcastCodexQueue(session);
@@ -1488,12 +1713,15 @@ export class SessionManager {
     itemId: string,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const session = this.sessions.get(id);
-    if (!session || session.provider !== "codex") {
-      return { ok: false, error: "No active Codex session." };
+    if (!session || !providerSupportsQueuedInput(session.provider)) {
+      return { ok: false, error: "No active session with a message queue." };
     }
     const queued = session.codexQueuedInput;
     if (!queued || queued.itemId !== itemId) {
       return { ok: false, error: "Queued message not found." };
+    }
+    if (session.process instanceof OmpProcess) {
+      return this.steerOmpQueuedInput(session, session.process, queued);
     }
     if (!(session.process instanceof CodexProcess)) {
       return { ok: false, error: "No active Codex process." };
@@ -1523,6 +1751,61 @@ export class SessionManager {
     return { ok: true };
   }
 
+  /**
+   * omp starts a run for a `steer` that arrives while idle and sends no
+   * `prompt_result` for it, so the Bridge steers only while omp is busy and
+   * otherwise sends the item as a normal prompt. The item stays in the queue
+   * (detached) while the steer is in flight, so a drain cannot send it twice.
+   */
+  private async steerOmpQueuedInput(
+    session: SessionInfo,
+    process: OmpProcess,
+    queued: QueuedCodexInput,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (session.steeringQueuedItemId === queued.itemId) {
+      return { ok: false, error: "Queued message is already being steered." };
+    }
+    if (!process.isAlive) {
+      return { ok: false, error: "The omp process is not running." };
+    }
+    if (!process.isBusy) {
+      // Idle (or restarting): the item goes out as a prompt, now, after the
+      // previous run's messages, or at the next input_ready.
+      this.drainCodexQueue(session);
+      return { ok: true };
+    }
+
+    session.steeringQueuedItemId = queued.itemId;
+    try {
+      await process.steer(queued.text, { images: queued.images });
+    } catch (err) {
+      if (session.steeringQueuedItemId === queued.itemId) {
+        session.steeringQueuedItemId = undefined;
+      }
+      // omp may have gone idle while the steer was pending; the drain that
+      // input_ready skipped happens now.
+      this.drainCodexQueue(session);
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (session.steeringQueuedItemId === queued.itemId) {
+      session.steeringQueuedItemId = undefined;
+    }
+    if (session.codexQueuedInput?.itemId === queued.itemId) {
+      session.codexQueuedInput = undefined;
+      this.broadcastCodexQueue(session);
+    }
+    session.lastActivityAt = new Date();
+
+    const userMsg = this.buildQueuedUserInputMessage(queued);
+    this.appendHistoryToSession(session, userMsg);
+    this.markOmpUserInputAwaitingEntry(session, userMsg);
+    this.onMessage(session.id, userMsg);
+    return { ok: true };
+  }
+
   private broadcastCodexQueue(session: SessionInfo): void {
     const item = publicQueuedInput(session.codexQueuedInput);
     this.onMessage(session.id, {
@@ -1533,10 +1816,26 @@ export class SessionManager {
     });
   }
 
+  /**
+   * Every drain (input_ready, a steer while idle, a failed steer) goes through
+   * here. While earlier process messages are still being processed
+   * asynchronously (image tool results, Codex init and results), the drain
+   * waits for them.
+   */
   private drainCodexQueue(session: SessionInfo): void {
-    if (session.provider !== "codex") return;
+    if (!providerSupportsQueuedInput(session.provider)) return;
     const queued = session.codexQueuedInput;
-    if (!queued || !(session.process instanceof CodexProcess)) return;
+    if (!queued) return;
+    const delivery = this.processMessageDelivery.get(session.id);
+    if (delivery?.processingAsync) {
+      delivery.drainQueueAfterProcessing = true;
+      return;
+    }
+    if (session.process instanceof OmpProcess) {
+      this.drainOmpQueue(session, session.process, queued);
+      return;
+    }
+    if (!(session.process instanceof CodexProcess)) return;
     if (!session.process.isWaitingForInput) return;
 
     session.codexQueuedInput = undefined;
@@ -1554,11 +1853,31 @@ export class SessionManager {
     });
   }
 
+  private drainOmpQueue(
+    session: SessionInfo,
+    process: OmpProcess,
+    queued: QueuedCodexInput,
+  ): void {
+    if (!process.isWaitingForInput) return;
+    if (session.steeringQueuedItemId === queued.itemId) return;
+
+    session.codexQueuedInput = undefined;
+    this.broadcastCodexQueue(session);
+
+    const userMsg = this.buildQueuedUserInputMessage(queued);
+    this.appendHistoryToSession(session, userMsg);
+    this.markOmpUserInputAwaitingEntry(session, userMsg);
+    this.onMessage(session.id, userMsg);
+
+    process.sendInput(queued.text, { images: queued.images });
+  }
+
   private buildQueuedUserInputMessage(queued: QueuedCodexInput): ServerMessage {
     return {
       type: "user_input",
       text: queued.text,
       ...(queued.userMessageUuid ? { userMessageUuid: queued.userMessageUuid } : {}),
+      ...(queued.clientMessageId ? { clientMessageId: queued.clientMessageId } : {}),
       timestamp: new Date().toISOString(),
       ...(queued.imageCount ? { imageCount: queued.imageCount } : {}),
       ...(queued.imageRefs ? { images: queued.imageRefs } : {}),
@@ -1626,7 +1945,13 @@ export class SessionManager {
         error: "Rewind is not supported for Codex sessions",
       };
     }
-    return (session.process as SdkProcess).rewindFiles(targetUuid, dryRun);
+    if (!(session.process instanceof SdkProcess)) {
+      return {
+        canRewind: false,
+        error: "omp only supports conversation rewind",
+      };
+    }
+    return session.process.rewindFiles(targetUuid, dryRun);
   }
 
   /**
@@ -1647,6 +1972,11 @@ export class SessionManager {
     }
     if (session.provider === "codex") {
       throw new Error("Rewind is not supported for Codex sessions");
+    }
+    if (session.provider !== "claude") {
+      throw new Error(
+        "omp conversation rewind branches the running omp process instead",
+      );
     }
 
     const claudeSessionId = session.claudeSessionId;

@@ -7,11 +7,17 @@ const {
   mkdtempSyncMock,
   readFileSyncMock,
   rmSyncMock,
+  runOmpPrintMock,
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   mkdtempSyncMock: vi.fn(),
   readFileSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
+  runOmpPrintMock: vi.fn(),
+}));
+
+vi.mock("./omp-print.js", () => ({
+  runOmpPrint: runOmpPrintMock,
 }));
 
 vi.mock("node:child_process", () => ({
@@ -38,6 +44,7 @@ const originalAssistReasoningEffort =
 describe("auto rename", () => {
   beforeEach(() => {
     execFileSyncMock.mockReset();
+    runOmpPrintMock.mockReset();
     mkdtempSyncMock.mockReset();
     readFileSyncMock.mockReset();
     rmSyncMock.mockReset();
@@ -54,7 +61,7 @@ describe("auto rename", () => {
     );
   });
 
-  it("builds transcript from the first user input only", () => {
+  it("builds transcript from the first user input only", async () => {
     const history = [
       { type: "status", status: "running" },
       {
@@ -99,7 +106,7 @@ describe("auto rename", () => {
     expect(prompt).not.toContain("second turn should be ignored");
   });
 
-  it("returns null when no user input exists", () => {
+  it("returns null when no user input exists", async () => {
     expect(
       buildAutoRenameTranscript([
         { type: "status", status: "running" } as ServerMessage,
@@ -107,7 +114,7 @@ describe("auto rename", () => {
     ).toBeNull();
   });
 
-  it("sanitizes model output", () => {
+  it("sanitizes model output", async () => {
     expect(sanitizeAutoRenameName('"未プッシュ差分レビュー。"\n')).toBe(
       "未プッシュ差分レビュー",
     );
@@ -115,10 +122,10 @@ describe("auto rename", () => {
     expect(sanitizeAutoRenameName("name: 未プッシュ差分レビュー")).toBeNull();
   });
 
-  it("uses the Claude CLI for Claude sessions", () => {
+  it("uses the Claude CLI for Claude sessions", async () => {
     execFileSyncMock.mockReturnValue("`依存関係更新`\n");
 
-    const name = generateAutoRenameName({
+    const name = await generateAutoRenameName({
       provider: "claude",
       projectPath: "/tmp/project",
       model: "claude-haiku-4-6",
@@ -145,10 +152,10 @@ describe("auto rename", () => {
     expect(readFileSyncMock).not.toHaveBeenCalled();
   });
 
-  it("uses the Codex Luna model for Codex sessions", () => {
+  it("uses the Codex Luna model for Codex sessions", async () => {
     readFileSyncMock.mockReturnValue("`Claude SDK最新版更新`\n");
 
-    const name = generateAutoRenameName({
+    const name = await generateAutoRenameName({
       provider: "codex",
       projectPath: "/tmp/project",
       model: "gpt-5.5",
@@ -190,12 +197,31 @@ describe("auto rename", () => {
     });
   });
 
-  it("uses Codex assist environment overrides", () => {
+  it("uses omp -p with the session model for omp sessions", async () => {
+    runOmpPrintMock.mockResolvedValue("「ログイン修正」\n");
+
+    const name = await generateAutoRenameName({
+      provider: "omp",
+      projectPath: "/tmp/project",
+      model: "baseten/zai-org/GLM-5.3-Fast",
+      transcript: { userText: "ログインを直して" },
+    });
+
+    expect(name).toBe("ログイン修正");
+    expect(runOmpPrintMock).toHaveBeenCalledWith({
+      cwd: resolve("/tmp/project"),
+      prompt: expect.stringContaining("USER:\nログインを直して"),
+      model: "baseten/zai-org/GLM-5.3-Fast",
+    });
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("uses Codex assist environment overrides", async () => {
     process.env.BRIDGE_CODEX_ASSIST_MODEL = "gpt-oss:20b-cloud";
     process.env.BRIDGE_CODEX_ASSIST_REASONING_EFFORT = "low";
     readFileSyncMock.mockReturnValue("Custom gateway rename\n");
 
-    generateAutoRenameName({
+    await generateAutoRenameName({
       provider: "codex",
       projectPath: "/tmp/project",
       transcript: { userText: "Rename this session" },

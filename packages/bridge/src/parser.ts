@@ -1,6 +1,10 @@
 import type { GoalNotification } from "./goal-notifications.js";
 import type { GalleryImageInfo } from "./gallery-store.js";
 import type { ImageRef } from "./image-store.js";
+import {
+  OMP_THINKING_LEVELS,
+  type OmpThinkingLevel,
+} from "./omp-types.js";
 import type {
   PromptHistoryEntry,
   PromptHistoryImportEntry,
@@ -68,7 +72,7 @@ export type CodexPermissionsMode =
   | "fullAccess"
   | "custom";
 
-export type Provider = "claude" | "codex";
+export type Provider = "claude" | "codex" | "omp";
 
 export type CodexGoalStatus =
   | "active"
@@ -106,6 +110,8 @@ export type ClientMessage =
       protocolVersion?: number;
       minimumProtocolVersion?: number;
       supportedServerMessages?: string[];
+      /** Providers the client can show; absent means `claude` and `codex`. */
+      supportedProviders?: string[];
     }
   | {
       type: "start";
@@ -122,6 +128,8 @@ export type ClientMessage =
       sandboxMode?: string;
       model?: string;
       effort?: "low" | "medium" | "high" | "xhigh" | "max";
+      /** omp thinking level. */
+      thinkingLevel?: OmpThinkingLevel;
       maxTurns?: number;
       maxBudgetUsd?: number;
       fallbackModel?: string;
@@ -196,6 +204,12 @@ export type ClientMessage =
       serviceTier: string;
       sessionId?: string;
     }
+  | {
+      type: "set_omp_model";
+      sessionId: string;
+      model?: string;
+      thinkingLevel?: OmpThinkingLevel;
+    }
   | { type: "get_goal"; sessionId: string }
   | {
       type: "set_goal";
@@ -243,7 +257,9 @@ export type ClientMessage =
       workspaceKind?: "project" | "unassigned";
       requestScope?: "list" | "project";
       requestId?: string;
-      provider?: "claude" | "codex";
+      provider?: Provider;
+      /** Several providers ("All" limited to what the client shows). */
+      providers?: Provider[];
       namedOnly?: boolean;
       searchQuery?: string;
     }
@@ -261,6 +277,8 @@ export type ClientMessage =
       sandboxMode?: string;
       model?: string;
       effort?: "low" | "medium" | "high" | "xhigh" | "max";
+      /** omp thinking level. */
+      thinkingLevel?: OmpThinkingLevel;
       maxTurns?: number;
       maxBudgetUsd?: number;
       fallbackModel?: string;
@@ -632,6 +650,10 @@ export type ServerMessage =
       networkAccessEnabled?: boolean;
       webSearchMode?: string;
       additionalWritableRoots?: string[];
+      /** omp thinking level (`init`, `omp_settings`, `session_created`). */
+      thinkingLevel?: OmpThinkingLevel;
+      /** Thinking levels offered by the omp model (`init`, `omp_settings`). */
+      thinkingLevels?: OmpThinkingLevel[];
       clearContext?: boolean;
       sourceSessionId?: string;
       resumeRequestId?: string;
@@ -1158,7 +1180,7 @@ export function normalizeToolResultContent(
   return typeof content === "string" ? content : String(content ?? "");
 }
 
-const PROVIDERS = ["claude", "codex"] as const;
+const PROVIDERS: readonly Provider[] = ["claude", "codex", "omp"];
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const PERMISSION_MODES = [
   "default",
@@ -1231,6 +1253,7 @@ function hasValidSessionOptions(msg: Record<string, unknown>): boolean {
     isOptionalString(msg.sandboxMode) &&
     isOptionalString(msg.model) &&
     isOptionalEnum(msg.effort, CLAUDE_EFFORTS) &&
+    isOptionalEnum(msg.thinkingLevel, OMP_THINKING_LEVELS) &&
     (msg.maxTurns === undefined ||
       (Number.isInteger(msg.maxTurns) && Number(msg.maxTurns) >= 1)) &&
     (msg.maxBudgetUsd === undefined ||
@@ -1362,6 +1385,9 @@ export function parseClientMessage(data: string): ClientMessage | null {
           )
             return null;
         }
+        // Unknown provider names are ignored by the Bridge (a newer app may
+        // know more providers); only the shape is validated here.
+        if (!isOptionalStringArray(msg.supportedProviders)) return null;
         break;
       case "start":
         if (
@@ -1497,6 +1523,16 @@ export function parseClientMessage(data: string): ClientMessage | null {
         if (msg.sessionId !== undefined && typeof msg.sessionId !== "string")
           return null;
         break;
+      case "set_omp_model": {
+        if (!isNonEmptyString(msg.sessionId)) return null;
+        if (msg.model !== undefined && !isNonEmptyString(msg.model))
+          return null;
+        if (!isOptionalEnum(msg.thinkingLevel, OMP_THINKING_LEVELS))
+          return null;
+        if (msg.model === undefined && msg.thinkingLevel === undefined)
+          return null;
+        break;
+      }
       case "set_codex_speed":
         if (
           typeof msg.serviceTier !== "string" ||
@@ -1586,12 +1622,7 @@ export function parseClientMessage(data: string): ClientMessage | null {
           typeof msg.sessionId !== "string"
         )
           return null;
-        if (
-          msg.provider !== undefined &&
-          msg.provider !== "claude" &&
-          msg.provider !== "codex"
-        )
-          return null;
+        if (!isOptionalEnum(msg.provider, PROVIDERS)) return null;
         break;
       case "list_recent_sessions":
         if (
@@ -1641,12 +1672,16 @@ export function parseClientMessage(data: string): ClientMessage | null {
             msg.requestId.length > RECENT_SESSIONS_MAX_REQUEST_ID_LENGTH)
         )
           return null;
-        if (
-          msg.provider !== undefined &&
-          msg.provider !== "claude" &&
-          msg.provider !== "codex"
-        )
-          return null;
+        if (!isOptionalEnum(msg.provider, PROVIDERS)) return null;
+        if (msg.providers !== undefined) {
+          if (
+            !Array.isArray(msg.providers) ||
+            msg.providers.length === 0 ||
+            !msg.providers.every((provider) => isEnum(provider, PROVIDERS)) ||
+            msg.provider !== undefined
+          )
+            return null;
+        }
         if (
           msg.namedOnly !== undefined &&
           typeof msg.namedOnly !== "boolean"
@@ -2155,7 +2190,7 @@ export function parseClientMessage(data: string): ClientMessage | null {
         break;
       case "archive_session":
         if (typeof msg.sessionId !== "string") return null;
-        if (msg.provider !== "claude" && msg.provider !== "codex") return null;
+        if (!isEnum(msg.provider, PROVIDERS)) return null;
         if (typeof msg.projectPath !== "string") return null;
         break;
       default:

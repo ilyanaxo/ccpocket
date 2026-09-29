@@ -48,6 +48,8 @@ export interface OmpWriterRegistry {
   waitForRelease(file: string, timeoutMs?: number): Promise<void>;
   /** The live or reserved writer of an omp session, if any. */
   ownerBySessionId(sessionId: string): { owner: string; file: string } | undefined;
+  /** Every file currently held by a writer (doctor reports). */
+  files(): Array<{ file: string; owner: string; sessionId: string }>;
 }
 
 const DEFAULT_RELEASE_TIMEOUT_MS = 15_000;
@@ -122,6 +124,14 @@ class DefaultOmpWriterRegistry implements OmpWriterRegistry {
       }
     }
     return undefined;
+  }
+
+  files(): Array<{ file: string; owner: string; sessionId: string }> {
+    return [...this.entries].map(([file, registration]) => ({
+      file,
+      owner: registration.owner,
+      sessionId: registration.sessionId,
+    }));
   }
 
   /** Add a registration for `key`; the returned function ends it (idempotent). */

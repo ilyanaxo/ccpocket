@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProcessStatus, ServerMessage } from "./parser.js";
 import { pathToSlug } from "./sessions-index.js";
+import { readFileSync as readFileSyncFromFs } from "node:fs";
 
 const { codexInstances, sdkInstances, fakeDirs, fakeFiles } = vi.hoisted(
   () => ({
@@ -28,6 +29,61 @@ const { codexInstances, sdkInstances, fakeDirs, fakeFiles } = vi.hoisted(
     fakeFiles: new Map<string, string>(),
   }),
 );
+
+const { ompInstances, generateAutoRenameNameMock } = vi.hoisted(() => ({
+  ompInstances: [] as FakeOmpProcess[],
+  generateAutoRenameNameMock: vi.fn(),
+}));
+
+interface FakeOmpProcess extends EventEmitter {
+  isWaitingForInput: boolean;
+  isBusy: boolean;
+  isAlive: boolean;
+  executionMode: string;
+  permissionMode: string;
+  settings: { model?: string; thinkingLevel?: string };
+  thinkingLevels: string[];
+  start: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+  sendInput: ReturnType<typeof vi.fn>;
+  steer: ReturnType<typeof vi.fn>;
+  setSessionName: ReturnType<typeof vi.fn>;
+  getPendingPermission: ReturnType<typeof vi.fn>;
+}
+
+vi.mock("./omp-process.js", () => ({
+  OmpProcess: class MockOmpProcess extends EventEmitter {
+    public isWaitingForInput = true;
+    public isBusy = false;
+    public isAlive = true;
+    public executionMode = "default";
+    public permissionMode = "default";
+    public settings = {};
+    public thinkingLevels = ["off"];
+    public start = vi.fn((_: string, options?: { executionMode?: string }) => {
+      if (options?.executionMode) this.executionMode = options.executionMode;
+      this.permissionMode =
+        this.executionMode === "fullAccess"
+          ? "bypassPermissions"
+          : this.executionMode;
+    });
+    public stop = vi.fn(() => {});
+    public sendInput = vi.fn(() => true);
+    public steer = vi.fn(async () => {});
+    public setSessionName = vi.fn(async () => {});
+    public getPendingPermission = vi.fn(() => undefined);
+
+    constructor() {
+      super();
+      ompInstances.push(this as unknown as FakeOmpProcess);
+    }
+  },
+}));
+
+vi.mock("./auto-rename.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./auto-rename.js")>()),
+  generateAutoRenameName: generateAutoRenameNameMock,
+}));
 
 vi.mock("node:fs", () => {
   const normalize = (value: unknown): string =>
@@ -1639,5 +1695,438 @@ describe("SessionManager claude UUID backfill", () => {
         ? userInput.userMessageUuid
         : undefined,
     ).toBe("user-uuid-fallback");
+  });
+});
+
+
+describe("SessionManager omp path", () => {
+  beforeEach(() => {
+    ompInstances.length = 0;
+    generateAutoRenameNameMock.mockReset();
+  });
+
+  function createOmp(
+    manager: SessionManager,
+    ompOptions: Record<string, unknown> = {},
+    options: { autoRename?: boolean; pastMessages?: unknown[] } = {},
+  ): { sessionId: string; proc: FakeOmpProcess } {
+    const sessionId = manager.create(
+      "/tmp/project-omp",
+      options.autoRename ? { autoRename: true } : undefined,
+      options.pastMessages,
+      undefined,
+      "omp",
+      undefined,
+      { ompOptions: { executionMode: "acceptEdits", ...ompOptions } },
+    );
+    return { sessionId, proc: ompInstances.at(-1)! };
+  }
+
+  function userInputs(forwarded: ServerMessage[]) {
+    return forwarded.filter(
+      (msg): msg is Extract<ServerMessage, { type: "user_input" }> =>
+        msg.type === "user_input",
+    );
+  }
+
+  it("prefills the omp session id and saves the worktree mapping before start", () => {
+    const worktreeStore = { set: vi.fn(), get: vi.fn() };
+    const manager = new SessionManager(
+      () => {},
+      undefined,
+      undefined,
+      undefined,
+      worktreeStore as never,
+    );
+    const sessionId = manager.create(
+      "/tmp/project-omp",
+      undefined,
+      undefined,
+      { existingWorktreePath: "/tmp/project-omp-wt", worktreeBranch: "fix" },
+      "omp",
+      undefined,
+      {
+        ompOptions: {
+          executionMode: "default",
+          cwd: "/tmp/recorded",
+          resumeSessionFile: "/tmp/store/2026_omp-1.jsonl",
+          resumeSessionId: "omp-1",
+          entryCursor: "e9",
+          model: "baseten/zai-org/GLM-5.3-Fast",
+          thinkingLevel: "high",
+        },
+      },
+    );
+    const proc = ompInstances[0];
+    const session = manager.get(sessionId)!;
+
+    expect(session.claudeSessionId).toBe("omp-1");
+    expect(session.ompSettings).toEqual({
+      model: "baseten/zai-org/GLM-5.3-Fast",
+      thinkingLevel: "high",
+    });
+    expect(worktreeStore.set).toHaveBeenCalledWith("omp-1", {
+      worktreePath: "/tmp/project-omp-wt",
+      worktreeBranch: "fix",
+      projectPath: "/tmp/project-omp",
+    });
+    expect(worktreeStore.set.mock.invocationCallOrder[0]).toBeLessThan(
+      proc.start.mock.invocationCallOrder[0],
+    );
+    expect(proc.start).toHaveBeenCalledWith("/tmp/project-omp-wt", {
+      executionMode: "default",
+      cwd: "/tmp/recorded",
+      resumeSessionFile: "/tmp/store/2026_omp-1.jsonl",
+      resumeSessionId: "omp-1",
+      entryCursor: "e9",
+      model: "baseten/zai-org/GLM-5.3-Fast",
+      thinkingLevel: "high",
+      bridgeSessionId: sessionId,
+    });
+  });
+
+  it("clears autoRename on resume and keeps it for a new session", () => {
+    const manager = new SessionManager(() => {});
+    const fresh = createOmp(manager, {}, { autoRename: true });
+    const resumed = createOmp(
+      manager,
+      { resumeSessionFile: "/tmp/f.jsonl", resumeSessionId: "omp-9" },
+      { autoRename: true },
+    );
+    expect(manager.get(fresh.sessionId)?.autoRename).toBe(true);
+    expect(manager.get(resumed.sessionId)?.autoRename).toBe(false);
+  });
+
+  it("merges omp_settings into the session without appending it to history", () => {
+    const forwarded: ServerMessage[] = [];
+    const updated = vi.fn();
+    const manager = new SessionManager(
+      (_, msg) => forwarded.push(msg),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      updated,
+    );
+    const { sessionId, proc } = createOmp(manager, {
+      model: "a/one",
+      thinkingLevel: "high",
+    });
+    proc.emit("message", {
+      type: "system",
+      subtype: "omp_settings",
+      provider: "omp",
+      sessionId: "omp-7",
+      model: "b/two",
+      thinkingLevels: ["off"],
+    });
+
+    const session = manager.get(sessionId)!;
+    expect(session.ompSettings).toEqual({ model: "b/two" });
+    expect(session.ompThinkingLevels).toEqual(["off"]);
+    expect(session.claudeSessionId).toBe("omp-7");
+    expect(session.history.some((msg) => msg.type === "system")).toBe(false);
+    expect(forwarded).toContainEqual(
+      expect.objectContaining({ type: "system", subtype: "omp_settings" }),
+    );
+    expect(updated).toHaveBeenCalledWith(sessionId);
+    expect(manager.summary(sessionId)?.ompSettings).toEqual({ model: "b/two" });
+  });
+
+  it("reports omp modes and settings in the session summary", () => {
+    const manager = new SessionManager(() => {});
+    const { sessionId, proc } = createOmp(manager);
+    proc.emit("message", {
+      type: "system",
+      subtype: "init",
+      provider: "omp",
+      sessionId: "omp-3",
+      model: "baseten/zai-org/GLM-5.3-Fast",
+      thinkingLevel: "high",
+      thinkingLevels: ["off", "high", "max"],
+      executionMode: "acceptEdits",
+      permissionMode: "acceptEdits",
+    });
+
+    const summary = manager.summary(sessionId)!;
+    expect(summary).toMatchObject({
+      provider: "omp",
+      claudeSessionId: "omp-3",
+      permissionMode: "acceptEdits",
+      executionMode: "acceptEdits",
+      planMode: false,
+      ompSettings: {
+        model: "baseten/zai-org/GLM-5.3-Fast",
+        thinkingLevel: "high",
+      },
+    });
+    expect(summary.model).toBeUndefined();
+    expect(summary.codexSettings).toBeUndefined();
+    expect(summary.sandboxEnabled).toBeUndefined();
+  });
+
+  it("stores a name set inside omp", () => {
+    const updated = vi.fn();
+    const manager = new SessionManager(
+      () => {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      updated,
+    );
+    const { sessionId, proc } = createOmp(manager);
+    proc.emit("session_name", "Fix login");
+    expect(manager.get(sessionId)?.name).toBe("Fix login");
+    expect(updated).toHaveBeenCalledWith(sessionId);
+  });
+
+  it("drains a queued omp item at input_ready without a codex uuid and with its clientMessageId", () => {
+    const forwarded: ServerMessage[] = [];
+    const manager = new SessionManager((_, msg) => forwarded.push(msg));
+    const { sessionId, proc } = createOmp(manager);
+    proc.isWaitingForInput = false;
+    expect(
+      manager.queueCodexInput(sessionId, {
+        itemId: "q1",
+        text: "Next",
+        createdAt: "2026-09-28T00:00:00.000Z",
+        clientMessageId: "client-1",
+        imageCount: 1,
+        images: [{ base64: "aGk=", mimeType: "image/png" }],
+      }),
+    ).toBe(true);
+    expect(manager.summary(sessionId)?.queuedInput?.itemId).toBe("q1");
+
+    proc.isWaitingForInput = true;
+    proc.emit("input_ready");
+
+    expect(proc.sendInput).toHaveBeenCalledWith("Next", {
+      images: [{ base64: "aGk=", mimeType: "image/png" }],
+    });
+    const drained = userInputs(forwarded).at(-1)!;
+    expect(drained).toMatchObject({ text: "Next", clientMessageId: "client-1" });
+    expect(drained.userMessageUuid).toBeUndefined();
+    expect(manager.get(sessionId)?.codexQueuedInput).toBeUndefined();
+  });
+
+  it("steers a queued omp item only while busy and detaches it during the steer", async () => {
+    const forwarded: ServerMessage[] = [];
+    const manager = new SessionManager((_, msg) => forwarded.push(msg));
+    const { sessionId, proc } = createOmp(manager);
+    proc.isWaitingForInput = false;
+    proc.isBusy = true;
+    manager.queueCodexInput(sessionId, {
+      itemId: "q1",
+      text: "Also PINEAPPLE",
+      createdAt: "2026-09-28T00:00:00.000Z",
+      clientMessageId: "client-2",
+    });
+    let finishSteer!: () => void;
+    proc.steer.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishSteer = resolve)),
+    );
+
+    const steering = manager.steerCodexQueuedInput(sessionId, "q1");
+    // omp went idle while the steer was in flight: the drain must not send it.
+    proc.isWaitingForInput = true;
+    proc.isBusy = false;
+    proc.emit("input_ready");
+    expect(proc.sendInput).not.toHaveBeenCalled();
+    expect(manager.updateCodexQueuedInput(sessionId, "q1", "edited")).toBe(false);
+    expect(manager.cancelCodexQueuedInput(sessionId, "q1")).toBe(false);
+    finishSteer();
+
+    await expect(steering).resolves.toEqual({ ok: true });
+    expect(proc.steer).toHaveBeenCalledWith("Also PINEAPPLE", { images: undefined });
+    expect(proc.sendInput).not.toHaveBeenCalled();
+    const steered = userInputs(forwarded).filter((m) => m.text === "Also PINEAPPLE");
+    expect(steered).toHaveLength(1);
+    expect(steered[0].clientMessageId).toBe("client-2");
+    expect(steered[0].userMessageUuid).toBeUndefined();
+    expect(manager.get(sessionId)?.codexQueuedInput).toBeUndefined();
+    expect(manager.get(sessionId)?.steeringQueuedItemId).toBeUndefined();
+  });
+
+  it("keeps the item when the omp steer fails and drains it once omp is idle", async () => {
+    const manager = new SessionManager(() => {});
+    const { sessionId, proc } = createOmp(manager);
+    proc.isWaitingForInput = false;
+    proc.isBusy = true;
+    manager.queueCodexInput(sessionId, {
+      itemId: "q1",
+      text: "Later",
+      createdAt: "2026-09-28T00:00:00.000Z",
+    });
+    proc.steer.mockRejectedValueOnce(new Error("The omp process is not running."));
+
+    await expect(manager.steerCodexQueuedInput(sessionId, "q1")).resolves.toEqual({
+      ok: false,
+      error: "The omp process is not running.",
+    });
+    expect(manager.get(sessionId)?.codexQueuedInput?.text).toBe("Later");
+    expect(manager.get(sessionId)?.steeringQueuedItemId).toBeUndefined();
+    expect(proc.sendInput).not.toHaveBeenCalled();
+
+    proc.isWaitingForInput = true;
+    proc.isBusy = false;
+    proc.emit("input_ready");
+    expect(proc.sendInput).toHaveBeenCalledWith("Later", { images: undefined });
+  });
+
+  it("sends a queued omp item as a prompt when a steer is requested while idle", async () => {
+    const manager = new SessionManager(() => {});
+    const { sessionId, proc } = createOmp(manager);
+    proc.isWaitingForInput = false;
+    manager.queueCodexInput(sessionId, {
+      itemId: "q1",
+      text: "Now",
+      createdAt: "2026-09-28T00:00:00.000Z",
+    });
+    proc.isWaitingForInput = true;
+
+    await expect(manager.steerCodexQueuedInput(sessionId, "q1")).resolves.toEqual({
+      ok: true,
+    });
+    expect(proc.steer).not.toHaveBeenCalled();
+    expect(proc.sendInput).toHaveBeenCalledWith("Now", { images: undefined });
+  });
+
+  it("clears the omp queue when the process exits", () => {
+    const forwarded: ServerMessage[] = [];
+    const manager = new SessionManager((_, msg) => forwarded.push(msg));
+    const { sessionId, proc } = createOmp(manager);
+    proc.isWaitingForInput = false;
+    manager.queueCodexInput(sessionId, {
+      itemId: "q1",
+      text: "Pending",
+      createdAt: "2026-09-28T00:00:00.000Z",
+    });
+    proc.emit("exit", 1);
+    expect(manager.get(sessionId)?.codexQueuedInput).toBeUndefined();
+    expect(forwarded.at(-1)).toMatchObject({ type: "conversation_queue", items: [] });
+  });
+
+  it("backfills omp entry uuids monotonically without reusing past or assigned ids", () => {
+    const forwarded: ServerMessage[] = [];
+    const manager = new SessionManager((_, msg) => forwarded.push(msg));
+    const { sessionId, proc } = createOmp(
+      manager,
+      {},
+      {
+        pastMessages: [
+          { role: "user", uuid: "omp:entry:past-yes", content: "yes" },
+          { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        ],
+      },
+    );
+    for (const text of ["yes", "expanded", "yes", "done"]) {
+      manager.appendHistory(sessionId, {
+        type: "user_input",
+        text,
+        timestamp: "2026-09-28T00:00:00.000Z",
+      } as ServerMessage);
+    }
+
+    // The past "yes" is reported again (in-file history) and must be skipped;
+    // "expanded" never matches (omp expanded the prompt).
+    proc.emit("user_entries", [
+      { entryId: "past-yes", text: "yes" },
+      { entryId: "e1", text: "yes" },
+      { entryId: "e2", text: "yes" },
+    ]);
+    const history = userInputs(manager.get(sessionId)!.history);
+    expect(history.map((m) => m.userMessageUuid)).toEqual([
+      "omp:entry:e1",
+      undefined,
+      "omp:entry:e2",
+      undefined,
+    ]);
+
+    // An already assigned id is never reused; later entries continue after it.
+    proc.emit("user_entries", [
+      { entryId: "e2", text: "done" },
+      { entryId: "e3", text: "done" },
+    ]);
+    expect(userInputs(manager.get(sessionId)!.history).map((m) => m.userMessageUuid))
+      .toEqual(["omp:entry:e1", undefined, "omp:entry:e2", "omp:entry:e3"]);
+    // Each assignment is re-broadcast.
+    expect(
+      userInputs(forwarded)
+        .map((m) => m.userMessageUuid)
+        .filter(Boolean),
+    ).toEqual(["omp:entry:e1", "omp:entry:e2", "omp:entry:e3"]);
+  });
+
+  it("appends a Bridge user_input without merging it into an older same-text entry", () => {
+    const forwarded: ServerMessage[] = [];
+    const manager = new SessionManager((_, msg) => forwarded.push(msg));
+    const { sessionId } = createOmp(manager);
+    manager.appendHistory(sessionId, {
+      type: "user_input",
+      text: "not now",
+      timestamp: "2026-09-28T00:00:00.000Z",
+    } as ServerMessage);
+
+    manager.appendUserInput(sessionId, { text: "not now" });
+
+    expect(userInputs(manager.get(sessionId)!.history)).toHaveLength(2);
+    expect(userInputs(forwarded)).toHaveLength(1);
+    expect(manager.get(sessionId)!.ompAwaitingUserEntries).toHaveLength(2);
+  });
+
+  it("awaits the omp auto-rename with the session model and names the session in omp", async () => {
+    generateAutoRenameNameMock.mockResolvedValue("Fix login");
+    const updated = vi.fn();
+    const manager = new SessionManager(
+      () => {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      updated,
+    );
+    const { sessionId, proc } = createOmp(
+      manager,
+      { model: "baseten/zai-org/GLM-5.3-Fast" },
+      { autoRename: true },
+    );
+    manager.appendHistory(sessionId, {
+      type: "user_input",
+      text: "Fix the login redirect",
+    } as ServerMessage);
+    proc.emit("message", { type: "result", subtype: "success", sessionId: "omp-4" });
+
+    await vi.waitFor(() => expect(manager.get(sessionId)?.name).toBe("Fix login"));
+    expect(generateAutoRenameNameMock).toHaveBeenCalledWith({
+      provider: "omp",
+      projectPath: "/tmp/project-omp",
+      model: "baseten/zai-org/GLM-5.3-Fast",
+      transcript: { userText: "Fix the login redirect" },
+    });
+    expect(proc.setSessionName).toHaveBeenCalledWith("Fix login");
+    expect(updated).toHaveBeenCalledWith(sessionId);
+  });
+
+  it("does not scan Claude transcripts after an omp result", () => {
+    const manager = new SessionManager(() => {});
+    const { sessionId, proc } = createOmp(manager);
+    manager.get(sessionId)!.claudeSessionId = "omp-5";
+    const readFileSyncMock = vi.mocked(readFileSyncFromFs);
+    readFileSyncMock.mockClear();
+    proc.emit("message", { type: "result", subtype: "success", sessionId: "omp-5" });
+    expect(readFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects Claude-style file and conversation rewinds for omp", async () => {
+    const manager = new SessionManager(() => {});
+    const { sessionId } = createOmp(manager);
+    await expect(manager.rewindFiles(sessionId, "omp:entry:e1")).resolves.toEqual({
+      canRewind: false,
+      error: "omp only supports conversation rewind",
+    });
+    expect(() =>
+      manager.rewindConversation(sessionId, "omp:entry:e1", () => {}),
+    ).toThrow(/omp/);
   });
 });

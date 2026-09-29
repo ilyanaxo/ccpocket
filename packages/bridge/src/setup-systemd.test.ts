@@ -42,6 +42,18 @@ const originalBridgeEnv = {
   codexAppServerPort: process.env.BRIDGE_CODEX_APP_SERVER_PORT,
   codexAppServerUrl: process.env.BRIDGE_CODEX_APP_SERVER_URL,
 };
+const OMP_SERVICE_VARS = [
+  "BRIDGE_OMP_BIN",
+  "BRIDGE_OMP_ASSIST_MODEL",
+  "OMP_PROFILE",
+  "PI_PROFILE",
+  "PI_CONFIG_DIR",
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+] as const;
+const originalOmpEnv = Object.fromEntries(
+  OMP_SERVICE_VARS.map((name) => [name, process.env[name]]),
+);
 
 describe("setup-systemd", () => {
   const originalPlatform = process.platform;
@@ -145,6 +157,37 @@ describe("setup-systemd", () => {
 
       const content = mockWriteFileSync.mock.calls[0]![1] as string;
       expect(content).toContain("Environment=BRIDGE_ALLOW_CLAUDE_OAUTH=1");
+    });
+
+    it("persists the omp binary, assist model and session store variables that are set", () => {
+      process.env.BRIDGE_OMP_BIN = "/opt/omp/bin/omp";
+      process.env.BRIDGE_OMP_ASSIST_MODEL = "baseten/zai-org/GLM-5.3-Fast";
+      process.env.OMP_PROFILE = "";
+      process.env.PI_CONFIG_DIR = ".omp-work";
+      process.env.PI_CODING_AGENT_DIR = "/home/testuser/My Agent";
+
+      setupSystemd({});
+
+      const content = mockWriteFileSync.mock.calls[0]![1] as string;
+      expect(content).toContain("Environment=BRIDGE_OMP_BIN=/opt/omp/bin/omp");
+      expect(content).toContain(
+        "Environment=BRIDGE_OMP_ASSIST_MODEL=baseten/zai-org/GLM-5.3-Fast",
+      );
+      // A defined OMP_PROFILE wins over PI_PROFILE even when empty.
+      expect(content).toContain("Environment=OMP_PROFILE=\n");
+      expect(content).toContain("Environment=PI_CONFIG_DIR=.omp-work");
+      expect(content).toContain(
+        'Environment="PI_CODING_AGENT_DIR=/home/testuser/My Agent"',
+      );
+      expect(content).not.toContain("PI_PROFILE=");
+      expect(content).not.toContain("PI_CODING_AGENT_SESSION_DIR");
+    });
+
+    it("persists no omp variable that is not set", () => {
+      setupSystemd({});
+
+      const content = mockWriteFileSync.mock.calls[0]![1] as string;
+      for (const name of OMP_SERVICE_VARS) expect(content).not.toContain(name);
     });
 
     it("persists Codex assist environment overrides", () => {
@@ -391,6 +434,7 @@ describe("setup-systemd", () => {
 });
 
 function clearBridgeEnv(): void {
+  for (const name of OMP_SERVICE_VARS) delete process.env[name];
   delete process.env.BRIDGE_PORT;
   delete process.env.BRIDGE_ALLOWED_DIRS;
   delete process.env.BRIDGE_PUBLIC_WS_URL;
@@ -405,6 +449,7 @@ function clearBridgeEnv(): void {
 }
 
 function restoreBridgeEnv(): void {
+  for (const name of OMP_SERVICE_VARS) restoreEnvVar(name, originalOmpEnv[name]);
   restoreEnvVar("BRIDGE_PORT", originalBridgeEnv.port);
   restoreEnvVar("BRIDGE_ALLOWED_DIRS", originalBridgeEnv.allowedDirs);
   restoreEnvVar("BRIDGE_PUBLIC_WS_URL", originalBridgeEnv.publicWsUrl);

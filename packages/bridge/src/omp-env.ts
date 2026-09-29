@@ -54,6 +54,39 @@ export function missingSpawnCwd(err: unknown, cwd: string): string | null {
   return existsSync(cwd) ? null : cwd;
 }
 
+/**
+ * Variables `setup` persists into the service definition so the service
+ * resolves the same omp binary, assist model and session store as the shell
+ * that ran `setup` (docs/omp-integration.md §8.6).
+ */
+export const OMP_SERVICE_ENV_VARS = [
+  "BRIDGE_OMP_BIN",
+  "BRIDGE_OMP_ASSIST_MODEL",
+  "OMP_PROFILE",
+  "PI_PROFILE",
+  "PI_CONFIG_DIR",
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+] as const;
+
+/**
+ * The omp variables to persist, in `OMP_SERVICE_ENV_VARS` order. A set,
+ * non-empty value is kept; `OMP_PROFILE` is kept even when empty, because a
+ * defined `OMP_PROFILE` wins over `PI_PROFILE`.
+ */
+export function ompServiceEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  for (const name of OMP_SERVICE_ENV_VARS) {
+    const value = env[name];
+    if (value === undefined) continue;
+    if (value.trim() === "" && name !== "OMP_PROFILE") continue;
+    entries.push([name, value]);
+  }
+  return entries;
+}
+
 /** A copy of `env` without the terminal breadcrumb variables. */
 export function sanitizedOmpEnv(
   env: NodeJS.ProcessEnv = process.env,

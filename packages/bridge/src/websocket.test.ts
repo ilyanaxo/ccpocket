@@ -100,8 +100,34 @@ vi.mock("./git-operations.js", async () => {
   };
 });
 
+// No test in this file runs the real omp CLI.
+vi.mock("./omp-sessions.js", () => ({
+  findOmpSessionFile: vi.fn(async () => null),
+  getOmpSessionName: vi.fn(async () => null),
+  getOmpSessionSettings: vi.fn(async () => undefined),
+  listOmpModels: vi.fn(async () => ({ models: [], availability: "not_installed" })),
+  readOmpSessionHeader: vi.fn(async () => null),
+  renameOmpRecentSession: vi.fn(async () => false),
+}));
+
+vi.mock("./omp-print.js", () => ({
+  runOmpPrint: vi.fn(async () => ""),
+}));
+
+vi.mock("./omp-writers.js", () => ({
+  ompWriters: {
+    register: vi.fn(),
+    release: vi.fn(),
+    acquire: vi.fn(async () => ({ holdUntil: vi.fn(), release: vi.fn() })),
+    waitForRelease: vi.fn(async () => {}),
+    ownerBySessionId: vi.fn(() => undefined),
+  },
+}));
+
 vi.mock("./session.js", () => ({
   MAX_HISTORY_PER_SESSION: 100,
+  providerSupportsQueuedInput: (provider: string) =>
+    provider === "codex" || provider === "omp",
   SessionManager: class MockSessionManager {
     private sessions = new Map<string, any>();
     private seq = 0;
@@ -266,7 +292,7 @@ vi.mock("./session.js", () => ({
     async steerCodexQueuedInput(id: string, itemId: string) {
       const session = this.sessions.get(id);
       if (!session || session.provider !== "codex") {
-        return { ok: false, error: "No active Codex session." };
+        return { ok: false, error: "No active session with a message queue." };
       }
       const queued = session.codexQueuedInput;
       if (!queued || queued.itemId !== itemId) {
@@ -8390,6 +8416,71 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     bridge.close();
   });
 
+  it("formats the completion push duration from milliseconds as seconds", async () => {
+    const fetchMock = vi.fn(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const bridge = new BridgeWebSocketServer({
+      server: httpServer,
+      firebaseAuth: {
+        uid: "bridge-test",
+        getIdToken: vi.fn(async () => "mock-token"),
+        initialize: vi.fn(async () => {}),
+      } as any,
+    });
+    (bridge as any).tokenLocales.set("token-1", "en");
+    (bridge as any).broadcastSessionMessage("s-1", {
+      type: "result",
+      subtype: "success",
+      duration: 12345,
+      cost: 0.0045,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(payload.body).toBe("Session completed (12.3s, $0.0045)");
+
+    bridge.close();
+  });
+
+  it("names the omp agent in the default ask push body", async () => {
+    const fetchMock = vi.fn(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const bridge = new BridgeWebSocketServer({
+      server: httpServer,
+      firebaseAuth: {
+        uid: "bridge-test",
+        getIdToken: vi.fn(async () => "mock-token"),
+        initialize: vi.fn(async () => {}),
+      } as any,
+    });
+    const sessionId = (bridge as any).sessionManager.create(
+      "/tmp/project-omp",
+      undefined,
+      undefined,
+      undefined,
+      "omp",
+    );
+    (bridge as any).tokenLocales.set("token-1", "en");
+    (bridge as any).broadcastSessionMessage(sessionId, {
+      type: "permission_request",
+      toolUseId: "ask-1",
+      toolName: "AskUserQuestion",
+      input: { questions: [] },
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      eventType: "ask_user_question",
+      body: "omp is asking a question",
+      data: expect.objectContaining({ provider: "omp" }),
+    });
+
+    bridge.close();
+  });
+
   it("shares Goal policy with Push and uses distinct progress and completion copy", async () => {
     const fetchMock = vi.fn(async () => new Response("", { status: 200 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
@@ -8941,6 +9032,49 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     bridge.close();
   });
 
+  it("keeps the clientMessageId on a queued codex item", async () => {
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "start",
+        projectPath: "/tmp/project-codex",
+        provider: "codex",
+      },
+      ws,
+    );
+    await Promise.resolve();
+
+    const created = ws.send.mock.calls
+      .map((c: unknown[]) => JSON.parse(c[0] as string))
+      .find((m: any) => m.type === "system" && m.subtype === "session_created");
+    const sessionId = created.sessionId as string;
+    const session = (bridge as any).sessionManager.get(sessionId);
+    session.process.isWaitingForInput = false;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "input",
+        sessionId,
+        text: "while busy",
+        clientMessageId: "cm-codex-queued",
+      },
+      ws,
+    );
+
+    expect(session.codexQueuedInput).toMatchObject({
+      text: "while busy",
+      clientMessageId: "cm-codex-queued",
+    });
+    expect(session.codexQueuedInput.userMessageUuid).toMatch(/^codex:user-turn:/);
+
+    bridge.close();
+  });
+
   it("adds synthetic UUIDs to live codex user input", async () => {
     const bridge = new BridgeWebSocketServer({ server: httpServer });
     const ws = {
@@ -9331,6 +9465,64 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     bridge.close();
   });
 
+  it("rejects idle codex input while an earlier item still waits for its drain", async () => {
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "start",
+        projectPath: "/tmp/project-codex",
+        provider: "codex",
+      },
+      ws,
+    );
+    await Promise.resolve();
+
+    const created = ws.send.mock.calls
+      .map((c: unknown[]) => JSON.parse(c[0] as string))
+      .find((m: any) => m.type === "system" && m.subtype === "session_created");
+    const sessionId = created.sessionId as string;
+    const session = (bridge as any).sessionManager.get(sessionId);
+    // Codex is ready, but the drain of the queued item is still pending
+    // (deferred behind earlier process messages).
+    session.process.isWaitingForInput = true;
+    session.codexQueuedInput = {
+      itemId: "queued-1",
+      text: "already queued",
+      createdAt: new Date().toISOString(),
+    };
+
+    ws.send.mockClear();
+    (bridge as any).handleClientMessage(
+      {
+        type: "input",
+        sessionId,
+        text: "newer",
+        clientMessageId: "c-newer",
+      },
+      ws,
+    );
+
+    const sentMessages = ws.send.mock.calls.map((c: unknown[]) =>
+      JSON.parse(c[0] as string),
+    );
+    expect(sentMessages.at(-1)).toMatchObject({
+      type: "input_rejected",
+      sessionId,
+      clientMessageId: "c-newer",
+      reason: "Queue is full",
+    });
+    expect(sentMessages.some((m: any) => m.type === "input_ack")).toBe(false);
+    expect(session.history.some((m: any) => m.type === "user_input")).toBe(false);
+    expect(session.codexQueuedInput.text).toBe("already queued");
+
+    bridge.close();
+  });
+
   it("updates and cancels codex queued input", async () => {
     const bridge = new BridgeWebSocketServer({ server: httpServer });
     const ws = {
@@ -9541,7 +9733,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     const error = JSON.parse(ws.send.mock.calls.at(-1)?.[0] as string);
     expect(error).toMatchObject({
       type: "error",
-      message: "No active Codex session.",
+      message: "No active session with a message queue.",
     });
 
     bridge.close();
@@ -9934,7 +10126,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
       send: vi.fn(),
     } as any;
 
-    (bridge as any).handleClientMessage(
+    await (bridge as any).handleClientMessage(
       {
         type: "git_commit",
         projectPath: "/tmp/project-a",
@@ -9977,7 +10169,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     const sessionId = created.sessionId as string;
 
     ws.send.mockClear();
-    (bridge as any).handleClientMessage(
+    await (bridge as any).handleClientMessage(
       {
         type: "git_commit",
         sessionId,
@@ -9999,7 +10191,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
   });
 
   it("auto-generates commit message for claude session", async () => {
-    generateCommitMessageMock.mockReturnValue("feat: generated by claude");
+    generateCommitMessageMock.mockResolvedValue("feat: generated by claude");
     gitCommitMock.mockReturnValue({
       hash: "abc1234",
       message: "feat: generated by claude",
@@ -10027,7 +10219,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     const sessionId = created.sessionId as string;
 
     ws.send.mockClear();
-    (bridge as any).handleClientMessage(
+    await (bridge as any).handleClientMessage(
       {
         type: "git_commit",
         sessionId,
@@ -10277,7 +10469,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
   });
 
   it("auto-generates commit message for codex session", async () => {
-    generateCommitMessageMock.mockReturnValue("fix: generated by codex");
+    generateCommitMessageMock.mockResolvedValue("fix: generated by codex");
     gitCommitMock.mockReturnValue({
       hash: "def5678",
       message: "fix: generated by codex",
@@ -10306,7 +10498,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     const sessionId = created.sessionId as string;
 
     ws.send.mockClear();
-    (bridge as any).handleClientMessage(
+    await (bridge as any).handleClientMessage(
       {
         type: "git_commit",
         sessionId,

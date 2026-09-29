@@ -11,6 +11,7 @@ import { consumeFinderProof, verifyFinderSocketProof, revealInFinder } from "./f
 import {
   SessionManager,
   MAX_HISTORY_PER_SESSION,
+  providerSupportsQueuedInput,
   type HistoryEntry,
   type SessionInfo,
   type SessionSummary,
@@ -35,6 +36,31 @@ import {
   type CodexThreadSummary,
 } from "./codex-process.js";
 import { stopManagedCodexAppServers } from "./codex-transport.js";
+import { OmpProcess } from "./omp-process.js";
+import {
+  findOmpSessionFile,
+  getOmpSessionName,
+  getOmpSessionSettings,
+  listOmpModels,
+  readOmpSessionHeader,
+  renameOmpRecentSession,
+} from "./omp-sessions.js";
+import {
+  getOmpSessionHistory,
+  OmpHistoryTargetNotFoundError,
+  readOmpBlob,
+} from "./omp-history.js";
+import { ompWriters } from "./omp-writers.js";
+import {
+  isOmpThinkingLevel,
+  ompEntryIdFromUuid,
+  ompErrorCode,
+  type OmpAvailability,
+  type OmpExecutionMode,
+  type OmpImageRef,
+  type OmpModelInfo,
+  type OmpThinkingLevel,
+} from "./omp-types.js";
 import {
   parseClientMessage,
   type AssistantContent,
@@ -45,6 +71,7 @@ import {
   type ServerMessage,
 } from "./parser.js";
 import {
+  BRIDGE_PROTOCOL_CAPABILITIES,
   BRIDGE_PROTOCOL_MAX_VERSION,
   BRIDGE_PROTOCOL_MIN_VERSION,
   clientProtocolRange,
@@ -533,6 +560,64 @@ function deriveExecutionMode(params: {
   return "default";
 }
 
+/** How long a start or resume waits for the first omp model catalogue. */
+const OMP_MODEL_CACHE_WAIT_MS = 15_000;
+
+/**
+ * Client messages that only an omp-capable client may send. A client that did
+ * not declare `supportedProviders` containing `omp` gets `unsupported_message`
+ * for them (docs/omp-integration.md §9.5).
+ */
+function clientMessageNeedsOmp(msg: ClientMessage): boolean {
+  switch (msg.type) {
+    case "set_omp_model":
+      return true;
+    case "start":
+    case "resume_session":
+    case "resolve_session_link":
+    case "archive_session":
+    case "rename_session":
+      return msg.provider === "omp";
+    case "list_recent_sessions":
+      return msg.provider === "omp" || (msg.providers?.includes("omp") ?? false);
+    default:
+      return false;
+  }
+}
+
+/**
+ * omp execution mode of a start or resume request. omp has no plan or auto
+ * mode: those map to `default`, and `mapped` asks for the tip
+ * `omp_mode_mapped`. A valid `executionMode` wins over `permissionMode`
+ * (Claude semantics), so an old app's `permissionMode:"plan"` next to
+ * `executionMode:"default"` still reports the mapping.
+ */
+function ompModeFromRequest(msg: {
+  permissionMode?: string;
+  executionMode?: string;
+  planMode?: boolean;
+}): { executionMode: OmpExecutionMode; mapped: boolean } {
+  return {
+    executionMode: deriveExecutionMode({
+      provider: "omp",
+      permissionMode: msg.permissionMode,
+      executionMode: msg.executionMode,
+    }),
+    mapped:
+      msg.planMode === true ||
+      msg.permissionMode === "plan" ||
+      msg.permissionMode === "auto",
+  };
+}
+
+/** Providers a recent-sessions request asks for; undefined means all. */
+function recentRequestProviders(
+  msg: Extract<ClientMessage, { type: "list_recent_sessions" }>,
+): Provider[] | undefined {
+  if (msg.providers && msg.providers.length > 0) return [...new Set(msg.providers)];
+  return msg.provider ? [msg.provider] : undefined;
+}
+
 function derivePlanMode(params: {
   permissionMode?: string;
   planMode?: boolean;
@@ -874,6 +959,17 @@ export class BridgeWebSocketServer {
     Map<string, InputClientMessage[]>
   >();
   private resumeOperations = new Map<string, ResumeOperation>();
+  /** Clients whose `client_capabilities.supportedProviders` contains `omp`. */
+  private ompClients = new WeakSet<WebSocket>();
+  private ompModels: OmpModelInfo[] = [];
+  /** Undefined until the first `omp models --json` refresh finished. */
+  private ompAvailability: OmpAvailability | undefined;
+  private ompModelsRevision = 0;
+  private ompModelsRequest: Promise<void> | null = null;
+  /** `ompModelsRevision` included in the last `broadcastSessionList`. */
+  private broadcastOmpModelsRevision = 0;
+  /** Selectors reported by sessions but missing from the cache, refreshed once each. */
+  private ompUnknownSelectorsRefreshed = new Set<string>();
 
   constructor(options: BridgeServerOptions) {
     const {
@@ -1524,6 +1620,30 @@ export class BridgeWebSocketServer {
       ...(requestId ? { requestId } : {}),
     };
 
+    if (provider === "omp") {
+      // omp has no plan mode and no sandbox; model and thinking level come
+      // from the session (restored by omp on resume, OBSERVED P8).
+      const ompProcess =
+        session?.process instanceof OmpProcess ? session.process : undefined;
+      const ompExecutionMode = ompProcess?.executionMode;
+      if (!executionMode && ompExecutionMode) msg.executionMode = ompExecutionMode;
+      if (!permissionMode) {
+        msg.permissionMode =
+          ompProcess?.permissionMode ??
+          modesToLegacyPermissionMode(
+            "omp",
+            (msg.executionMode as OmpExecutionMode | undefined) ?? "default",
+            false,
+          );
+      }
+      msg.planMode = false;
+      delete msg.sandboxMode;
+      const ompSettings = session?.ompSettings ?? ompProcess?.settings;
+      if (ompSettings?.model) msg.model = ompSettings.model;
+      if (ompSettings?.thinkingLevel) msg.thinkingLevel = ompSettings.thinkingLevel;
+      if (session?.claudeSessionId) msg.claudeSessionId = session.claudeSessionId;
+    }
+
     if (provider === "codex" && derivedCodexSettings) {
       if (derivedCodexSettings.model !== undefined) {
         msg.model = derivedCodexSettings.model;
@@ -1842,9 +1962,12 @@ export class BridgeWebSocketServer {
     const historyMessages: ServerMessage[] = [];
 
     for (const raw of messages) {
-      const msg = raw as Record<string, unknown>;
+      const rawMsg = raw as Record<string, unknown>;
+      // omp blob references are resolved here and never sent to the client.
+      const { ompImages: _ompImages, ...cleanMsg } = rawMsg;
+      const msg = "ompImages" in rawMsg ? cleanMsg : rawMsg;
       if (msg.role === "user") {
-        const images = await this.registerPastUserMessageImages(session, msg);
+        const images = await this.registerPastUserMessageImages(session, rawMsg);
         pastMessages.push(
           images.length > 0
             ? {
@@ -1855,18 +1978,18 @@ export class BridgeWebSocketServer {
                     ? Math.max(msg.imageCount, images.length)
                     : images.length,
               }
-            : raw,
+            : msg,
         );
         continue;
       }
 
       if (msg.role !== "tool_result") {
-        pastMessages.push(raw);
+        pastMessages.push(msg);
         continue;
       }
 
       const content = typeof msg.content === "string" ? msg.content : "";
-      const images = await this.registerPastToolResultImages(session, msg);
+      const images = await this.registerPastToolResultImages(session, rawMsg);
 
       pastMessages.push({
         role: "tool_result",
@@ -2429,6 +2552,25 @@ export class BridgeWebSocketServer {
       : undefined;
   }
 
+  /** Register omp blob images (`ompImages` of a history message). */
+  private async registerOmpHistoryImages(
+    msg: Record<string, unknown>,
+  ): Promise<ImageRef[]> {
+    if (!this.imageStore || !Array.isArray(msg.ompImages)) return [];
+    const refs: ImageRef[] = [];
+    for (const image of msg.ompImages as OmpImageRef[]) {
+      if (!isRecord(image) || typeof image.blob !== "string") continue;
+      const blob = await readOmpBlob(image.blob);
+      if (!blob) continue;
+      const ref = this.imageStore.registerFromBase64(
+        blob.base64,
+        typeof image.mimeType === "string" ? image.mimeType : "image/png",
+      );
+      if (ref) refs.push(ref);
+    }
+    return refs;
+  }
+
   private async registerPastUserMessageImages(
     session: SessionInfo,
     msg: Record<string, unknown>,
@@ -2438,6 +2580,11 @@ export class BridgeWebSocketServer {
     const existingImages = Array.isArray(msg.images)
       ? (msg.images as ImageRef[])
       : [];
+    if (session.provider === "omp") {
+      // Images that only count are loaded lazily by get_message_images; the
+      // Claude/Codex store scan below never applies to omp.
+      return [...existingImages, ...(await this.registerOmpHistoryImages(msg))];
+    }
     const refs: ImageRef[] = [...existingImages];
 
     if (Array.isArray(msg.imagePaths)) {
@@ -2522,7 +2669,10 @@ export class BridgeWebSocketServer {
       }
     }
 
-    const refs: ImageRef[] = [...existingImages];
+    const refs: ImageRef[] = [
+      ...existingImages,
+      ...(await this.registerOmpHistoryImages(msg)),
+    ];
     if (paths.size > 0) {
       refs.push(
         ...(await this.imageStore.registerImages([...paths], session.projectPath)),
@@ -2757,6 +2907,7 @@ export class BridgeWebSocketServer {
     this.lastConnectMetadataRefreshAt = now;
     void this.refreshCodexMetadata();
     void this.refreshClaudeModels();
+    void this.refreshOmpModels();
   }
 
   private async handleClientMessage(
@@ -2788,6 +2939,24 @@ export class BridgeWebSocketServer {
         new Set(msg.supportedServerMessages ?? []),
       );
       this.sendPromptHistoryStatus(ws);
+      // The connect-time session_list treated this client as undeclared; a
+      // client that declares omp gets one that includes omp sessions and the
+      // omp model catalogue.
+      if (msg.supportedProviders?.includes("omp")) {
+        this.ompClients.add(ws);
+        this.sendSessionList(ws);
+      } else {
+        this.ompClients.delete(ws);
+      }
+      return;
+    }
+
+    if (clientMessageNeedsOmp(msg) && !this.ompClients.has(ws)) {
+      this.send(ws, {
+        type: "error",
+        errorCode: "unsupported_message",
+        message: msg.type,
+      });
       return;
     }
 
@@ -2844,6 +3013,10 @@ export class BridgeWebSocketServer {
             requestId: msg.requestId,
             path: msg.projectPath,
           });
+          break;
+        }
+        if (msg.provider === "omp") {
+          await this.startOmpSession(ws, msg, projectPath, resolvedWorkspace);
           break;
         }
         try {
@@ -3207,9 +3380,19 @@ export class BridgeWebSocketServer {
           break;
         }
 
+        if (session.process instanceof OmpProcess) {
+          this.handleOmpInput(ws, msg, session, session.process, {
+            images,
+            imageRefs,
+          });
+          break;
+        }
+
+        // An occupied slot counts as busy (the drain can wait behind earlier
+        // process messages), so a new input never overtakes the queued item.
         if (
           session.provider === "codex" &&
-          !session.process.isWaitingForInput
+          (!session.process.isWaitingForInput || session.codexQueuedInput)
         ) {
           if (session.codexQueuedInput) {
             this.send(ws, {
@@ -3226,6 +3409,7 @@ export class BridgeWebSocketServer {
             text,
             createdAt: new Date().toISOString(),
             userMessageUuid: nextCodexUserTurnUuid(session),
+            ...(clientMessageId ? { clientMessageId } : {}),
             ...(images.length > 0 ? { imageCount: images.length, images } : {}),
             ...(imageRefs ? { imageRefs } : {}),
             ...(codexSkills.length > 0 ? { skills: codexSkills } : {}),
@@ -3481,11 +3665,11 @@ export class BridgeWebSocketServer {
 
       case "update_queued_input": {
         const session = this.resolveSession(msg.sessionId);
-        if (!session || session.provider !== "codex") {
+        if (!session || !providerSupportsQueuedInput(session.provider)) {
           this.send(ws, {
             type: "error",
             sessionId: msg.sessionId,
-            message: "No active Codex session.",
+            message: "No active session with a message queue.",
           });
           return;
         }
@@ -3501,7 +3685,9 @@ export class BridgeWebSocketServer {
           session.id,
           msg.itemId,
           msg.text,
-          { skills: msg.skills ?? [], mentions: msg.mentions ?? [] },
+          session.provider === "codex"
+            ? { skills: msg.skills ?? [], mentions: msg.mentions ?? [] }
+            : undefined,
         );
         if (!success) {
           this.send(ws, {
@@ -3518,11 +3704,11 @@ export class BridgeWebSocketServer {
 
       case "cancel_queued_input": {
         const session = this.resolveSession(msg.sessionId);
-        if (!session || session.provider !== "codex") {
+        if (!session || !providerSupportsQueuedInput(session.provider)) {
           this.send(ws, {
             type: "error",
             sessionId: msg.sessionId,
-            message: "No active Codex session.",
+            message: "No active session with a message queue.",
           });
           return;
         }
@@ -3545,11 +3731,11 @@ export class BridgeWebSocketServer {
 
       case "steer_queued_input": {
         const session = this.resolveSession(msg.sessionId);
-        if (!session || session.provider !== "codex") {
+        if (!session || !providerSupportsQueuedInput(session.provider)) {
           this.send(ws, {
             type: "error",
             sessionId: msg.sessionId,
-            message: "No active Codex session.",
+            message: "No active session with a message queue.",
           });
           return;
         }
@@ -3690,6 +3876,10 @@ export class BridgeWebSocketServer {
             message: "No active session.",
           });
           return;
+        }
+        if (session.process instanceof OmpProcess) {
+          await this.setOmpPermissionMode(ws, msg, session, session.process);
+          break;
         }
         if (session.provider === "codex") {
           // Permission mode for Codex requires a session restart (like sandbox mode).
@@ -4146,6 +4336,11 @@ export class BridgeWebSocketServer {
         break;
       }
 
+      case "set_omp_model": {
+        await this.setOmpModel(ws, msg);
+        break;
+      }
+
       case "set_codex_speed": {
         const session = this.resolveSession(msg.sessionId);
         if (!session || session.provider !== "codex") {
@@ -4297,6 +4492,15 @@ export class BridgeWebSocketServer {
             message: `Invalid sandbox mode: ${msg.sandboxMode}`,
           });
           return;
+        }
+        if (session.provider === "omp") {
+          this.send(ws, {
+            type: "error",
+            sessionId: msg.sessionId,
+            message: "omp has no sandbox mode.",
+            errorCode: "omp_sandbox_unsupported",
+          });
+          break;
         }
 
         // ---- Claude sandbox toggle ----
@@ -4614,6 +4818,27 @@ export class BridgeWebSocketServer {
           this.sendToolActionError(ws, msg, "No active session.");
           return;
         }
+        if (session.process instanceof OmpProcess) {
+          if (msg.clearContext) {
+            // Clear & Accept recreates a Claude session; omp has no plan approval.
+            this.send(ws, {
+              type: "error",
+              sessionId: msg.sessionId,
+              toolUseId: msg.id,
+              message: "omp has no plan approval with a context reset.",
+              errorCode: "omp_mode_unsupported",
+            });
+            break;
+          }
+          if (!session.process.approve(msg.id)) {
+            this.sendToolActionError(
+              ws,
+              msg,
+              "No matching pending tool action.",
+            );
+          }
+          break;
+        }
         if (session.provider === "codex") {
           const handled = (session.process as CodexProcess).approve(msg.id);
           if (handled === false) {
@@ -4703,6 +4928,16 @@ export class BridgeWebSocketServer {
           this.sendToolActionError(ws, msg, "No active session.");
           return;
         }
+        if (session.process instanceof OmpProcess) {
+          if (!session.process.approveAlways(msg.id)) {
+            this.sendToolActionError(
+              ws,
+              msg,
+              "No matching pending tool action.",
+            );
+          }
+          break;
+        }
         if (session.provider === "codex") {
           const handled = (session.process as CodexProcess).approveAlways(
             msg.id,
@@ -4732,6 +4967,28 @@ export class BridgeWebSocketServer {
         if (!session) {
           this.sendToolActionError(ws, msg, "No active session.");
           return;
+        }
+        if (session.process instanceof OmpProcess) {
+          // Questions and dialogs are declined without a note; only an
+          // approval denial steers the note to omp.
+          const pending = session.process.getPendingPermission(msg.id);
+          const isApproval =
+            pending !== undefined && pending.toolName !== "AskUserQuestion";
+          if (!session.process.reject(msg.id, msg.message)) {
+            this.sendToolActionError(
+              ws,
+              msg,
+              "No matching pending tool action.",
+            );
+            break;
+          }
+          // The transcript shows the steered note as a user message of its
+          // own (never merged into an older one with the same text).
+          const note = msg.message?.trim();
+          if (isApproval && note) {
+            this.sessionManager.appendUserInput(session.id, { text: note });
+          }
+          break;
         }
         if (session.provider === "codex") {
           const handled = (session.process as CodexProcess).reject(
@@ -4766,6 +5023,16 @@ export class BridgeWebSocketServer {
         if (!session) {
           this.sendToolActionError(ws, msg, "No active session.");
           return;
+        }
+        if (session.process instanceof OmpProcess) {
+          if (!session.process.answer(msg.toolUseId, msg.result)) {
+            this.sendToolActionError(
+              ws,
+              msg,
+              "No matching pending tool action.",
+            );
+          }
+          break;
         }
         if (session.provider === "codex") {
           const handled = (session.process as CodexProcess).answer(
@@ -4890,6 +5157,8 @@ export class BridgeWebSocketServer {
           } as Record<string, unknown>);
           if (session.provider === "codex") {
             this.sendCodexCurrentSettings(ws, msg.sessionId, session);
+          } else if (session.provider === "omp") {
+            this.sendOmpCurrentSettings(ws, msg.sessionId, session);
           }
           this.send(ws, {
             type: "status",
@@ -4899,6 +5168,8 @@ export class BridgeWebSocketServer {
           if (session.provider === "codex") {
             this.sendCodexQueueState(ws, msg.sessionId, session);
             this.sendCodexGoalState(ws, msg.sessionId, session);
+          } else if (session.provider === "omp") {
+            this.sendCodexQueueState(ws, msg.sessionId, session);
           }
 
           this.sendCachedCommands(ws, msg.sessionId, session);
@@ -4934,13 +5205,20 @@ export class BridgeWebSocketServer {
 
       case "resolve_session_link": {
         const provider = msg.provider ?? "claude";
-        const activeSession = this.sessionManager
+        const visibleSessions = this.sessionManager
           .list()
-          .find(
+          .filter(
+            (session) => session.provider !== "omp" || this.ompClients.has(ws),
+          );
+        // A Bridge id identifies one live session whatever provider the link
+        // assumed (local notifications carry a bare id, which the app treats
+        // as Claude); provider session ids stay provider-scoped.
+        const activeSession =
+          visibleSessions.find((session) => session.id === msg.sessionId) ??
+          visibleSessions.find(
             (session) =>
               session.provider === provider &&
-              (session.id === msg.sessionId ||
-                session.claudeSessionId === msg.sessionId),
+              session.claudeSessionId === msg.sessionId,
           );
         if (activeSession) {
           this.send(ws, {
@@ -4949,7 +5227,7 @@ export class BridgeWebSocketServer {
             sourceSessionId: msg.sessionId,
             status: "live",
             bridgeSessionId: activeSession.id,
-            provider,
+            provider: activeSession.provider,
           });
           break;
         }
@@ -5067,6 +5345,10 @@ export class BridgeWebSocketServer {
             status: session.status,
             ...(result.kind === "snapshot" ? { reason: result.reason } : {}),
           } as ServerMessage);
+          if (session.provider === "omp") {
+            this.sendOmpCurrentSettings(ws, msg.sessionId, session);
+            this.sendCodexQueueState(ws, msg.sessionId, session);
+          }
         } else {
           this.send(ws, {
             type: "error",
@@ -5203,7 +5485,12 @@ export class BridgeWebSocketServer {
         if (!isProjectScopedRequest) {
           this.recentSessionsRequestIds.set(ws, requestId);
         }
-        this.listRecentSessionsCoalesced(msg)
+        // "All" for a client without omp support means Claude and Codex.
+        const recentRequest =
+          this.ompClients.has(ws) || msg.provider || msg.providers
+            ? msg
+            : { ...msg, providers: ["claude", "codex"] as Provider[] };
+        this.listRecentSessionsCoalesced(recentRequest)
           .then(({ sessions, hasMore }) => {
             // List refreshes supersede older list responses. Project responses
             // are correlated independently by requestId on the client.
@@ -5396,6 +5683,15 @@ export class BridgeWebSocketServer {
           ).catch((error) => {
             console.error("[workspace] Failed to persist resume assignment:", error);
           });
+        }
+        if (provider === "omp") {
+          await this.resumeOmpSession(ws, msg, {
+            resumeStartedAt,
+            resumeProjectPath,
+            resumeAdditionalRoots,
+            resolvedResumeWorkspace,
+          });
+          break;
         }
         const normalizedCodexPermissionsMode =
           provider === "codex"
@@ -6885,7 +7181,7 @@ export class BridgeWebSocketServer {
         try {
           const message =
             msg.autoGenerate === true
-              ? (() => {
+              ? await (async () => {
                   if (!msg.sessionId) {
                     throw new Error(
                       "git_commit with autoGenerate=true requires sessionId",
@@ -6911,7 +7207,9 @@ export class BridgeWebSocketServer {
                         ? session.process instanceof SdkProcess
                           ? session.process.model
                           : undefined
-                        : session.codexSettings?.model,
+                        : session.provider === "omp"
+                          ? session.ompSettings?.model
+                          : session.codexSettings?.model,
                   });
                 })()
               : msg.message ?? "";
@@ -7294,6 +7592,15 @@ export class BridgeWebSocketServer {
           });
           return;
         }
+        if (session.provider === "omp") {
+          this.send(ws, {
+            type: "rewind_preview",
+            sessionId: msg.sessionId,
+            canRewind: false,
+            error: "omp only supports conversation rewind",
+          });
+          return;
+        }
         this.sessionManager
           .rewindFiles(msg.sessionId, msg.targetUuid, true)
           .then((result) => {
@@ -7344,6 +7651,11 @@ export class BridgeWebSocketServer {
 
         if (session.provider === "codex") {
           this.rewindCodexConversation(ws, msg.sessionId, msg.targetUuid, msg.mode)
+            .catch(handleError);
+          break;
+        }
+        if (session.provider === "omp") {
+          this.rewindOmpConversation(ws, msg.sessionId, msg.targetUuid, msg.mode)
             .catch(handleError);
           break;
         }
@@ -7843,6 +8155,7 @@ export class BridgeWebSocketServer {
       sandboxMode: msg.sandboxMode,
       model: msg.model,
       effort: msg.effort,
+      thinkingLevel: msg.thinkingLevel,
       maxTurns: msg.maxTurns,
       maxBudgetUsd: msg.maxBudgetUsd,
       fallbackModel: msg.fallbackModel,
@@ -8135,6 +8448,9 @@ export class BridgeWebSocketServer {
         const names = await loadCodexSessionNames();
         const name = names.get(cliSessionId);
         if (name) session.name = name;
+      } else if (provider === "omp") {
+        const name = await getOmpSessionName(cliSessionId);
+        if (name) session.name = name;
       }
     } catch {
       // Non-critical: session works without name
@@ -8155,6 +8471,17 @@ export class BridgeWebSocketServer {
   ): Promise<void> {
     // 1. Try running session first
     const runningSession = this.sessionManager.get(sessionId);
+    if (runningSession?.provider === "omp") {
+      await this.renameOmpSession(ws, sessionId, name, {
+        session: runningSession,
+        ompSessionId: runningSession.claudeSessionId,
+        projectPath:
+          runningSession.ompCwd ??
+          runningSession.worktreePath ??
+          runningSession.projectPath,
+      });
+      return;
+    }
     if (runningSession) {
       this.sessionManager.renameSession(sessionId, name);
 
@@ -8202,6 +8529,19 @@ export class BridgeWebSocketServer {
       return;
     }
 
+    // omp: a session that is live in the Bridge is renamed through its
+    // process (one writer per file), a stopped one through a short omp run.
+    if (provider === "omp" && providerSessionId) {
+      await this.renameOmpSession(ws, sessionId, name, {
+        session:
+          this.liveOmpSession(providerSessionId) ??
+          this.exitedOmpSessions(providerSessionId)[0],
+        ompSessionId: providerSessionId,
+        projectPath,
+      });
+      return;
+    }
+
     // For Codex recent sessions, write directly to session_index.jsonl.
     if (provider === "codex" && providerSessionId) {
       const success = await renameCodexSession(providerSessionId, name);
@@ -8227,8 +8567,17 @@ export class BridgeWebSocketServer {
 
   private sendSessionList(ws: WebSocket): void {
     this.pruneDebugEvents();
+    this.send(ws, this.buildSessionListMessage(this.ompAvailability !== undefined));
+  }
+
+  /**
+   * `session_list` payload. The omp model fields are absent until the first
+   * catalogue refresh finished (the app then shows "loading", not "not
+   * installed"); they are stripped for clients that did not declare omp.
+   */
+  private buildSessionListMessage(includeOmpModels: boolean): Record<string, unknown> {
     const sessions = this.runtimeSessionsWithWorkspaces();
-    this.send(ws, {
+    return {
       type: "session_list",
       sessions,
       allowedDirs: this.allowedDirs,
@@ -8243,11 +8592,15 @@ export class BridgeWebSocketServer {
       bridgeVersion: getPackageVersion(),
       protocolVersion: BRIDGE_PROTOCOL_MAX_VERSION,
       minimumProtocolVersion: BRIDGE_PROTOCOL_MIN_VERSION,
-      protocolCapabilities: [
-        "project_request_correlation_v1",
-        "session_context_v1",
-      ],
-    });
+      protocolCapabilities: [...BRIDGE_PROTOCOL_CAPABILITIES],
+      ...(includeOmpModels && this.ompAvailability !== undefined
+        ? {
+            ompModels: this.ompModels,
+            ompAvailability: this.ompAvailability,
+            ompModelsRevision: this.ompModelsRevision,
+          }
+        : {}),
+    };
   }
 
   private sendPromptHistoryStatus(ws: WebSocket): void {
@@ -8270,27 +8623,16 @@ export class BridgeWebSocketServer {
   /** Broadcast session list to all connected clients. */
   private broadcastSessionList(): void {
     this.pruneDebugEvents();
-    const sessions = this.runtimeSessionsWithWorkspaces();
-    this.broadcast({
-      type: "session_list",
-      sessions,
-      allowedDirs: this.allowedDirs,
-      claudeModels: this.claudeModels,
-      claudeModelEfforts: this.claudeModelEfforts,
-      codexModels: this.codexModels,
-      codexModelReasoningEfforts: this.codexModelReasoningEfforts,
-      codexModelServiceTiers: this.codexModelServiceTiers,
-      codexProfiles: this.codexProfiles,
-      defaultCodexProfile: this.defaultCodexProfile,
-      codexAutoReviewDisabled: this.codexAutoReviewDisabled,
-      bridgeVersion: getPackageVersion(),
-      protocolVersion: BRIDGE_PROTOCOL_MAX_VERSION,
-      minimumProtocolVersion: BRIDGE_PROTOCOL_MIN_VERSION,
-      protocolCapabilities: [
-        "project_request_correlation_v1",
-        "session_context_v1",
-      ],
-    });
+    // The catalogue is large (hundreds of models); broadcasts carry it only
+    // when it changed since the previous broadcast. Clients keep their cache
+    // when the fields are absent.
+    const includeOmpModels =
+      this.ompAvailability !== undefined &&
+      this.ompModelsRevision !== this.broadcastOmpModelsRevision;
+    if (includeOmpModels) {
+      this.broadcastOmpModelsRevision = this.ompModelsRevision;
+    }
+    this.broadcast(this.buildSessionListMessage(includeOmpModels));
   }
 
   private runtimeSessionsWithWorkspaces(): Array<
@@ -8339,6 +8681,7 @@ export class BridgeWebSocketServer {
       for (const client of this.wss.clients) {
         if (client.readyState !== WebSocket.OPEN) continue;
         if (!this.shouldSendToClient(client, msg)) continue;
+        if (this.isOmpSessionHiddenFrom(client, sessionId)) continue;
         this.queueDeltaForClient(client, sessionId, msg.type, chunks);
       }
       return;
@@ -8466,6 +8809,7 @@ export class BridgeWebSocketServer {
 
   private trackSessionMessage(sessionId: string, msg: ServerMessage): void {
     this.maybeSendPushNotification(sessionId, msg);
+    this.noteOmpSessionModel(msg);
     this.recordDebugEvent(sessionId, {
       direction: "outgoing",
       channel: "session",
@@ -8565,14 +8909,17 @@ export class BridgeWebSocketServer {
     const offset = msg.offset ?? 0;
     const limit = msg.limit ?? 20;
     const requiredMatches = offset + limit + 1;
+    const providers = recentRequestProviders(msg);
     let filtered: unknown[];
-    if (msg.provider === "codex") {
+    if (providers?.length === 1 && providers[0] === "codex") {
       filtered = await this.listWorkspaceFilteredCodexSessions(
-        msg,
+        { ...msg, provider: "codex", providers: undefined },
         matchesWorkspace,
         requiredMatches,
       );
-    } else if (msg.provider === "claude") {
+    } else if (providers && !providers.includes("codex")) {
+      // Claude and/or omp: the filesystem index only. An omp request never
+      // merges Codex app-server threads.
       filtered = await this.listWorkspaceFilteredIndexedSessions(
         msg,
         matchesWorkspace,
@@ -8589,7 +8936,7 @@ export class BridgeWebSocketServer {
           requiredMatches,
         ),
         this.listWorkspaceFilteredCodexSessions(
-          { ...msg, provider: "codex" },
+          { ...msg, provider: "codex", providers: undefined },
           matchesWorkspace,
           requiredMatches,
         ),
@@ -8613,6 +8960,7 @@ export class BridgeWebSocketServer {
       // Project identity is authoritative. Do not pre-filter by the current
       // primary root: assignments may retain an older snapshot or worktree cwd.
       provider: msg.provider,
+      providers: msg.providers,
       namedOnly: msg.namedOnly,
       searchQuery: msg.searchQuery,
       archivedSessionIds: this.archiveStore.archivedIds(),
@@ -8640,7 +8988,7 @@ export class BridgeWebSocketServer {
         `[ws] Codex thread/list failed, falling back to rollout scan: ${err}`,
       );
       return this.listWorkspaceFilteredIndexedSessions(
-        { ...msg, provider: "codex" },
+        { ...msg, provider: "codex", providers: undefined },
         matchesWorkspace,
         limit,
       );
@@ -8702,11 +9050,16 @@ export class BridgeWebSocketServer {
   private async listRecentSessionsRaw(
     msg: Extract<ClientMessage, { type: "list_recent_sessions" }>,
   ): Promise<{ sessions: unknown[]; hasMore: boolean }> {
-    if (msg.provider === "codex") {
-      return this.listRecentCodexSessions(msg);
+    const providers = recentRequestProviders(msg);
+    if (providers?.length === 1 && providers[0] === "codex") {
+      return this.listRecentCodexSessions({
+        ...msg,
+        provider: "codex",
+        providers: undefined,
+      });
     }
 
-    if (!msg.provider) {
+    if (!providers || providers.includes("codex")) {
       return this.listRecentAllProviderSessions(msg);
     }
 
@@ -8715,6 +9068,7 @@ export class BridgeWebSocketServer {
       offset: msg.offset,
       projectPath: msg.projectPath,
       provider: msg.provider,
+      providers: msg.providers,
       namedOnly: msg.namedOnly,
       searchQuery: msg.searchQuery,
       archivedSessionIds: this.archiveStore.archivedIds(),
@@ -8728,7 +9082,7 @@ export class BridgeWebSocketServer {
     const providerSessionId = value.sessionId;
     const projectPath = value.projectPath;
     if (
-      (provider !== "claude" && provider !== "codex") ||
+      (provider !== "claude" && provider !== "codex" && provider !== "omp") ||
       typeof providerSessionId !== "string" ||
       typeof projectPath !== "string"
     ) {
@@ -8850,6 +9204,7 @@ export class BridgeWebSocketServer {
       projectId: msg.projectId ?? null,
       workspaceKind: msg.workspaceKind ?? null,
       provider: msg.provider ?? null,
+      providers: msg.providers ?? null,
       namedOnly: msg.namedOnly ?? null,
       searchQuery: msg.searchQuery ?? null,
     });
@@ -8879,6 +9234,7 @@ export class BridgeWebSocketServer {
         limit: sourceLimit,
         offset: 0,
         projectPath: msg.projectPath,
+        providers: msg.providers,
         namedOnly: msg.namedOnly,
         searchQuery: msg.searchQuery,
         archivedSessionIds: this.archiveStore.archivedIds(),
@@ -8886,6 +9242,7 @@ export class BridgeWebSocketServer {
       this.listRecentCodexSessions({
         ...msg,
         provider: "codex",
+        providers: undefined,
         limit: sourceLimit,
         offset: 0,
       }),
@@ -8997,6 +9354,1066 @@ export class BridgeWebSocketServer {
     } finally {
       if (!activeProcess) codexProcess.stop();
     }
+  }
+
+  // ---- omp (docs/omp-integration.md) ----
+
+  /**
+   * Refresh the omp model catalogue from `omp models --json`. Concurrent
+   * callers share one request; a failed refresh keeps the previous list.
+   */
+  private refreshOmpModels(): Promise<void> {
+    if (this.ompModelsRequest) return this.ompModelsRequest;
+    const request = (async () => {
+      const firstLoad = this.ompAvailability === undefined;
+      try {
+        const { models, availability } = await listOmpModels();
+        const changed =
+          availability !== this.ompAvailability ||
+          JSON.stringify(models) !== JSON.stringify(this.ompModels);
+        this.ompModels = models;
+        this.ompAvailability = availability;
+        if (changed) this.ompModelsRevision += 1;
+        if (firstLoad) {
+          // Before the first refresh the fields were absent; every client that
+          // declared omp gets them now.
+          for (const client of this.wss.clients) {
+            if (client.readyState === WebSocket.OPEN && this.ompClients.has(client)) {
+              this.sendSessionList(client);
+            }
+          }
+        } else if (changed) {
+          this.broadcastSessionList();
+        }
+      } catch (err) {
+        console.warn(
+          `[ws] Failed to refresh the omp model catalogue: ${errorMessageOf(err)}`,
+        );
+      }
+    })();
+    this.ompModelsRequest = request;
+    void request.finally(() => {
+      if (this.ompModelsRequest === request) this.ompModelsRequest = null;
+    });
+    return request;
+  }
+
+  /** Wait (at most 15 s) for the first catalogue when it was never loaded. */
+  private async ensureOmpModelsLoaded(): Promise<void> {
+    if (this.ompAvailability !== undefined) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.refreshOmpModels(),
+      new Promise<void>((resolveWait) => {
+        timer = setTimeout(resolveWait, OMP_MODEL_CACHE_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+  }
+
+  private ompModel(selector: string | undefined): OmpModelInfo | undefined {
+    if (!selector) return undefined;
+    return this.ompModels.find((model) => model.selector === selector);
+  }
+
+  /** Refresh once per selector a session reports but the catalogue lacks. */
+  private noteOmpSessionModel(msg: ServerMessage): void {
+    if (msg.type !== "system" || msg.provider !== "omp") return;
+    if (msg.subtype !== "init" && msg.subtype !== "omp_settings") return;
+    const selector = msg.model;
+    if (!selector || this.ompAvailability === undefined) return;
+    if (this.ompModel(selector) || this.ompUnknownSelectorsRefreshed.has(selector)) {
+      return;
+    }
+    this.ompUnknownSelectorsRefreshed.add(selector);
+    void this.refreshOmpModels();
+  }
+
+  /**
+   * Keep only a model the catalogue lists (`--model` fuzzy-matches, so a
+   * Claude model name would select an unrelated model) and a thinking level
+   * the effective model offers. Without a known model the level is kept:
+   * omp maps an unsupported level itself and reports the result.
+   */
+  private async sanitizeOmpModelRequest(params: {
+    model?: string;
+    thinkingLevel?: string;
+    fallbackModel?: string;
+  }): Promise<{
+    model?: string;
+    thinkingLevel?: OmpThinkingLevel;
+    modelIgnored: boolean;
+  }> {
+    const requestedModel = params.model?.trim();
+    const effectiveModelName = requestedModel || params.fallbackModel;
+    if (effectiveModelName) await this.ensureOmpModelsLoaded();
+    let model: string | undefined;
+    let modelIgnored = false;
+    if (requestedModel) {
+      if (this.ompModel(requestedModel)) model = requestedModel;
+      else modelIgnored = true;
+    }
+    let thinkingLevel: OmpThinkingLevel | undefined;
+    if (isOmpThinkingLevel(params.thinkingLevel)) {
+      const effectiveModel = model ?? params.fallbackModel;
+      if (!effectiveModel) {
+        thinkingLevel = params.thinkingLevel;
+      } else if (
+        this.ompModel(effectiveModel)?.thinkingLevels.includes(params.thinkingLevel)
+      ) {
+        thinkingLevel = params.thinkingLevel;
+      }
+    }
+    return {
+      ...(model ? { model } : {}),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+      modelIgnored,
+    };
+  }
+
+  /** `system/omp_settings` snapshot for get_history and history deltas. */
+  private sendOmpCurrentSettings(
+    ws: WebSocket,
+    sessionId: string,
+    session: SessionInfo,
+  ): void {
+    const process = session.process instanceof OmpProcess ? session.process : undefined;
+    const settings = session.ompSettings ?? process?.settings ?? {};
+    this.send(ws, {
+      type: "system",
+      subtype: "omp_settings",
+      sessionId,
+      provider: "omp",
+      ...(settings.model ? { model: settings.model } : {}),
+      ...(settings.thinkingLevel ? { thinkingLevel: settings.thinkingLevel } : {}),
+      thinkingLevels: session.ompThinkingLevels ?? process?.thinkingLevels ?? ["off"],
+    });
+  }
+
+  private async startOmpSession(
+    ws: WebSocket,
+    msg: Extract<ClientMessage, { type: "start" }>,
+    projectPath: string,
+    resolvedWorkspace: ResolvedWorkspace | undefined,
+  ): Promise<void> {
+    try {
+      const { executionMode, mapped } = ompModeFromRequest(msg);
+      const additionalRoots = this.normalizeAdditionalWritableRoots(
+        resolvedWorkspace?.rootPaths.slice(1) ?? msg.additionalWritableRoots,
+        projectPath,
+      );
+      if (additionalRoots.deniedRoot) {
+        this.send(ws, {
+          ...this.buildPathNotAllowedError(additionalRoots.deniedRoot),
+          requestId: msg.requestId,
+          path: projectPath,
+        });
+        return;
+      }
+      const { model, thinkingLevel, modelIgnored } =
+        await this.sanitizeOmpModelRequest({
+          model: msg.model,
+          thinkingLevel: msg.thinkingLevel,
+        });
+      console.log(
+        `[ws] start(omp): execution=${executionMode} model=${model ?? "default"} thinking=${thinkingLevel ?? "default"}`,
+      );
+      const sessionId = this.sessionManager.create(
+        projectPath,
+        { autoRename: msg.autoRename },
+        undefined,
+        {
+          useWorktree: msg.useWorktree,
+          worktreeBranch: msg.worktreeBranch,
+          existingWorktreePath: msg.existingWorktreePath,
+        },
+        "omp",
+        undefined,
+        {
+          // Start failures (omp_cli_not_found, omp_start_failed, …) arrive as
+          // session messages; they follow session_created.
+          deferProcessMessages: true,
+          ompOptions: {
+            executionMode,
+            ...(model ? { model } : {}),
+            ...(thinkingLevel ? { thinkingLevel } : {}),
+            ...(additionalRoots.roots
+              ? { additionalDirectories: additionalRoots.roots }
+              : {}),
+          },
+        },
+      );
+      const createdSession = this.sessionManager.get(sessionId);
+      if (resolvedWorkspace) {
+        this.pendingSessionWorkspaces.set(sessionId, resolvedWorkspace);
+        void this.persistPendingSessionWorkspace(sessionId);
+      }
+      const cached = this.sessionManager.getCachedCommands(
+        "omp",
+        createdSession?.worktreePath ?? projectPath,
+      );
+      this.send(
+        ws,
+        this.buildSessionCreatedMessage({
+          sessionId,
+          provider: "omp",
+          projectPath,
+          session: createdSession,
+          executionMode,
+          planMode: false,
+          requestId: msg.requestId,
+          ...(cached ? { slashCommands: cached.slashCommands } : {}),
+        }),
+      );
+      this.sessionManager.releaseDeferredProcessMessages(sessionId);
+      this.broadcastSessionList();
+      void this.refreshOmpModels();
+      if (modelIgnored) this.sendTip(ws, sessionId, "omp_model_ignored", createdSession);
+      if (mapped) this.sendTip(ws, sessionId, "omp_mode_mapped", createdSession);
+      if (createdSession && !createdSession.gitBranch) {
+        this.sendTip(ws, sessionId, "git_not_available", createdSession);
+      }
+      this.debugEvents.set(sessionId, []);
+      this.recordDebugEvent(sessionId, {
+        direction: "internal",
+        channel: "bridge",
+        type: "session_created",
+        detail: `provider=omp projectPath=${projectPath}`,
+      });
+      this.recordingStore?.saveMeta(sessionId, {
+        bridgeSessionId: sessionId,
+        projectPath,
+        ...(resolvedWorkspace?.projectId
+          ? { projectId: resolvedWorkspace.projectId }
+          : {}),
+        ...(resolvedWorkspace?.projectName
+          ? { projectName: resolvedWorkspace.projectName }
+          : {}),
+        createdAt: new Date().toISOString(),
+      });
+      if (!resolvedWorkspace) {
+        this.projectHistory?.addProject(projectPath);
+      }
+    } catch (err) {
+      console.error(`[ws] Failed to start omp session:`, err);
+      this.send(ws, {
+        type: "error",
+        requestId: msg.requestId,
+        path: msg.projectPath,
+        errorCode: ompErrorCode(err) ?? "omp_start_failed",
+        message: `Failed to start session: ${errorMessageOf(err)}`,
+      });
+    }
+  }
+
+  /**
+   * input for omp (§5.1, §5.2): idle input is appended and sent as a prompt;
+   * input while omp is busy or restarting goes to the Bridge's 1-slot queue.
+   */
+  private handleOmpInput(
+    ws: WebSocket,
+    msg: InputClientMessage,
+    session: SessionInfo,
+    process: OmpProcess,
+    payload: {
+      images: Array<{ base64: string; mimeType: string }>;
+      imageRefs?: ImageRef[];
+    },
+  ): void {
+    const { text, clientMessageId } = msg;
+    const { images, imageRefs } = payload;
+    if (!process.isAlive) {
+      this.send(ws, {
+        type: "input_rejected",
+        sessionId: session.id,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        reason: "omp_process_exited",
+      });
+      this.send(ws, {
+        type: "error",
+        sessionId: session.id,
+        errorCode: "omp_process_exited",
+        message: "The omp process is not running. Resume the session to continue.",
+      });
+      return;
+    }
+    const persistImages = (): void => {
+      if (images.length === 0 || !this.galleryStore || !session.projectPath) {
+        return;
+      }
+      for (const img of images) {
+        this.galleryStore
+          .addImageFromBase64(img.base64, img.mimeType, session.projectPath, session.id)
+          .catch((err) => {
+            console.warn(`[ws] Failed to persist image to gallery: ${err}`);
+          });
+      }
+    };
+
+    // An occupied slot counts as busy: omp can be idle while the queued item
+    // still waits for its drain (deferred behind earlier process messages, a
+    // model change, an in-flight steer), and a new input must not overtake it.
+    if (!process.isWaitingForInput || session.codexQueuedInput) {
+      // Busy, or restarting for an approval-mode change.
+      const queued =
+        !session.codexQueuedInput &&
+        this.sessionManager.queueCodexInput(session.id, {
+          itemId: randomUUID(),
+          text,
+          createdAt: new Date().toISOString(),
+          ...(clientMessageId ? { clientMessageId } : {}),
+          ...(images.length > 0 ? { imageCount: images.length, images } : {}),
+          ...(imageRefs ? { imageRefs } : {}),
+        });
+      if (!queued) {
+        this.send(ws, {
+          type: "input_rejected",
+          sessionId: session.id,
+          ...(clientMessageId ? { clientMessageId } : {}),
+          reason: "Queue is full",
+        });
+        return;
+      }
+      persistImages();
+      this.send(ws, {
+        type: "input_ack",
+        sessionId: session.id,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        acceptedSeq: session.historyRevision,
+        queued: true,
+      });
+      this.broadcastSessionList();
+      return;
+    }
+
+    // No synthetic uuid: the omp entry id is backfilled after the run (§6.6).
+    const userEntry = this.sessionManager.appendHistory(session.id, {
+      type: "user_input",
+      text,
+      ...(clientMessageId ? { clientMessageId } : {}),
+      timestamp: new Date().toISOString(),
+      ...(images.length > 0 ? { imageCount: images.length } : {}),
+      ...(imageRefs ? { images: imageRefs } : {}),
+    } as ServerMessage);
+    const acceptedSeq = userEntry?.seq ?? session.historyRevision;
+    if (userEntry) {
+      this.broadcastSessionMessage(
+        session.id,
+        {
+          ...userEntry.message,
+          historySeq: acceptedSeq,
+        } as ServerMessage & { historySeq: number },
+        ws,
+      );
+    }
+    persistImages();
+    this.send(ws, {
+      type: "input_ack",
+      sessionId: session.id,
+      ...(clientMessageId ? { clientMessageId } : {}),
+      acceptedSeq,
+      queued: false,
+    });
+
+    if (images.length > 0) {
+      process.sendInput(text, { images });
+    } else if (msg.imageId && this.galleryStore) {
+      this.galleryStore
+        .getImageAsBase64(msg.imageId)
+        .then((imageData) => {
+          if (!imageData) console.warn(`[ws] Image not found: ${msg.imageId}`);
+          process.sendInput(text, imageData ? { images: [imageData] } : {});
+        })
+        .catch((err) => {
+          console.error(`[ws] Failed to load image: ${err}`);
+          process.sendInput(text);
+        });
+    } else {
+      process.sendInput(text);
+    }
+  }
+
+  /**
+   * set_permission_mode for omp (§7.3). omp has no RPC for the approval
+   * mode: the process respawns with `--resume` once it is idle and settled.
+   */
+  private async setOmpPermissionMode(
+    ws: WebSocket,
+    msg: Extract<ClientMessage, { type: "set_permission_mode" }>,
+    session: SessionInfo,
+    process: OmpProcess,
+  ): Promise<void> {
+    if (msg.mode === "plan" || msg.mode === "auto" || msg.planMode === true) {
+      this.send(ws, {
+        type: "error",
+        sessionId: session.id,
+        message: `omp has no ${msg.planMode === true ? "plan" : msg.mode} mode.`,
+        errorCode: "omp_mode_unsupported",
+      });
+      return;
+    }
+    const executionMode = deriveExecutionMode({
+      provider: "omp",
+      permissionMode: msg.mode,
+      executionMode: msg.executionMode,
+    });
+    try {
+      const { applied } = await process.setApprovalMode(executionMode);
+      session.lastActivityAt = new Date();
+      console.log(
+        `[ws] set_permission_mode(omp): execution=${executionMode} applied=${applied}`,
+      );
+      // system/set_permission_mode follows from the process once the
+      // respawn finished; only the Bridge knows whether it has to wait.
+      if (applied === "deferred") {
+        this.sendTip(ws, session.id, "omp_change_deferred", session);
+      }
+    } catch (err) {
+      this.send(ws, {
+        type: "error",
+        sessionId: session.id,
+        message: `Failed to change the omp approval mode: ${errorMessageOf(err)}`,
+        errorCode: "omp_respawn_failed",
+      });
+    }
+  }
+
+  /** set_omp_model (§7.2): validated against the catalogue, applied at idle. */
+  private async setOmpModel(
+    ws: WebSocket,
+    msg: Extract<ClientMessage, { type: "set_omp_model" }>,
+  ): Promise<void> {
+    const session = this.sessionManager.get(msg.sessionId);
+    if (!session) {
+      this.send(ws, {
+        type: "error",
+        sessionId: msg.sessionId,
+        message: "No active session.",
+      });
+      return;
+    }
+    if (!(session.process instanceof OmpProcess)) {
+      this.send(ws, {
+        type: "error",
+        sessionId: msg.sessionId,
+        message: "Model switching with set_omp_model is only supported for omp sessions.",
+        errorCode: "set_omp_model_unsupported",
+      });
+      return;
+    }
+    const process = session.process;
+    const rejectChange = (message: string): void => {
+      this.send(ws, {
+        type: "error",
+        sessionId: msg.sessionId,
+        message,
+        errorCode: "set_omp_model_failed",
+      });
+    };
+    await this.ensureOmpModelsLoaded();
+    const model = msg.model?.trim();
+    const targetModel = model ?? session.ompSettings?.model ?? process.settings.model;
+    if (model && !this.ompModel(model)) {
+      rejectChange(`omp does not offer the model ${model}.`);
+      return;
+    }
+    if (msg.thinkingLevel) {
+      const offered =
+        this.ompModel(targetModel)?.thinkingLevels ??
+        (model ? [] : process.thinkingLevels);
+      if (!offered.includes(msg.thinkingLevel)) {
+        rejectChange(
+          `The thinking level ${msg.thinkingLevel} is not available for ${targetModel ?? "this model"}.`,
+        );
+        return;
+      }
+    }
+    if (!process.isWaitingForInput) {
+      this.sendTip(ws, session.id, "omp_change_deferred", session);
+    }
+    session.lastActivityAt = new Date();
+    process
+      .setModelSettings({
+        ...(model ? { model } : {}),
+        ...(msg.thinkingLevel ? { thinkingLevel: msg.thinkingLevel } : {}),
+      })
+      .catch((err: unknown) => {
+        rejectChange(`Failed to change the omp model: ${errorMessageOf(err)}`);
+      });
+  }
+
+  /** resume_session for omp (docs/omp-integration.md §6.4). */
+  private async resumeOmpSession(
+    ws: WebSocket,
+    msg: ResumeClientMessage,
+    context: {
+      resumeStartedAt: number;
+      resumeProjectPath: string;
+      resumeAdditionalRoots?: string[];
+      resolvedResumeWorkspace?: ResolvedWorkspace;
+    },
+  ): Promise<void> {
+    const ompSessionId = msg.sessionId;
+    const { resumeProjectPath } = context;
+    const additionalRoots = this.normalizeAdditionalWritableRoots(
+      context.resumeAdditionalRoots,
+      resumeProjectPath,
+    );
+    if (additionalRoots.deniedRoot) {
+      this.sendResumeFailed(ws, {
+        provider: "omp",
+        sourceSessionId: ompSessionId,
+        projectPath: resumeProjectPath,
+        resumeRequestId: msg.resumeRequestId,
+      });
+      this.send(ws, this.buildPathNotAllowedError(additionalRoots.deniedRoot));
+      return;
+    }
+
+    const resumeOperation = this.beginResumeOperation({
+      ws,
+      provider: "omp",
+      sourceSessionId: ompSessionId,
+      projectPath: resumeProjectPath,
+      request: msg,
+    });
+    if (!resumeOperation.isOwner) return;
+    const fail = (message: string, errorCode?: string): void => {
+      this.failResumeOperation(
+        resumeOperation.key,
+        resumeOperation.operationId,
+        message,
+        errorCode,
+      );
+    };
+
+    let historyMetrics = summarizeResumeHistory([]);
+    let historyLoadMs = 0;
+    let sessionCreateMs = 0;
+    let nameLoadMs = 0;
+    const logOutcome = (outcome: "success" | "failed"): void => {
+      console.info(
+        formatResumePerformanceLog({
+          provider: "omp",
+          sourceSessionId: ompSessionId,
+          outcome,
+          ...historyMetrics,
+          historyLoadMs,
+          sessionCreateMs,
+          nameLoadMs,
+          totalMs: Date.now() - context.resumeStartedAt,
+        }),
+      );
+    };
+
+    const file = await findOmpSessionFile(ompSessionId);
+    if (!file) {
+      logOutcome("failed");
+      fail(`omp session not found: ${ompSessionId}`, "omp_session_not_found");
+      return;
+    }
+
+    // A request without a mode keeps the live session's mode (attach) and
+    // starts a stopped one with `default`.
+    const requestedMode = ompModeFromRequest(msg);
+    const modeRequested =
+      msg.executionMode !== undefined || msg.permissionMode !== undefined;
+    const executionMode = requestedMode.executionMode;
+    const fileSettings = await getOmpSessionSettings(file);
+    const { model, thinkingLevel, modelIgnored } =
+      await this.sanitizeOmpModelRequest({
+        model: msg.model,
+        thinkingLevel: msg.thinkingLevel,
+        fallbackModel: fileSettings?.model,
+      });
+
+    // One writer per session file: a session that is already open in the
+    // Bridge is attached instead of started a second time (§6.4 step 3).
+    // Only a running child can be attached; a Bridge session whose child
+    // exited is replaced below.
+    const liveSession = this.liveOmpSession(ompSessionId);
+    if (liveSession?.process instanceof OmpProcess) {
+      const liveProcess = liveSession.process;
+      const liveSettings = liveProcess.settings;
+      // Repeating the live session's own settings is a plain resume.
+      const edited =
+        (model !== undefined && model !== liveSettings.model) ||
+        (thinkingLevel !== undefined &&
+          thinkingLevel !== liveSettings.thinkingLevel) ||
+        (modeRequested && executionMode !== liveProcess.executionMode);
+      if (edited) {
+        logOutcome("failed");
+        fail(
+          "Stop the running session before resuming it with other settings.",
+          "omp_session_already_open",
+        );
+        return;
+      }
+      const createdMessage = this.buildSessionCreatedMessage({
+        sessionId: liveSession.id,
+        provider: "omp",
+        projectPath: liveSession.projectPath,
+        session: liveSession,
+        resumeRequestId: msg.resumeRequestId,
+      });
+      this.completeResumeOperation(
+        resumeOperation.key,
+        resumeOperation.operationId,
+        liveSession.id,
+        createdMessage,
+      );
+      logOutcome("success");
+      return;
+    }
+
+    // Worktree: reuse the mapped worktree, or recreate it on the same branch.
+    const wtMapping = this.worktreeStore.get(ompSessionId);
+    let worktreeOpts: WorktreeOptions | undefined;
+    if (wtMapping) {
+      worktreeOpts = worktreeExists(wtMapping.worktreePath)
+        ? {
+            existingWorktreePath: wtMapping.worktreePath,
+            worktreeBranch: wtMapping.worktreeBranch,
+          }
+        : { useWorktree: true, worktreeBranch: wtMapping.worktreeBranch };
+    }
+
+    // cwd rule (OBSERVED P8): omp uses the recorded cwd whenever it exists.
+    const header = await readOmpSessionHeader(file);
+    const recordedCwd = header?.cwd;
+    const recordedCwdExists = !!recordedCwd && existsSync(recordedCwd);
+    const fallbackCwd =
+      worktreeOpts?.existingWorktreePath ?? resumeProjectPath;
+    const ompCwd = recordedCwdExists ? recordedCwd : fallbackCwd;
+    if (!this.isPathAllowed(ompCwd)) {
+      logOutcome("failed");
+      const pathError = this.buildPathNotAllowedError(ompCwd);
+      fail(pathError.message, "path_not_allowed");
+      return;
+    }
+
+    const historyStartedAt = Date.now();
+    let pastMessages: SessionHistoryMessage[];
+    let lastEntryId: string | null;
+    try {
+      ({ messages: pastMessages, lastEntryId } = await getOmpSessionHistory(file));
+      historyLoadMs = Date.now() - historyStartedAt;
+      historyMetrics = summarizeResumeHistory(pastMessages);
+    } catch (err) {
+      historyLoadMs = Date.now() - historyStartedAt;
+      logOutcome("failed");
+      fail(
+        `Failed to load omp session history: ${errorMessageOf(err)}`,
+        ompErrorCode(err) === "omp_history_too_large"
+          ? "omp_history_too_large"
+          : undefined,
+      );
+      return;
+    }
+
+    const createStartedAt = Date.now();
+    let sessionId: string;
+    try {
+      sessionId = this.sessionManager.create(
+        resumeProjectPath,
+        { autoRename: false },
+        pastMessages,
+        worktreeOpts,
+        "omp",
+        undefined,
+        {
+          deferProcessMessages: true,
+          ompOptions: {
+            cwd: ompCwd,
+            resumeSessionFile: file,
+            resumeSessionId: ompSessionId,
+            entryCursor: lastEntryId,
+            executionMode,
+            ...(model ? { model } : {}),
+            ...(thinkingLevel ? { thinkingLevel } : {}),
+            ...(additionalRoots.roots
+              ? { additionalDirectories: additionalRoots.roots }
+              : {}),
+          },
+        },
+      );
+    } catch (err) {
+      logOutcome("failed");
+      fail(`Failed to restore omp session: ${errorMessageOf(err)}`, "omp_start_failed");
+      return;
+    }
+    sessionCreateMs = Date.now() - createStartedAt;
+    if (
+      !this.attachProvisionalResumeSession(
+        resumeOperation.key,
+        resumeOperation.operationId,
+        sessionId,
+      )
+    ) {
+      this.sessionManager.destroy(sessionId);
+      return;
+    }
+    const createdSession = this.sessionManager.get(sessionId);
+    const effectiveCwd = createdSession?.worktreePath ?? resumeProjectPath;
+    if (recordedCwdExists && effectiveCwd !== recordedCwd) {
+      console.log(
+        `[ws] resume(omp): recorded cwd ${recordedCwd} differs from ${effectiveCwd}; omp runs in the recorded cwd`,
+      );
+    }
+
+    try {
+      if (!(createdSession?.process instanceof OmpProcess)) {
+        throw new Error("omp session readiness is unavailable");
+      }
+      // session_created only after the handshake: omp can still fail here
+      // (bad model, missing file, protocol mismatch, busy file).
+      await createdSession.process.waitUntilReady();
+    } catch (err) {
+      logOutcome("failed");
+      fail(
+        `omp could not resume the session: ${errorMessageOf(err)}`,
+        ompErrorCode(err) ?? "omp_start_failed",
+      );
+      return;
+    }
+
+    const nameStartedAt = Date.now();
+    await this.loadAndSetSessionName(
+      createdSession,
+      "omp",
+      resumeProjectPath,
+      ompSessionId,
+    );
+    nameLoadMs = Date.now() - nameStartedAt;
+    const cached = this.sessionManager.getCachedCommands("omp", effectiveCwd);
+    const createdMessage = this.buildSessionCreatedMessage({
+      sessionId,
+      provider: "omp",
+      projectPath: resumeProjectPath,
+      session: createdSession,
+      resumeRequestId: msg.resumeRequestId,
+      ...(cached ? { slashCommands: cached.slashCommands } : {}),
+    });
+    if (
+      !this.completeResumeOperation(
+        resumeOperation.key,
+        resumeOperation.operationId,
+        sessionId,
+        createdMessage,
+      )
+    ) {
+      this.sessionManager.destroy(sessionId);
+      return;
+    }
+    this.sessionManager.releaseDeferredProcessMessages(sessionId);
+    // A Bridge session whose child exited after ready (§2.6) stays listed as
+    // idle until the user resumes it; the resumed session replaces it.
+    for (const exited of this.exitedOmpSessions(ompSessionId)) {
+      if (exited.id === sessionId) continue;
+      this.destroySession(exited.id);
+      this.debugEvents.delete(exited.id);
+      this.notifiedPermissionToolUses.delete(exited.id);
+    }
+    this.broadcastSessionList();
+    void this.refreshOmpModels();
+    if (!recordedCwdExists) this.sendTip(ws, sessionId, "omp_cwd_missing", createdSession);
+    if (modelIgnored) this.sendTip(ws, sessionId, "omp_model_ignored", createdSession);
+    if (requestedMode.mapped) {
+      this.sendTip(ws, sessionId, "omp_mode_mapped", createdSession);
+    }
+    this.debugEvents.set(sessionId, []);
+    this.recordDebugEvent(sessionId, {
+      direction: "internal",
+      channel: "bridge",
+      type: "session_resumed",
+      detail: `provider=omp session=${ompSessionId}`,
+    });
+    if (!context.resolvedResumeWorkspace) {
+      this.projectHistory?.addProject(resumeProjectPath);
+    }
+    logOutcome("success");
+  }
+
+  /**
+   * rename_session for omp. A session with a running child is renamed through
+   * its process (also when the request comes from the recent list), any
+   * other through a short-lived omp process; a Bridge session whose child
+   * exited keeps the new name in memory. omp names cannot be cleared.
+   */
+  private async renameOmpSession(
+    ws: WebSocket,
+    requestSessionId: string,
+    name: string | null,
+    target: { session?: SessionInfo; ompSessionId?: string; projectPath?: string },
+  ): Promise<void> {
+    if (name === null) {
+      this.send(ws, {
+        type: "rename_result",
+        sessionId: requestSessionId,
+        name,
+        success: false,
+        error: "omp session names cannot be cleared",
+      });
+      return;
+    }
+    const { session } = target;
+    try {
+      if (session?.process instanceof OmpProcess && session.process.isAlive) {
+        await session.process.setSessionName(name);
+        this.sessionManager.renameSession(session.id, name);
+        this.broadcastSessionList();
+        this.send(ws, {
+          type: "rename_result",
+          sessionId: requestSessionId,
+          name,
+          success: true,
+        });
+        return;
+      }
+      const success = target.ompSessionId
+        ? await renameOmpRecentSession({
+            sessionId: target.ompSessionId,
+            name,
+            ...(target.projectPath ? { projectPath: target.projectPath } : {}),
+          })
+        : false;
+      if (success && session) {
+        this.sessionManager.renameSession(session.id, name);
+        this.broadcastSessionList();
+      }
+      this.send(ws, {
+        type: "rename_result",
+        sessionId: requestSessionId,
+        name,
+        success,
+      });
+    } catch (err) {
+      this.send(ws, {
+        type: "rename_result",
+        sessionId: requestSessionId,
+        name,
+        success: false,
+        error: errorMessageOf(err),
+      });
+    }
+  }
+
+  /** The Bridge session whose running omp child has session `ompSessionId`. */
+  private liveOmpSession(ompSessionId: string): SessionInfo | undefined {
+    const isLive = (session: SessionInfo | undefined): session is SessionInfo =>
+      session?.provider === "omp" &&
+      session.process instanceof OmpProcess &&
+      session.process.isAlive;
+    for (const summary of this.sessionManager.list()) {
+      if (summary.provider !== "omp" || summary.claudeSessionId !== ompSessionId) {
+        continue;
+      }
+      const session = this.sessionManager.get(summary.id);
+      if (isLive(session)) return session;
+    }
+    const owner = ompWriters.ownerBySessionId(ompSessionId)?.owner;
+    const session = owner ? this.sessionManager.get(owner) : undefined;
+    return isLive(session) ? session : undefined;
+  }
+
+  /** Bridge sessions of omp session `ompSessionId` whose child has exited. */
+  private exitedOmpSessions(ompSessionId: string): SessionInfo[] {
+    return this.sessionManager
+      .list()
+      .filter(
+        (summary) =>
+          summary.provider === "omp" && summary.claudeSessionId === ompSessionId,
+      )
+      .map((summary) => this.sessionManager.get(summary.id))
+      .filter(
+        (session): session is SessionInfo =>
+          session?.process instanceof OmpProcess && !session.process.isAlive,
+      );
+  }
+
+  /**
+   * Conversation rewind for omp (§6.6): `branch` in the running process, then
+   * a new Bridge session on the branched file. A failed branch leaves the
+   * current session untouched.
+   */
+  private async rewindOmpConversation(
+    ws: WebSocket,
+    sessionId: string,
+    targetUuid: string,
+    mode: "conversation" | "code" | "both",
+  ): Promise<void> {
+    const fail = (error: string): void => {
+      this.send(ws, {
+        type: "rewind_result",
+        sessionId,
+        success: false,
+        mode,
+        error,
+      });
+    };
+    if (mode !== "conversation") {
+      fail("omp only supports conversation rewind");
+      return;
+    }
+    const session = this.sessionManager.get(sessionId);
+    if (!session) {
+      fail(`Session ${sessionId} not found`);
+      return;
+    }
+    const process = session.process;
+    if (!(process instanceof OmpProcess) || !process.isAlive) {
+      fail("The omp process is not running");
+      return;
+    }
+    if (!process.isWaitingForInput || process.getPendingPermission()) {
+      fail("Cannot rewind while omp is running");
+      return;
+    }
+    if (session.codexQueuedInput) {
+      fail("Cannot rewind while omp has queued input");
+      return;
+    }
+    const entryId = ompEntryIdFromUuid(targetUuid);
+    const sessionFile = process.sessionFile;
+    if (!entryId || !sessionFile || !existsSync(sessionFile)) {
+      fail("Invalid omp rewind target");
+      return;
+    }
+    // Validate without side effects before branching.
+    try {
+      await getOmpSessionHistory(sessionFile, { untilEntryId: entryId });
+    } catch (err) {
+      fail(
+        err instanceof OmpHistoryTargetNotFoundError
+          ? "Invalid omp rewind target"
+          : `Invalid omp rewind target: ${errorMessageOf(err)}`,
+      );
+      return;
+    }
+
+    let branched: { cancelled: boolean; sessionId: string; sessionFile: string | null };
+    try {
+      branched = await process.branch(entryId);
+    } catch (err) {
+      fail(errorMessageOf(err));
+      return;
+    }
+    if (branched.cancelled) {
+      fail("omp cancelled the rewind");
+      return;
+    }
+
+    const projectPath = session.projectPath;
+    const worktreeOpts: WorktreeOptions | undefined = session.worktreePath
+      ? {
+          existingWorktreePath: session.worktreePath,
+          worktreeBranch: session.worktreeBranch,
+        }
+      : undefined;
+    const workspace = this.workspaceForRuntimeSession(session);
+    const name = session.name;
+    const executionMode = process.executionMode;
+    const settings = session.ompSettings ?? process.settings;
+    const ompCwd = session.ompCwd;
+    const additionalDirectories = session.ompAdditionalDirectories;
+    const branchedFile =
+      branched.sessionFile && existsSync(branched.sessionFile)
+        ? branched.sessionFile
+        : null;
+
+    // The old child's dispose appends session_exit to the branched file; the
+    // new process waits for that exit through the writer registry (§6.7).
+    this.flushSessionDeltaBatches(sessionId);
+    this.destroySession(sessionId);
+
+    let newSessionId: string;
+    try {
+      if (branchedFile) {
+        const { messages, lastEntryId } = await getOmpSessionHistory(branchedFile);
+        newSessionId = this.sessionManager.create(
+          projectPath,
+          { autoRename: false },
+          messages,
+          worktreeOpts,
+          "omp",
+          undefined,
+          {
+            ompOptions: {
+              ...(ompCwd ? { cwd: ompCwd } : {}),
+              resumeSessionFile: branchedFile,
+              resumeSessionId: branched.sessionId,
+              entryCursor: lastEntryId,
+              executionMode,
+              ...(additionalDirectories ? { additionalDirectories } : {}),
+            },
+          },
+        );
+      } else {
+        // A root target: omp started a fresh session without a file yet.
+        newSessionId = this.sessionManager.create(
+          projectPath,
+          { autoRename: false },
+          undefined,
+          worktreeOpts,
+          "omp",
+          undefined,
+          {
+            ompOptions: {
+              ...(ompCwd ? { cwd: ompCwd } : {}),
+              executionMode,
+              ...(settings.model ? { model: settings.model } : {}),
+              ...(settings.thinkingLevel
+                ? { thinkingLevel: settings.thinkingLevel }
+                : {}),
+              ...(additionalDirectories ? { additionalDirectories } : {}),
+            },
+          },
+        );
+      }
+    } catch (err) {
+      fail(`omp could not reopen the rewound session: ${errorMessageOf(err)}`);
+      this.sendSessionList(ws);
+      return;
+    }
+    this.attachWorkspaceToRuntimeSession(newSessionId, workspace);
+    const newSession = this.sessionManager.get(newSessionId);
+    if (newSession && name) newSession.name = name;
+
+    try {
+      if (!(newSession?.process instanceof OmpProcess)) {
+        throw new Error("omp session readiness is unavailable");
+      }
+      await newSession.process.waitUntilReady();
+      if (name && !branchedFile) {
+        await newSession.process.setSessionName(name).catch((err: unknown) => {
+          console.warn(`[ws] Failed to carry the name over the omp rewind: ${errorMessageOf(err)}`);
+        });
+      }
+    } catch (err) {
+      this.destroySession(newSessionId);
+      fail(`omp could not reopen the rewound session: ${errorMessageOf(err)}`);
+      this.sendSessionList(ws);
+      return;
+    }
+
+    this.send(ws, {
+      type: "rewind_result",
+      sessionId,
+      success: true,
+      mode,
+    });
+    this.send(
+      ws,
+      this.buildSessionCreatedMessage({
+        sessionId: newSessionId,
+        provider: "omp",
+        projectPath,
+        session: newSession,
+        sourceSessionId: sessionId,
+      }),
+    );
+    this.broadcastSessionList();
   }
 
   private async refreshClaudeModels(projectPath?: string): Promise<void> {
@@ -9356,6 +10773,18 @@ export class BridgeWebSocketServer {
     return project;
   }
 
+  /** Agent name used in push texts. */
+  private agentName(sessionId: string): string {
+    switch (this.sessionManager.get(sessionId)?.provider) {
+      case "codex":
+        return "Codex";
+      case "omp":
+        return "omp";
+      default:
+        return "Claude";
+    }
+  }
+
   private maybeSendPushNotification(
     sessionId: string,
     msg: ServerMessage,
@@ -9416,7 +10845,10 @@ export class BridgeWebSocketServer {
             : t(locale, titleKey);
           body = privacy
             ? t(locale, "ask_body_private")
-            : (questionText ?? t(locale, "ask_default_body"));
+            : (questionText ??
+              t(locale, "ask_default_body", {
+                agent: this.agentName(sessionId),
+              }));
         } else {
           const titleKey = "approval_title";
           title = label
@@ -9477,7 +10909,10 @@ export class BridgeWebSocketServer {
 
     const pieces: string[] = [];
     if (isSuccess) {
-      if (msg.duration != null) pieces.push(`${msg.duration.toFixed(1)}s`);
+      // `duration` is in milliseconds (Claude, omp).
+      if (msg.duration != null) {
+        pieces.push(`${(msg.duration / 1000).toFixed(1)}s`);
+      }
       if (msg.cost != null) pieces.push(`$${msg.cost.toFixed(4)}`);
     }
     const stats = pieces.length > 0 ? ` (${pieces.join(", ")})` : "";
@@ -9552,9 +10987,13 @@ export class BridgeWebSocketServer {
 
   private prepareServerMessageForClient(
     ws: WebSocket,
-    msg: ServerMessage | Record<string, unknown>,
+    message: ServerMessage | Record<string, unknown>,
   ): ServerMessage | Record<string, unknown> | null {
-    if (!this.shouldSendToClient(ws, msg)) return null;
+    if (!this.shouldSendToClient(ws, message)) return null;
+    const msg = this.ompClients.has(ws)
+      ? message
+      : this.withoutOmpData(message);
+    if (!msg) return null;
     if (!("messages" in msg) || !Array.isArray(msg.messages)) return msg;
     const messages = msg.messages as unknown[];
 
@@ -9577,6 +11016,70 @@ export class BridgeWebSocketServer {
       };
     }
     return msg;
+  }
+
+  /** A live omp session's traffic is invisible to a client without omp support. */
+  private isOmpSessionHiddenFrom(ws: WebSocket, sessionId: string): boolean {
+    return (
+      !this.ompClients.has(ws) &&
+      this.sessionManager.get(sessionId)?.provider === "omp"
+    );
+  }
+
+  /**
+   * The message as a client without omp support may see it, or null.
+   *
+   * Old apps map unknown providers to Claude and would open omp sessions in
+   * the Claude screen, so omp sessions, omp model data and every message of a
+   * live omp session are removed for them (docs/omp-integration.md §9.5).
+   */
+  private withoutOmpData(
+    msg: ServerMessage | Record<string, unknown>,
+  ): ServerMessage | Record<string, unknown> | null {
+    const record = msg as Record<string, unknown>;
+    const sessionId = record.sessionId;
+    if (
+      typeof sessionId === "string" &&
+      this.sessionManager.get(sessionId)?.provider === "omp"
+    ) {
+      return null;
+    }
+    const isOmpEntry = (entry: unknown): boolean =>
+      isRecord(entry) && entry.provider === "omp";
+    switch (record.type) {
+      case "session_list": {
+        const {
+          ompModels: _ompModels,
+          ompAvailability: _ompAvailability,
+          ompModelsRevision: _ompModelsRevision,
+          ...rest
+        } = record;
+        return {
+          ...rest,
+          ...(Array.isArray(record.sessions)
+            ? { sessions: record.sessions.filter((entry) => !isOmpEntry(entry)) }
+            : {}),
+        };
+      }
+      case "recent_sessions":
+        return Array.isArray(record.sessions)
+          ? {
+              ...record,
+              sessions: record.sessions.filter((entry) => !isOmpEntry(entry)),
+            }
+          : msg;
+      case "session_link_resolution":
+        return record.provider === "omp"
+          ? ({
+              type: "session_link_resolution",
+              requestId: record.requestId,
+              sourceSessionId: record.sourceSessionId,
+              status: "unavailable",
+            } as Record<string, unknown>)
+          : msg;
+      default:
+        return msg;
+    }
   }
 
   private shouldSendToClient(
@@ -10291,6 +11794,16 @@ export class BridgeWebSocketServer {
       projectPath: session.projectPath,
       provider: session.provider,
     };
+
+    if (session.provider === "omp") {
+      const process =
+        session.process instanceof OmpProcess ? session.process : undefined;
+      if (process) msg.executionMode = process.executionMode;
+      if (session.ompSettings?.model) msg.model = session.ompSettings.model;
+      if (session.ompSettings?.thinkingLevel) {
+        msg.thinkingLevel = session.ompSettings.thinkingLevel;
+      }
+    }
 
     if (session.provider === "codex" && session.codexSettings) {
       if (session.codexSettings.approvalPolicy !== undefined) {

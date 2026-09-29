@@ -37,6 +37,18 @@ const originalBridgeEnv = {
   codexAppServerPort: process.env.BRIDGE_CODEX_APP_SERVER_PORT,
   codexAppServerUrl: process.env.BRIDGE_CODEX_APP_SERVER_URL,
 };
+const OMP_SERVICE_VARS = [
+  "BRIDGE_OMP_BIN",
+  "BRIDGE_OMP_ASSIST_MODEL",
+  "OMP_PROFILE",
+  "PI_PROFILE",
+  "PI_CONFIG_DIR",
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+] as const;
+const originalOmpEnv = Object.fromEntries(
+  OMP_SERVICE_VARS.map((name) => [name, process.env[name]]),
+);
 
 describe("setup-launchd", () => {
   beforeEach(() => {
@@ -117,6 +129,32 @@ describe("setup-launchd", () => {
       const content = mockWriteFileSync.mock.calls[0]![1] as string;
       expect(content).toContain("<key>BRIDGE_ALLOW_CLAUDE_OAUTH</key>");
       expect(content).toContain("<string>1</string>");
+    });
+
+    it("persists the omp binary, assist model and session store variables that are set", () => {
+      process.env.BRIDGE_OMP_BIN = "/opt/omp/bin/omp";
+      process.env.PI_PROFILE = "work";
+      process.env.PI_CODING_AGENT_SESSION_DIR = "/Users/testuser/omp & sessions";
+
+      setupLaunchd({});
+
+      const content = mockWriteFileSync.mock.calls[0]![1] as string;
+      expect(content).toContain(
+        "<key>BRIDGE_OMP_BIN</key>\n        <string>/opt/omp/bin/omp</string>",
+      );
+      expect(content).toContain("<key>PI_PROFILE</key>\n        <string>work</string>");
+      expect(content).toContain(
+        "<key>PI_CODING_AGENT_SESSION_DIR</key>\n        <string>/Users/testuser/omp &amp; sessions</string>",
+      );
+      expect(content).not.toContain("OMP_PROFILE");
+      expect(content).not.toContain("BRIDGE_OMP_ASSIST_MODEL");
+    });
+
+    it("persists no omp variable that is not set", () => {
+      setupLaunchd({});
+
+      const content = mockWriteFileSync.mock.calls[0]![1] as string;
+      for (const name of OMP_SERVICE_VARS) expect(content).not.toContain(name);
     });
 
     it("persists Codex assist environment overrides", () => {
@@ -226,6 +264,7 @@ describe("setup-launchd", () => {
 });
 
 function clearBridgeEnv(): void {
+  for (const name of OMP_SERVICE_VARS) delete process.env[name];
   delete process.env.BRIDGE_PORT;
   delete process.env.BRIDGE_ALLOWED_DIRS;
   delete process.env.BRIDGE_PUBLIC_WS_URL;
@@ -240,6 +279,7 @@ function clearBridgeEnv(): void {
 }
 
 function restoreBridgeEnv(): void {
+  for (const name of OMP_SERVICE_VARS) restoreEnvVar(name, originalOmpEnv[name]);
   restoreEnvVar("BRIDGE_PORT", originalBridgeEnv.port);
   restoreEnvVar("BRIDGE_ALLOWED_DIRS", originalBridgeEnv.allowedDirs);
   restoreEnvVar("BRIDGE_PUBLIC_WS_URL", originalBridgeEnv.publicWsUrl);

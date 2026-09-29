@@ -8,6 +8,14 @@ import {
 } from "./codex-app-server-config.js";
 import { parseBridgePort } from "./bridge-port.js";
 import { BRIDGE_STABLE_PACKAGE_SPEC } from "./distribution.js";
+import { ompServiceEnvironment } from "./omp-env.js";
+
+/** `Environment=` line; values with spaces or quotes are quoted for systemd. */
+function systemdEnvironmentLine(name: string, value: string): string {
+  if (!/[\s"'\\]/.test(value)) return `Environment=${name}=${value}`;
+  const escaped = `${name}=${value}`.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `Environment="${escaped}"`;
+}
 
 const SERVICE_NAME = "ccpocket-bridge";
 
@@ -171,6 +179,11 @@ Environment=BRIDGE_HOST=${host}`;
   }
   if (codexAssistReasoningEffort) {
     envLines += `\nEnvironment=BRIDGE_CODEX_ASSIST_REASONING_EFFORT=${codexAssistReasoningEffort}`;
+  }
+  // omp: the service must resolve the same binary and session store as the
+  // user's shell, or the Bridge lists a different store.
+  for (const [name, value] of ompServiceEnvironment()) {
+    envLines += `\n${systemdEnvironmentLine(name, value)}`;
   }
   if (codexAppServerMode) {
     envLines += `\nEnvironment=BRIDGE_CODEX_APP_SERVER_MODE=${codexAppServerMode}`;

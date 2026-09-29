@@ -6,10 +6,15 @@ import { homedir } from "node:os";
 import { renameSession as renameClaudeSdkSession } from "@anthropic-ai/claude-agent-sdk";
 import { isAutoRenamePromptText } from "./auto-rename.js";
 import { normalizeCodexServiceTierForClient } from "./codex-service-tier.js";
+import { decodeJsonStringPrefix } from "./jsonl-partial.js";
+import { extractOmpMessageImages } from "./omp-history.js";
+import { listOmpRecentSessions } from "./omp-sessions.js";
+import { OMP_ENTRY_UUID_PREFIX, type OmpSettings } from "./omp-types.js";
+import type { Provider } from "./parser.js";
 
 export interface SessionIndexEntry {
   sessionId: string;
-  provider: "claude" | "codex";
+  provider: Provider;
   /** User-assigned session name (customTitle for Claude, thread_name for Codex). */
   name?: string;
   agentNickname?: string;
@@ -38,6 +43,8 @@ export interface SessionIndexEntry {
     webSearchMode?: string;
     additionalWritableRoots?: string[];
   };
+  /** Model and thinking level recorded in an omp session file. */
+  ompSettings?: OmpSettings;
 }
 
 interface RawSessionIndexFile {
@@ -68,8 +75,10 @@ export interface GetRecentSessionsOptions {
   sessionId?: string;
   /** Session IDs to exclude (archived sessions). */
   archivedSessionIds?: ReadonlySet<string>;
-  /** Filter by provider (claude or codex). */
-  provider?: "claude" | "codex";
+  /** Filter by a single provider. */
+  provider?: Provider;
+  /** Filter by several providers; takes precedence over `provider`. */
+  providers?: readonly Provider[];
   /** Show only sessions with a non-empty name. */
   namedOnly?: boolean;
   /** Free-text search across name, firstPrompt, lastPrompt and summary. */
@@ -106,6 +115,7 @@ interface RecentSessionsPerfStats {
   codexFilesTotal: number;
   codexFilesRead: number;
   codexEntries: number;
+  ompEntries: number;
   claudeNamedOnlyFastPathUsed: boolean;
   counts: {
     beforeArchive: number;
@@ -130,6 +140,7 @@ function createRecentSessionsPerfStats(): RecentSessionsPerfStats {
     codexFilesTotal: 0,
     codexFilesRead: 0,
     codexEntries: 0,
+    ompEntries: 0,
     claudeNamedOnlyFastPathUsed: false,
     counts: {
       beforeArchive: 0,
@@ -175,7 +186,7 @@ function logRecentSessionsPerf(
       limit: options.limit ?? 20,
       offset: options.offset ?? 0,
       projectPath: projectPathLabel || undefined,
-      provider: options.provider ?? "all",
+      provider: options.providers?.join(",") ?? options.provider ?? "all",
       namedOnly: options.namedOnly ?? false,
       searchQuery: options.searchQuery ? "<set>" : "<none>",
       archivedSessionIds: options.archivedSessionIds?.size ?? 0,
@@ -284,18 +295,6 @@ function isSystemInjectedText(text: string): boolean {
 
 function isCodexAutoRenameSession(firstPrompt: string): boolean {
   return isAutoRenamePromptText(firstPrompt);
-}
-
-function decodeJsonStringPrefix(fragment: string): string {
-  let candidate = fragment;
-  while (candidate.length > 0) {
-    try {
-      return JSON.parse(`"${candidate}"`) as string;
-    } catch {
-      candidate = candidate.slice(0, -1);
-    }
-  }
-  return "";
 }
 
 function parsePartialCodexLine(line: string): {
@@ -917,8 +916,16 @@ export async function getAllRecentSessions(
   const limit = options.limit ?? 20;
   const offset = options.offset ?? 0;
   const filterProjectPath = options.projectPath;
-  const shouldLoadClaude = options.provider !== "codex";
-  const shouldLoadCodex = options.provider !== "claude";
+  const requestedProviders: ReadonlySet<Provider> | null = options.providers
+    ? new Set(options.providers)
+    : options.provider
+      ? new Set([options.provider])
+      : null;
+  const shouldLoadProvider = (provider: Provider): boolean =>
+    requestedProviders === null || requestedProviders.has(provider);
+  const shouldLoadClaude = shouldLoadProvider("claude");
+  const shouldLoadCodex = shouldLoadProvider("codex");
+  const shouldLoadOmp = shouldLoadProvider("omp");
   const includeOnlyNamedClaude = options.namedOnly === true;
 
   const projectsDir = join(homedir(), ".claude", "projects");
@@ -1071,24 +1078,45 @@ export async function getAllRecentSessions(
     return codexEntries;
   })();
 
-  // Wait for both Claude and Codex loading to complete in parallel
-  const [claudeEntries, codexEntries] = await Promise.all([
+  const loadOmpStartedAt = process.hrtime.bigint();
+  const ompEntriesPromise = (async (): Promise<SessionIndexEntry[]> => {
+    if (!shouldLoadOmp) return [];
+    try {
+      const ompEntries = await listOmpRecentSessions({
+        projectPath: filterProjectPath,
+      });
+      perfStats.ompEntries = ompEntries.length;
+      return ompEntries;
+    } catch (err) {
+      // omp's store is optional; a failed scan must not hide the other providers.
+      console.warn(
+        `[sessions-index] Failed to list omp sessions: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  })();
+
+  // Wait for every provider loader to complete in parallel
+  const [claudeEntries, codexEntries, ompEntries] = await Promise.all([
     claudeEntriesPromise,
     codexEntriesPromise,
+    ompEntriesPromise,
   ]);
   markDuration(durations, "loadClaudeSessions", loadClaudeStartedAt);
   markDuration(durations, "loadCodexSessions", loadCodexStartedAt);
+  markDuration(durations, "loadOmpSessions", loadOmpStartedAt);
 
-  // Combine results and deduplicate by sessionId.
+  // Combine results and deduplicate by provider and sessionId.
   // The same session can appear in both the main project dir and a worktree dir
   // (Claude CLI writes to both sessions-index.json files).  Keep the entry with
   // richer data (more non-empty fields) so the UI shows correct metadata.
-  const combined = [...claudeEntries, ...codexEntries];
+  const combined = [...claudeEntries, ...codexEntries, ...ompEntries];
   const seen = new Map<string, SessionIndexEntry>();
   for (const entry of combined) {
-    const existing = seen.get(entry.sessionId);
+    const key = `${entry.provider}:${entry.sessionId}`;
+    const existing = seen.get(key);
     if (!existing) {
-      seen.set(entry.sessionId, entry);
+      seen.set(key, entry);
     } else {
       // Pick the entry with more populated fields
       const score = (e: SessionIndexEntry): number =>
@@ -1100,7 +1128,7 @@ export async function getAllRecentSessions(
         (e.summary ? 1 : 0) +
         (e.lastPrompt ? 1 : 0);
       if (score(entry) > score(existing)) {
-        seen.set(entry.sessionId, entry);
+        seen.set(key, entry);
       }
     }
   }
@@ -1115,8 +1143,8 @@ export async function getAllRecentSessions(
   perfStats.counts.afterArchive = filtered.length;
 
   // Filter by provider
-  if (options.provider) {
-    filtered = filtered.filter((e) => e.provider === options.provider);
+  if (requestedProviders) {
+    filtered = filtered.filter((e) => requestedProviders.has(e.provider));
   }
   perfStats.counts.afterProvider = filtered.length;
 
@@ -2895,6 +2923,9 @@ export async function extractMessageImages(
   sessionId: string,
   messageUuid: string,
 ): Promise<ExtractedImage[]> {
+  if (messageUuid.startsWith(OMP_ENTRY_UUID_PREFIX)) {
+    return extractOmpMessageImages(sessionId, messageUuid);
+  }
   if (isCodexMessageImageUuid(messageUuid)) {
     return extractCodexMessageImages(sessionId, messageUuid);
   }

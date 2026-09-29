@@ -2,6 +2,24 @@ export const BRIDGE_PROTOCOL_MIN_VERSION = 1;
 export const BRIDGE_PROTOCOL_MAX_VERSION = 1;
 export const LEGACY_PROTOCOL_VERSION = 1;
 
+/**
+ * Additive capabilities inside the negotiated protocol version, advertised in
+ * `session_list.protocolCapabilities` and `/version.protocolCapabilities`.
+ *
+ * `provider_omp_v1`: the Bridge accepts `provider:"omp"` wherever a provider
+ * is accepted, plus `thinkingLevel`, `providers[]` and `set_omp_model`, and
+ * sends omp data to clients whose `client_capabilities.supportedProviders`
+ * contains `"omp"` (docs/protocol-versioning.md).
+ */
+export const BRIDGE_PROTOCOL_CAPABILITIES = [
+  "project_request_correlation_v1",
+  "session_context_v1",
+  "provider_omp_v1",
+] as const;
+
+export type BridgeProtocolCapability =
+  (typeof BRIDGE_PROTOCOL_CAPABILITIES)[number];
+
 export interface ProtocolRange {
   min: number;
   max: number;

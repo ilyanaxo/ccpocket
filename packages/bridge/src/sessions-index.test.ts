@@ -21,6 +21,8 @@ import {
   codexThreadToSessionHistory,
 } from "./sessions-index.js";
 import { buildAutoRenamePrompt } from "./auto-rename.js";
+import { decodeJsonStringPrefix } from "./jsonl-partial.js";
+import { clearOmpSessionCaches } from "./omp-sessions.js";
 
 describe("pathToSlug", () => {
   it("converts a path to Claude directory slug", () => {
@@ -2522,5 +2524,212 @@ describe("claude namedOnly optimization", () => {
     expect(result.sessions).toHaveLength(1);
     expect(result.sessions[0].sessionId).toBe(sessionId);
     expect(result.sessions[0].name).toBe("SDK title");
+  });
+});
+
+describe("omp sessions in getAllRecentSessions", () => {
+  const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
+  let tempHome = "";
+
+  function writeOmpSession(params: {
+    id: string;
+    cwd: string;
+    text: string;
+    mtime: string;
+    imageBlob?: string;
+  }): void {
+    const bucket = join(tempHome, ".omp", "agent", "sessions", "-bucket");
+    mkdirSync(bucket, { recursive: true });
+    const file = join(bucket, `2026-09-28T18-57-12-742Z_${params.id}.jsonl`);
+    const content = [
+      { type: "text", text: params.text },
+      ...(params.imageBlob
+        ? [{ type: "image", data: `blob:sha256:${params.imageBlob}`, mimeType: "image/png" }]
+        : []),
+    ];
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "title", v: 1, title: "", pad: " ".repeat(200) }),
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: params.id,
+          timestamp: "2026-09-28T18:57:12.742Z",
+          cwd: params.cwd,
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "u1",
+          parentId: null,
+          timestamp: "2026-09-28T18:57:13.167Z",
+          message: { role: "user", content, attribution: "user" },
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "a1",
+          parentId: "u1",
+          timestamp: "2026-09-28T18:57:14.030Z",
+          message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+        }),
+      ].join("\n") + "\n",
+    );
+    const time = new Date(params.mtime);
+    utimesSync(file, time, time);
+  }
+
+  function writeCodexSession(id: string, cwd: string, timestamp: string): void {
+    const codexDir = join(tempHome, ".codex", "sessions", "2026", "09", "28");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      join(codexDir, `rollout-${id}.jsonl`),
+      [
+        JSON.stringify({ timestamp, type: "session_meta", payload: { id, cwd } }),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: { type: "user_message", message: `codex ${id}` },
+        }),
+      ].join("\n"),
+    );
+  }
+
+  beforeEach(() => {
+    tempHome = mkdtempSync(join(tmpdir(), "ccpocket-test-omp-home-"));
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    clearOmpSessionCaches();
+  });
+
+  afterEach(() => {
+    process.env.HOME = oldHome;
+    process.env.USERPROFILE = oldUserProfile;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it("lists omp sessions next to Codex sessions with positive provider gates", async () => {
+    writeOmpSession({
+      id: "omp-1",
+      cwd: "/tmp/project-a",
+      text: "hello omp",
+      mtime: "2026-09-28T19:00:00.000Z",
+    });
+    writeCodexSession("codex-1", "/tmp/project-a", "2026-09-28T18:00:00.000Z");
+
+    const all = await getAllRecentSessions({ limit: 50 });
+    expect(all.sessions.map((s) => `${s.provider}:${s.sessionId}`)).toEqual([
+      "omp:omp-1",
+      "codex:codex-1",
+    ]);
+    expect(all.sessions[0]).toMatchObject({
+      provider: "omp",
+      firstPrompt: "hello omp",
+      projectPath: "/tmp/project-a",
+    });
+
+    const codexOnly = await getAllRecentSessions({ provider: "codex", limit: 50 });
+    expect(codexOnly.sessions.map((s) => s.provider)).toEqual(["codex"]);
+    const ompOnly = await getAllRecentSessions({ provider: "omp", limit: 50 });
+    expect(ompOnly.sessions.map((s) => s.sessionId)).toEqual(["omp-1"]);
+    const claudeOnly = await getAllRecentSessions({ provider: "claude", limit: 50 });
+    expect(claudeOnly.sessions).toEqual([]);
+  });
+
+  it("filters by a providers list and by project path", async () => {
+    writeOmpSession({
+      id: "omp-a",
+      cwd: "/tmp/project-a",
+      text: "a",
+      mtime: "2026-09-28T19:00:00.000Z",
+    });
+    writeOmpSession({
+      id: "omp-b",
+      cwd: "/tmp/project-b",
+      text: "b",
+      mtime: "2026-09-28T19:01:00.000Z",
+    });
+    writeCodexSession("codex-a", "/tmp/project-a", "2026-09-28T18:00:00.000Z");
+
+    const claudeAndCodex = await getAllRecentSessions({
+      providers: ["claude", "codex"],
+      limit: 50,
+    });
+    expect(claudeAndCodex.sessions.map((s) => s.sessionId)).toEqual(["codex-a"]);
+
+    const projectA = await getAllRecentSessions({
+      providers: ["codex", "omp"],
+      projectPath: "/tmp/project-a",
+      limit: 50,
+    });
+    expect(projectA.sessions.map((s) => s.sessionId)).toEqual(["omp-a", "codex-a"]);
+  });
+
+  it("dedupes by provider and session id, not by session id alone", async () => {
+    writeOmpSession({
+      id: "shared-id",
+      cwd: "/tmp/project-a",
+      text: "omp",
+      mtime: "2026-09-28T19:00:00.000Z",
+    });
+    writeCodexSession("shared-id", "/tmp/project-a", "2026-09-28T18:00:00.000Z");
+
+    const { sessions } = await getAllRecentSessions({ limit: 50 });
+    expect(sessions.map((s) => `${s.provider}:${s.sessionId}`).sort()).toEqual([
+      "codex:shared-id",
+      "omp:shared-id",
+    ]);
+  });
+
+  it("excludes archived omp sessions and finds one by exact id", async () => {
+    writeOmpSession({
+      id: "omp-archived",
+      cwd: "/tmp/project-a",
+      text: "old",
+      mtime: "2026-09-28T19:00:00.000Z",
+    });
+    writeOmpSession({
+      id: "omp-kept",
+      cwd: "/tmp/project-a",
+      text: "kept",
+      mtime: "2026-09-28T19:01:00.000Z",
+    });
+    const archived = await getAllRecentSessions({
+      provider: "omp",
+      archivedSessionIds: new Set(["omp-archived"]),
+    });
+    expect(archived.sessions.map((s) => s.sessionId)).toEqual(["omp-kept"]);
+    const exact = await getAllRecentSessions({
+      provider: "omp",
+      sessionId: "omp-archived",
+      limit: 1,
+    });
+    expect(exact.sessions.map((s) => s.sessionId)).toEqual(["omp-archived"]);
+  });
+
+  it("routes omp entry uuids to the omp image extractor", async () => {
+    const hash = "b".repeat(64);
+    mkdirSync(join(tempHome, ".omp", "agent", "blobs"), { recursive: true });
+    writeFileSync(join(tempHome, ".omp", "agent", "blobs", hash), Buffer.from("img"));
+    writeOmpSession({
+      id: "omp-img",
+      cwd: "/tmp/project-a",
+      text: "look",
+      mtime: "2026-09-28T19:00:00.000Z",
+      imageBlob: hash,
+    });
+
+    expect(await extractMessageImages("omp-img", "omp:entry:u1")).toEqual([
+      { base64: Buffer.from("img").toString("base64"), mimeType: "image/png" },
+    ]);
+    expect(await extractMessageImages("omp-img", "omp:entry:a1")).toEqual([]);
+  });
+});
+
+describe("shared decodeJsonStringPrefix", () => {
+  it("decodes a first prompt cut inside an escape in the Codex head window", async () => {
+    // The helper moved to jsonl-partial.ts; the Codex lister still uses it.
+    expect(decodeJsonStringPrefix("line one\\nline two\\u00")).toBe("line one\nline two");
+    expect(decodeJsonStringPrefix("emoji \\ud83d")).toBe("emoji ");
   });
 });

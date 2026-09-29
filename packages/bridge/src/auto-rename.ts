@@ -7,6 +7,7 @@ import {
   getCodexAssistModel,
   getCodexAssistReasoningConfig,
 } from "./codex-assist.js";
+import { runOmpPrint } from "./omp-print.js";
 
 export const AUTO_RENAME_PROMPT_PREFIX =
   "Write a concise name for this coding-agent session.";
@@ -101,23 +102,37 @@ export function sanitizeAutoRenameName(output: string): string | null {
   return name || null;
 }
 
-export function generateAutoRenameName(
+/**
+ * Ask the session's provider CLI for a short session name.
+ *
+ * omp runs through the non-blocking `runOmpPrint` (`omp -p` without tools,
+ * extensions or session). Claude and Codex keep their synchronous CLI calls.
+ */
+export async function generateAutoRenameName(
   options: AutoRenameOptions,
-): string | null {
+): Promise<string | null> {
   const cwd = resolve(options.projectPath);
   const prompt = buildAutoRenamePrompt(options.transcript);
-  const output =
-    options.provider === "codex"
-      ? runCodexAutoRename(cwd, prompt)
-      : execFileSync(
-          "claude",
-          ["-p", ...(options.model ? ["--model", options.model] : []), prompt],
-          {
-            cwd,
-            encoding: "utf-8",
-            maxBuffer: 1024 * 1024,
-          },
-        );
+  let output: string;
+  switch (options.provider) {
+    case "omp":
+      output = await runOmpPrint({ cwd, prompt, model: options.model });
+      break;
+    case "codex":
+      output = runCodexAutoRename(cwd, prompt);
+      break;
+    case "claude":
+      output = execFileSync(
+        "claude",
+        ["-p", ...(options.model ? ["--model", options.model] : []), prompt],
+        {
+          cwd,
+          encoding: "utf-8",
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      break;
+  }
   return sanitizeAutoRenameName(output);
 }
 

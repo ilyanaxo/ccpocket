@@ -33,6 +33,15 @@ describe("getVersionInfo", () => {
     expect(info.uptime).toBe(3600); // 1 hour = 3600 seconds
   });
 
+  it("advertises the protocol capabilities, including provider_omp_v1", () => {
+    const info = getVersionInfo(mockStartedAt);
+    expect(info.protocolCapabilities).toEqual([
+      "project_request_correlation_v1",
+      "session_context_v1",
+      "provider_omp_v1",
+    ]);
+  });
+
   it("returns ISO formatted startedAt", () => {
     const info = getVersionInfo(mockStartedAt);
     expect(info.startedAt).toBe("2026-02-11T10:00:00.000Z");

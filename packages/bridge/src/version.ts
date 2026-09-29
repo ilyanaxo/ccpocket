@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
+  BRIDGE_PROTOCOL_CAPABILITIES,
   BRIDGE_PROTOCOL_MAX_VERSION,
   BRIDGE_PROTOCOL_MIN_VERSION,
 } from "./protocol-version.js";
@@ -35,6 +36,7 @@ export interface VersionInfo {
   version: string;
   protocolVersion: number;
   minimumProtocolVersion: number;
+  protocolCapabilities: string[];
   nodeVersion: string;
   platform: NodeJS.Platform;
   arch: NodeJS.Architecture;
@@ -54,6 +56,7 @@ export function getVersionInfo(serverStartedAt: number): VersionInfo {
     version: packageJson.version,
     protocolVersion: BRIDGE_PROTOCOL_MAX_VERSION,
     minimumProtocolVersion: BRIDGE_PROTOCOL_MIN_VERSION,
+    protocolCapabilities: [...BRIDGE_PROTOCOL_CAPABILITIES],
     nodeVersion: process.version,
     platform: process.platform,
     arch: process.arch,
