@@ -11,8 +11,10 @@ import '../core/logger.dart';
 import '../models/messages.dart';
 import '../models/offline_pending_action.dart';
 import '../models/protocol_version.dart';
+import '../models/ssh_host_key.dart';
 import '../utils/codex_plan_update.dart';
 import '../utils/network_endpoint.dart';
+import 'bridge_http_auth.dart';
 import 'bridge_service_base.dart';
 import 'session_runtime_store.dart';
 
@@ -41,6 +43,11 @@ class BridgeService implements BridgeServiceBase {
   void Function(ClientMessage message)? onOutgoingMessage;
   FutureOr<void> Function()? onDisconnect;
 
+  /// Returns the URL for an automatic reconnect to the Bridge at the given
+  /// URL, e.g. after re-establishing the SSH tunnel whose loopback port it
+  /// points to. Unset, reconnects reuse the last URL.
+  Future<String> Function(String url)? resolveReconnectUrl;
+
   WebSocketChannel? _channel;
   StreamSubscription? _channelSub;
   final _messageController = StreamController<ServerMessage>.broadcast();
@@ -51,6 +58,8 @@ class BridgeService implements BridgeServiceBase {
   final _sessionListController =
       StreamController<List<SessionInfo>>.broadcast();
   final _sessionStoppedController = StreamController<String>.broadcast();
+  final _sshHostKeyMismatchController =
+      StreamController<SshHostKeyMismatchException>.broadcast();
   final _recentSessionsController =
       StreamController<List<RecentSession>>.broadcast();
   final _galleryController = StreamController<List<GalleryImage>>.broadcast();
@@ -363,6 +372,8 @@ class BridgeService implements BridgeServiceBase {
   String? _lastUrl;
   int _connectionEpoch = 0;
   Timer? _reconnectTimer;
+  Future<void>? _reconnectInFlight;
+  BridgeHttpAuth? _publishedHttpAuth;
   int _reconnectAttempt = 0;
   static const _maxReconnectDelay = 30;
   bool _intentionalDisconnect = false;
@@ -379,6 +390,12 @@ class BridgeService implements BridgeServiceBase {
   Stream<List<SessionInfo>> get sessionList => _sessionListController.stream;
   @override
   Stream<String> get stoppedSessions => _sessionStoppedController.stream;
+
+  /// Changed SSH host keys that stopped an automatic reconnect through
+  /// [resolveReconnectUrl]. The connection stays disconnected until the user
+  /// connects again.
+  Stream<SshHostKeyMismatchException> get sshHostKeyMismatches =>
+      _sshHostKeyMismatchController.stream;
   Stream<List<RecentSession>> get recentSessionsStream =>
       _recentSessionsController.stream;
   Stream<List<GalleryImage>> get galleryStream => _galleryController.stream;
@@ -592,6 +609,30 @@ class BridgeService implements BridgeServiceBase {
     );
   }
 
+  /// API key of the current connection, sent as `token` on the WebSocket URL.
+  String? get apiKey {
+    final url = _lastUrl;
+    if (url == null) return null;
+    return Uri.tryParse(url)?.queryParameters[bridgeApiKeyQueryParameter];
+  }
+
+  /// Credentials for HTTP requests to the connected Bridge.
+  BridgeHttpAuth get httpAuth =>
+      BridgeHttpAuth(baseUrl: httpBaseUrl, apiKey: apiKey);
+
+  void _publishHttpAuth() {
+    final auth = httpAuth;
+    BridgeHttpAuth.current = auth;
+    _publishedHttpAuth = auth;
+  }
+
+  void _withdrawHttpAuth() {
+    if (identical(BridgeHttpAuth.current, _publishedHttpAuth)) {
+      BridgeHttpAuth.current = BridgeHttpAuth.none;
+    }
+    _publishedHttpAuth = null;
+  }
+
   static const _prefKeyUrl = 'bridge_url';
   static const _prefKeyApiKey = 'bridge_api_key';
   static const _prefKeyOfflinePendingMessages =
@@ -641,6 +682,7 @@ class BridgeService implements BridgeServiceBase {
       _clearBridgeScopedState(clearOfflineQueue: true);
     }
     _lastUrl = url;
+    _publishHttpAuth();
     _publishOmpSupport();
 
     _setBridgeConnectionState(BridgeConnectionState.connecting);
@@ -1620,9 +1662,57 @@ class BridgeService implements BridgeServiceBase {
     _setBridgeConnectionState(BridgeConnectionState.reconnecting);
     _reconnectTimer = Timer(Duration(seconds: delay), () {
       if (_lastUrl != null && !_intentionalDisconnect) {
-        connect(_lastUrl!);
+        unawaited(_reconnect());
       }
     });
+  }
+
+  /// Reconnects to the last Bridge through [resolveReconnectUrl].
+  Future<void> _reconnect() {
+    return _reconnectInFlight ??= _resolveAndReconnect().whenComplete(
+      () => _reconnectInFlight = null,
+    );
+  }
+
+  Future<void> _resolveAndReconnect() async {
+    final url = _lastUrl;
+    final resolver = resolveReconnectUrl;
+    if (url == null || _intentionalDisconnect || _disposed) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    if (resolver == null) {
+      connect(url);
+      return;
+    }
+    final epoch = _connectionEpoch;
+    if (_connectionState != BridgeConnectionState.reconnecting) {
+      _setBridgeConnectionState(BridgeConnectionState.reconnecting);
+    }
+    final String nextUrl;
+    try {
+      nextUrl = await resolver(url);
+    } on SshHostKeyMismatchException catch (mismatch) {
+      // Retrying cannot succeed until the user resets the pinned key, and a
+      // retry loop would hide the block behind "reconnecting".
+      if (epoch == _connectionEpoch && _lastUrl == url && !_disposed) {
+        _intentionalDisconnect = true;
+        _setBridgeConnectionState(BridgeConnectionState.disconnected);
+        _sshHostKeyMismatchController.add(mismatch);
+      }
+      return;
+    } catch (error, stackTrace) {
+      logger.warning('Reconnect URL resolution failed', error, stackTrace);
+      if (epoch == _connectionEpoch && _lastUrl == url) _scheduleReconnect();
+      return;
+    }
+    // A connect or disconnect while resolving supersedes this reconnect.
+    if (epoch != _connectionEpoch ||
+        _lastUrl != url ||
+        _intentionalDisconnect ||
+        _disposed) {
+      return;
+    }
+    connect(nextUrl);
   }
 
   @override
@@ -2755,7 +2845,7 @@ class BridgeService implements BridgeServiceBase {
         _lastUrl != null) {
       // A notification tap is an active foreground request, so do not make
       // the user wait for an exponential background reconnect delay.
-      connect(_lastUrl!);
+      unawaited(_reconnect());
       return true;
     }
     ensureConnected();
@@ -4530,15 +4620,25 @@ class BridgeService implements BridgeServiceBase {
 
   /// Check if the Bridge server is reachable via /health endpoint.
   /// Returns the health JSON on success, null on failure.
-  static Future<Map<String, dynamic>?> checkHealth(String wsUrl) async {
+  ///
+  /// [apiKey] authorizes the request for Bridges that protect HTTP endpoints.
+  static Future<Map<String, dynamic>?> checkHealth(
+    String wsUrl, {
+    String? apiKey,
+  }) async {
     try {
       final uri = Uri.tryParse(wsUrl);
       if (uri == null) return null;
       final scheme = uri.scheme == 'wss' ? 'https' : 'http';
-      final healthUrl =
-          '${formatUriOrigin(scheme: scheme, host: uri.host, port: uri.hasPort ? uri.port : null)}/health';
+      final baseUrl = formatUriOrigin(
+        scheme: scheme,
+        host: uri.host,
+        port: uri.hasPort ? uri.port : null,
+      );
+      final healthUri = Uri.parse('$baseUrl/health');
+      final auth = BridgeHttpAuth(baseUrl: baseUrl, apiKey: apiKey);
       final response = await http
-          .get(Uri.parse(healthUrl))
+          .get(healthUri, headers: auth.headersFor(healthUri))
           .timeout(const Duration(seconds: 3));
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
@@ -4561,10 +4661,14 @@ class BridgeService implements BridgeServiceBase {
     if (baseUrl == null) return null;
 
     try {
+      final uploadUri = Uri.parse('$baseUrl/api/gallery/upload');
       final response = await http
           .post(
-            Uri.parse('$baseUrl/api/gallery/upload'),
-            headers: {'Content-Type': 'application/json'},
+            uploadUri,
+            headers: {
+              'Content-Type': 'application/json',
+              ...httpAuth.headersFor(uploadUri),
+            },
             body: jsonEncode({
               'base64': base64Data,
               'mimeType': mimeType,
@@ -4594,8 +4698,9 @@ class BridgeService implements BridgeServiceBase {
     if (baseUrl == null) return false;
 
     try {
+      final imageUri = Uri.parse('$baseUrl/api/gallery/$id');
       final response = await http
-          .delete(Uri.parse('$baseUrl/api/gallery/$id'))
+          .delete(imageUri, headers: httpAuth.headersFor(imageUri))
           .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
@@ -4630,7 +4735,7 @@ class BridgeService implements BridgeServiceBase {
         _scheduleReconnect();
       }
     } else if (_connectionState == BridgeConnectionState.disconnected) {
-      connect(_lastUrl!);
+      unawaited(_reconnect());
     }
     // If reconnecting, do nothing — already in progress.
   }
@@ -4644,6 +4749,7 @@ class BridgeService implements BridgeServiceBase {
     _channelSub = null;
     _channel?.sink.close();
     _channel = null;
+    _withdrawHttpAuth();
     _setBridgeConnectionState(BridgeConnectionState.disconnected);
     _clearBridgeScopedState(clearOfflineQueue: true);
     final disconnectCallback = onDisconnect;
@@ -4680,6 +4786,7 @@ class BridgeService implements BridgeServiceBase {
     _disposed = true;
     _connectionEpoch++;
     _intentionalDisconnect = true;
+    _withdrawHttpAuth();
     // Dispose explicitly discards unsent work and invalidates any flush that
     // is suspended on persistence before controllers are closed.
     _clearOfflinePendingState();
@@ -4714,6 +4821,7 @@ class BridgeService implements BridgeServiceBase {
     _connectionController.close();
     _sessionListController.close();
     _sessionStoppedController.close();
+    _sshHostKeyMismatchController.close();
     _recentSessionsController.close();
     _galleryController.close();
     for (final state in _galleryScopeStates.values) {

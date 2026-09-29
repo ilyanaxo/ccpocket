@@ -5,6 +5,7 @@ import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../../l10n/app_localizations.dart';
+import '../../../services/bridge_http_auth.dart';
 import '../../../theme/app_spacing.dart';
 import '../generated_image_preview_item.dart';
 import '../generated_image_preview_screen.dart';
@@ -185,8 +186,10 @@ class _IntrinsicAspectRatioImageState
   ImageProvider<Object> _providerFor(GeneratedImagePreviewItem item) {
     final bytes = item.bytes;
     if (bytes != null) return MemoryImage(bytes);
+    final request = BridgeHttpAuth.current.imageRequest(item.chatImageUrl!);
     return ExtendedNetworkImageProvider(
-      item.chatImageUrl!,
+      request.url,
+      headers: request.headers,
       cache: true,
       cacheKey: item.thumbnailCacheKey,
       cacheMaxAge: _cacheMaxAge,
@@ -266,8 +269,10 @@ class _GeneratedImageThumbnail extends StatelessWidget {
       );
     }
 
+    final request = BridgeHttpAuth.current.imageRequest(item.chatImageUrl!);
     return ExtendedImage.network(
-      item.chatImageUrl!,
+      request.url,
+      headers: request.headers,
       fit: fit,
       cache: true,
       cacheKey: item.thumbnailCacheKey,

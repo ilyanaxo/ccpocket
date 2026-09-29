@@ -7,6 +7,7 @@ import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/git_diff_interaction_mode.dart';
 import 'package:ccpocket/models/image_paste_shortcut.dart';
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/models/ssh_host_key.dart';
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/models/new_session_tab.dart';
 import 'package:ccpocket/providers/machine_manager_cubit.dart';
@@ -259,6 +260,23 @@ class _StaticMachineManagerService implements MachineManagerService {
 
   @override
   Future<String?> getSshJumpPrivateKey(String machineId) async => null;
+
+  @override
+  Future<Map<String, SshHostKeyPin>> getSshHostKeys(String machineId) async =>
+      {};
+
+  @override
+  Future<void> pinSshHostKey(
+    String machineId,
+    String endpoint,
+    SshHostKeyPin pin,
+  ) async {}
+
+  @override
+  Future<void> clearSshHostKey(String machineId, String endpoint) async {}
+
+  @override
+  void reportSshHostKeyMismatch(String machineId) {}
 
   @override
   Future<String> buildWsUrl(String machineId) async => 'ws://127.0.0.1:8765';

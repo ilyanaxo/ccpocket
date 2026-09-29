@@ -2,6 +2,7 @@ import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../../models/messages.dart';
+import '../../../services/bridge_http_auth.dart';
 import '../../../theme/app_theme.dart';
 
 const _kCacheMaxAge = Duration(days: 7);
@@ -25,7 +26,9 @@ class GalleryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final appColors = Theme.of(context).extension<AppColors>()!;
-    final imageUrl = '$httpBaseUrl${image.url}';
+    final request = BridgeHttpAuth.current.imageRequest(
+      '$httpBaseUrl${image.url}',
+    );
 
     return GestureDetector(
       key: ValueKey('gallery_tile_${image.id}'),
@@ -43,7 +46,8 @@ class GalleryTile extends StatelessWidget {
                   width: double.infinity,
                   color: Theme.of(context).colorScheme.surfaceContainerHigh,
                   child: ExtendedImage.network(
-                    imageUrl,
+                    request.url,
+                    headers: request.headers,
                     fit: BoxFit.cover,
                     cache: true,
                     cacheMaxAge: _kCacheMaxAge,

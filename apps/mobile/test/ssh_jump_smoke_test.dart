@@ -2,8 +2,23 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/services/machine_manager_service.dart';
+import 'package:ccpocket/services/ssh_host_key_verifier.dart';
 import 'package:ccpocket/services/ssh_startup_service.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Pins host keys like the app, in storage that lives for one test.
+Future<SshHostKeyVerifier> _hostKeyVerifier() async {
+  SharedPreferences.setMockInitialValues({});
+  FlutterSecureStorage.setMockInitialValues({});
+  final manager = MachineManagerService(
+    await SharedPreferences.getInstance(),
+    const FlutterSecureStorage(),
+  );
+  return SshHostKeyVerifier(manager, machineId: 'smoke');
+}
 
 void _printSshDebugOnFailure(String? message) {
   if (message != null) {
@@ -35,6 +50,7 @@ void main() {
         debugLog: _printSshDebugOnFailure,
       );
 
+      final hostKeyVerifier = await _hostKeyVerifier();
       await expectLater(
         gateway.connect(
           host: targetHost,
@@ -42,6 +58,7 @@ void main() {
           username: username,
           authType: SshAuthType.password,
           password: password,
+          hostKeyVerifier: hostKeyVerifier,
         ),
         throwsA(anything),
       );
@@ -58,6 +75,7 @@ void main() {
           username: username,
           jumpPassword: password,
         ),
+        hostKeyVerifier: hostKeyVerifier,
       );
 
       try {

@@ -2,6 +2,7 @@ import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../../l10n/app_localizations.dart';
+import '../../../services/bridge_http_auth.dart';
 import '../generated_image_preview_item.dart';
 
 const _cacheMaxAge = Duration(days: 7);
@@ -186,8 +187,10 @@ class _GeneratedImage extends StatelessWidget {
       );
     }
 
+    final request = BridgeHttpAuth.current.imageRequest(item.url!);
     return ExtendedImage.network(
-      item.url!,
+      request.url,
+      headers: request.headers,
       fit: BoxFit.contain,
       cache: true,
       cacheKey: item.cacheKey,

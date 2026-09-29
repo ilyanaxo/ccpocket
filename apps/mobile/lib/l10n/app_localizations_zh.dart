@@ -680,6 +680,42 @@ class AppLocalizationsZh extends AppLocalizations {
   String get machineEditAddAndConnect => '添加并连接';
 
   @override
+  String get machineEditSshHostKeys => 'SSH 主机密钥';
+
+  @override
+  String get machineEditSshHostKeysSubtitle => '首次连接时保存。提供不同的密钥时将阻止连接。';
+
+  @override
+  String get machineEditSshHostKeysEmpty => '尚未保存密钥。首次 SSH 连接时保存。';
+
+  @override
+  String get machineEditSshHostKeyReset => '重置';
+
+  @override
+  String get machineErrorSshHostKeyChanged => 'SSH 主机密钥已变更，连接已被阻止';
+
+  @override
+  String get sshHostKeyChangedTitle => 'SSH 主机密钥已变更';
+
+  @override
+  String sshHostKeyChangedMessage(String endpoint) {
+    return '$endpoint 的 SSH 主机密钥与已保存的密钥不一致，因此已阻止连接。服务器密钥可能已被更换，也可能有人在拦截连接。';
+  }
+
+  @override
+  String get sshHostKeyPinned => '已保存的密钥';
+
+  @override
+  String get sshHostKeyPresented => '提供的密钥';
+
+  @override
+  String get sshHostKeyChangedResetHint =>
+      '仅当你自己更换了服务器密钥时，才在机器设置中重置已保存的密钥，然后重新连接。';
+
+  @override
+  String get sshHostKeyOpenMachineSettings => '机器设置';
+
+  @override
   String get deleteMachine => '删除机器';
 
   @override

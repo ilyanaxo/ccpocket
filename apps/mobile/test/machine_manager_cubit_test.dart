@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:ccpocket/features/session_list/session_list_screen.dart';
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/models/ssh_host_key.dart';
 import 'package:ccpocket/providers/machine_manager_cubit.dart';
 import 'package:ccpocket/services/bridge_latest_version_service.dart';
 import 'package:ccpocket/services/machine_manager_service.dart';
@@ -148,6 +149,23 @@ class MockMachineManagerService implements MachineManagerService {
   Future<String?> getSshJumpPrivateKey(String machineId) async => null;
 
   @override
+  Future<Map<String, SshHostKeyPin>> getSshHostKeys(String machineId) async =>
+      {};
+
+  @override
+  Future<void> pinSshHostKey(
+    String machineId,
+    String endpoint,
+    SshHostKeyPin pin,
+  ) async {}
+
+  @override
+  Future<void> clearSshHostKey(String machineId, String endpoint) async {}
+
+  @override
+  void reportSshHostKeyMismatch(String machineId) {}
+
+  @override
   Future<String> buildWsUrl(String machineId) async => 'ws://mock:8765';
 
   @override
@@ -257,6 +275,7 @@ class MockSshStartupService implements SshStartupService {
 
   @override
   Future<SshResult> testConnectionWithCredentials({
+    String? machineId,
     required String host,
     required int sshPort,
     required String username,
@@ -656,6 +675,25 @@ void main() {
       expect(result, false);
       expect(cubit.state.error, contains('npx is not available'));
       expect(mockService.calls, isNot(contains('checkHealth:m1')));
+    });
+
+    test('exposes a changed SSH host key until the next attempt', () async {
+      const mismatch = SshHostKeyMismatchException(
+        endpoint: 'server.example.com:22',
+        pinned: SshHostKeyPin(type: 'ssh-ed25519', fingerprint: 'SHA256:a'),
+        presented: SshHostKeyPin(type: 'ssh-ed25519', fingerprint: 'SHA256:b'),
+      );
+      mockSsh.startResult = SshResult.hostKeyMismatch(mismatch);
+      final cubit = createCubit();
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+
+      expect(await cubit.startBridge('m1'), false);
+      expect(cubit.state.sshHostKeyMismatch, same(mismatch));
+
+      mockSsh.startResult = SshResult.success();
+      expect(await cubit.startBridge('m1'), true);
+      expect(cubit.state.sshHostKeyMismatch, isNull);
     });
   });
 

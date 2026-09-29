@@ -228,6 +228,22 @@
   "machineEditConnectionSuccessful": "연결에 성공했습니다",
   "machineEditFillSshCredentials": "SSH 인증 정보를 입력하세요",
   "machineEditAddAndConnect": "추가하고 연결",
+  "machineEditSshHostKeys": "SSH 호스트 키",
+  "machineEditSshHostKeysSubtitle": "첫 연결 시 저장합니다. 다른 키가 제시되면 연결을 차단합니다.",
+  "machineEditSshHostKeysEmpty": "저장된 키가 없습니다. 첫 SSH 연결 시 저장합니다.",
+  "machineEditSshHostKeyReset": "초기화",
+  "machineErrorSshHostKeyChanged": "SSH 호스트 키가 변경되어 연결을 차단했습니다",
+  "sshHostKeyChangedTitle": "SSH 호스트 키가 변경되었습니다",
+  "sshHostKeyChangedMessage": "{endpoint}의 SSH 호스트 키가 저장된 키와 일치하지 않아 연결을 차단했습니다. 서버 키가 교체되었거나 누군가 연결을 가로채고 있을 수 있습니다.",
+  "@sshHostKeyChangedMessage": {
+    "placeholders": {
+      "endpoint": { "type": "String" }
+    }
+  },
+  "sshHostKeyPinned": "저장된 키",
+  "sshHostKeyPresented": "제시된 키",
+  "sshHostKeyChangedResetHint": "서버 키를 직접 교체한 경우에만 컴퓨터 설정에서 저장된 키를 초기화한 뒤 다시 연결하세요.",
+  "sshHostKeyOpenMachineSettings": "컴퓨터 설정",
   "deleteMachine": "컴퓨터 삭제",
   "deleteMachineConfirm": "\"{displayName}\"을 삭제할까요? 저장된 인증 정보가 모두 제거됩니다.",
   "connectToBridgeServer": "Bridge 서버에 연결",

@@ -161,6 +161,7 @@ class _StaticProbe extends BridgeEndpointProbe {
     required int port,
     required BridgeConnectionMode mode,
     Duration timeout = const Duration(seconds: 3),
+    String? apiKey,
   }) async {
     modes.add(mode);
     return result;
@@ -184,6 +185,7 @@ class _ControllableProbe extends BridgeEndpointProbe {
     required int port,
     required BridgeConnectionMode mode,
     Duration timeout = const Duration(seconds: 3),
+    String? apiKey,
   }) async {
     final gate = _gate;
     if (gate != null) {

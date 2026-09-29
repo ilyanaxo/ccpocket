@@ -22,6 +22,7 @@ class FileTransferDownloader {
     required String fileName,
     required int expectedSizeBytes,
     required FileTransferProgress onProgress,
+    Map<String, String> headers = const {},
   }) {
     return Future.error(
       const FileTransferDownloadException(

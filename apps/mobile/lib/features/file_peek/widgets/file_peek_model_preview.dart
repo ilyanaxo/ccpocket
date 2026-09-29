@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../../l10n/app_localizations.dart';
+import '../../../services/bridge_http_auth.dart';
 import '../glb_preview_cache.dart';
 import '../glb_preview_data.dart';
 
@@ -113,8 +114,10 @@ class _FilePeekModelPreviewState extends State<FilePeekModelPreview> {
   }
 
   Future<Uint8List> _download(http.Client client, String url) async {
-    final request = http.Request('GET', Uri.parse(url))
-      ..followRedirects = false;
+    final uri = Uri.parse(url);
+    final request = http.Request('GET', uri)
+      ..followRedirects = false
+      ..headers.addAll(BridgeHttpAuth.current.headersFor(uri));
     final response = await client
         .send(request)
         .timeout(const Duration(seconds: 30));

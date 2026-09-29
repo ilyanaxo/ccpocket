@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../../l10n/app_localizations.dart';
+import '../../../services/bridge_http_auth.dart';
 import '../../../theme/app_theme.dart';
 import 'file_peek_media_controls.dart';
 
@@ -132,7 +133,10 @@ class _FilePeekMediaPreviewState extends State<FilePeekMediaPreview>
       _failed = false;
     });
     try {
-      await _player.open(Media(url), play: false);
+      await _player.open(
+        Media(BridgeHttpAuth.current.authorizeUrl(url)),
+        play: false,
+      );
       if (mounted && generation == _openGeneration) {
         setState(() {
           _loading = false;

@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/machine.dart';
 import '../utils/network_endpoint.dart';
+import 'bridge_http_auth.dart';
 
 enum BridgeTransport { secure, standard }
 
@@ -27,8 +28,9 @@ class BridgeEndpointProbeResult {
 
 typedef BridgeHealthRequest = Future<http.Response> Function(
   Uri uri,
-  Duration timeout,
-);
+  Duration timeout, {
+  Map<String, String> headers,
+});
 
 /// Whether sending an API key requires explicit confirmation because the
 /// automatically selected transport is not encrypted.
@@ -43,10 +45,11 @@ bool shouldConfirmAutomaticWsWithApiKey({
     !usesEncryptedTunnel &&
     apiKey?.trim().isNotEmpty == true;
 
-/// Probes the public, unauthenticated Bridge health endpoint.
+/// Probes the Bridge health endpoint.
 ///
 /// Automatic mode probes both transports and always prefers HTTPS when both
-/// are available. API keys and other credentials are never included.
+/// are available. An API key is only sent over HTTPS, so automatic mode never
+/// exposes it on a plaintext probe before the user confirms WS.
 class BridgeEndpointProbe {
   final BridgeHealthRequest _request;
 
@@ -58,12 +61,25 @@ class BridgeEndpointProbe {
     required int port,
     required BridgeConnectionMode mode,
     Duration timeout = const Duration(seconds: 3),
+    String? apiKey,
   }) async {
     switch (mode) {
       case BridgeConnectionMode.secureOnly:
-        return _probeTransport(host, port, BridgeTransport.secure, timeout);
+        return _probeTransport(
+          host,
+          port,
+          BridgeTransport.secure,
+          timeout,
+          apiKey,
+        );
       case BridgeConnectionMode.standardOnly:
-        return _probeTransport(host, port, BridgeTransport.standard, timeout);
+        return _probeTransport(
+          host,
+          port,
+          BridgeTransport.standard,
+          timeout,
+          apiKey,
+        );
       case BridgeConnectionMode.automatic:
         final attemptTimeout = Duration(
           milliseconds: (timeout.inMilliseconds ~/ 2).clamp(500, 3000),
@@ -73,6 +89,7 @@ class BridgeEndpointProbe {
           port,
           BridgeTransport.secure,
           attemptTimeout,
+          apiKey,
         );
         if (secure.isReachable) return secure;
         return _probeTransport(
@@ -80,6 +97,7 @@ class BridgeEndpointProbe {
           port,
           BridgeTransport.standard,
           attemptTimeout,
+          apiKey,
         );
     }
   }
@@ -89,11 +107,21 @@ class BridgeEndpointProbe {
     int port,
     BridgeTransport transport,
     Duration timeout,
+    String? apiKey,
   ) async {
     final scheme = transport == BridgeTransport.secure ? 'https' : 'http';
     final origin = formatUriOrigin(scheme: scheme, host: host, port: port);
+    final healthUri = Uri.parse('$origin/health');
+    final auth = BridgeHttpAuth(
+      baseUrl: origin,
+      apiKey: transport == BridgeTransport.secure ? apiKey : null,
+    );
     try {
-      final response = await _request(Uri.parse('$origin/health'), timeout);
+      final response = await _request(
+        healthUri,
+        timeout,
+        headers: auth.headersFor(healthUri),
+      );
       if (response.statusCode != 200) {
         return const BridgeEndpointProbeResult.unreachable();
       }
@@ -107,6 +135,9 @@ class BridgeEndpointProbe {
     }
   }
 
-  static Future<http.Response> _defaultRequest(Uri uri, Duration timeout) =>
-      http.get(uri).timeout(timeout);
+  static Future<http.Response> _defaultRequest(
+    Uri uri,
+    Duration timeout, {
+    Map<String, String> headers = const {},
+  }) => http.get(uri, headers: headers).timeout(timeout);
 }

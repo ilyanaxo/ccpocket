@@ -20,6 +20,9 @@ class _TestBridgeService extends BridgeService {
   String? get httpBaseUrl => 'http://bridge.local:8765';
 
   @override
+  String? get apiKey => 'bridge-secret';
+
+  @override
   void send(ClientMessage message) => sentMessages.add(message);
 
   void emit(ServerMessage message) => controller.add(message);
@@ -42,11 +45,13 @@ class _TestDownloader extends FileTransferDownloader {
     required String fileName,
     required int expectedSizeBytes,
     required FileTransferProgress onProgress,
+    Map<String, String> headers = const {},
   }) async {
     expect(
       url.toString(),
       'http://bridge.local:8765/api/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     );
+    expect(headers, {'Authorization': 'Bearer bridge-secret'});
     onProgress(5, 10);
     onProgress(10, 10);
     return '/tmp/$fileName';

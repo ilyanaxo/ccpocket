@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../models/messages.dart';
+import '../../services/bridge_http_auth.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/command_parser.dart';
@@ -223,11 +224,16 @@ class _StandardBubble extends StatelessWidget {
                                 ),
                               ),
                             if (imageBytesList.isEmpty)
-                              for (final url in imageUrls)
+                              for (final request in imageUrls.map(
+                                (url) => BridgeHttpAuth.current.imageRequest(
+                                  '$httpBaseUrl$url',
+                                ),
+                              ))
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: Image.network(
-                                    '$httpBaseUrl$url',
+                                    request.url,
+                                    headers: request.headers,
                                     width: imageUrls.length == 1 ? 200 : 120,
                                     fit: BoxFit.cover,
                                     errorBuilder:

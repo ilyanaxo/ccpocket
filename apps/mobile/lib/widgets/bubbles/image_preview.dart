@@ -7,6 +7,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../models/messages.dart';
+import '../../services/bridge_http_auth.dart';
 import '../workspace_pane_chrome.dart';
 import '../media_export_actions.dart';
 
@@ -59,6 +60,7 @@ class _SingleImage extends StatelessWidget {
   Widget build(BuildContext context) {
     final url = '$httpBaseUrl${image.url}';
     final dataBytes = _decodeDataImageUrl(url);
+    final request = BridgeHttpAuth.current.imageRequest(url);
     return GestureDetector(
       onTap: () => _openFullScreen(context, url),
       child: ClipRRect(
@@ -69,7 +71,8 @@ class _SingleImage extends StatelessWidget {
           child: dataBytes != null
               ? Image.memory(dataBytes, fit: BoxFit.cover)
               : ExtendedImage.network(
-                  url,
+                  request.url,
+                  headers: request.headers,
                   fit: BoxFit.cover,
                   cache: true,
                   cacheMaxAge: _kCacheMaxAge,
@@ -121,6 +124,7 @@ class _ImageThumbnail extends StatelessWidget {
   Widget build(BuildContext context) {
     final url = '$httpBaseUrl${image.url}';
     final dataBytes = _decodeDataImageUrl(url);
+    final request = BridgeHttpAuth.current.imageRequest(url);
     return GestureDetector(
       onTap: () => _openFullScreen(context, url),
       child: ClipRRect(
@@ -128,7 +132,8 @@ class _ImageThumbnail extends StatelessWidget {
         child: dataBytes != null
             ? Image.memory(dataBytes, height: height, fit: BoxFit.cover)
             : ExtendedImage.network(
-                url,
+                request.url,
+                headers: request.headers,
                 height: height,
                 fit: BoxFit.cover,
                 cache: true,
@@ -207,6 +212,9 @@ class FullScreenImageViewer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final chrome = resolveStandalonePaneChrome(context);
+    final request = url == null
+        ? null
+        : BridgeHttpAuth.current.imageRequest(url!);
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: chrome.wrapAppBar(
@@ -241,7 +249,8 @@ class FullScreenImageViewer extends StatelessWidget {
                     ? SvgPicture.memory(bytes!, fit: BoxFit.contain)
                     : Image.memory(bytes!, fit: BoxFit.contain)
               : ExtendedImage.network(
-                  url!,
+                  request!.url,
+                  headers: request.headers,
                   fit: BoxFit.contain,
                   cache: true,
                   cacheMaxAge: _kCacheMaxAge,

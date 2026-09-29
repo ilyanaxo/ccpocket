@@ -707,6 +707,45 @@ class AppLocalizationsEn extends AppLocalizations {
   String get machineEditAddAndConnect => 'Add & Connect';
 
   @override
+  String get machineEditSshHostKeys => 'SSH host keys';
+
+  @override
+  String get machineEditSshHostKeysSubtitle =>
+      'Pinned on the first connection. A different key blocks the connection.';
+
+  @override
+  String get machineEditSshHostKeysEmpty =>
+      'No key pinned yet. The key is pinned on the first SSH connection.';
+
+  @override
+  String get machineEditSshHostKeyReset => 'Reset';
+
+  @override
+  String get machineErrorSshHostKeyChanged =>
+      'SSH host key changed. Connection blocked.';
+
+  @override
+  String get sshHostKeyChangedTitle => 'SSH host key changed';
+
+  @override
+  String sshHostKeyChangedMessage(String endpoint) {
+    return 'The SSH host key of $endpoint does not match the pinned key, so the connection was blocked. The server key may have been replaced, or someone may be intercepting the connection.';
+  }
+
+  @override
+  String get sshHostKeyPinned => 'Pinned key';
+
+  @override
+  String get sshHostKeyPresented => 'Presented key';
+
+  @override
+  String get sshHostKeyChangedResetHint =>
+      'Only if you replaced the server key yourself, reset the pinned key in the machine settings and connect again.';
+
+  @override
+  String get sshHostKeyOpenMachineSettings => 'Machine settings';
+
+  @override
   String get deleteMachine => 'Delete Machine';
 
   @override

@@ -7,6 +7,7 @@ part 'machine.g.dart';
 
 const machineErrorBridgeNotFound = 'bridge_not_found';
 const machineErrorSecureConnectionUnavailable = 'secure_connection_unavailable';
+const machineErrorSshHostKeyChanged = 'ssh_host_key_changed';
 
 Map<String, dynamic> _migrateMachineJson(Map<String, dynamic> json) {
   final migrated = Map<String, dynamic>.from(json);

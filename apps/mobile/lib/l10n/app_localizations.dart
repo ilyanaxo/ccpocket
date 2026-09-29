@@ -1379,6 +1379,72 @@ abstract class AppLocalizations {
   /// **'追加して接続'**
   String get machineEditAddAndConnect;
 
+  /// No description provided for @machineEditSshHostKeys.
+  ///
+  /// In ja, this message translates to:
+  /// **'SSH ホスト鍵'**
+  String get machineEditSshHostKeys;
+
+  /// No description provided for @machineEditSshHostKeysSubtitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'初回接続時に保存します。異なる鍵が提示された場合は接続をブロックします。'**
+  String get machineEditSshHostKeysSubtitle;
+
+  /// No description provided for @machineEditSshHostKeysEmpty.
+  ///
+  /// In ja, this message translates to:
+  /// **'保存済みの鍵はありません。最初の SSH 接続時に保存します。'**
+  String get machineEditSshHostKeysEmpty;
+
+  /// No description provided for @machineEditSshHostKeyReset.
+  ///
+  /// In ja, this message translates to:
+  /// **'リセット'**
+  String get machineEditSshHostKeyReset;
+
+  /// No description provided for @machineErrorSshHostKeyChanged.
+  ///
+  /// In ja, this message translates to:
+  /// **'SSH ホスト鍵が変更されたため接続をブロックしました'**
+  String get machineErrorSshHostKeyChanged;
+
+  /// No description provided for @sshHostKeyChangedTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'SSH ホスト鍵が変更されました'**
+  String get sshHostKeyChangedTitle;
+
+  /// No description provided for @sshHostKeyChangedMessage.
+  ///
+  /// In ja, this message translates to:
+  /// **'{endpoint} の SSH ホスト鍵が保存済みの鍵と一致しないため、接続をブロックしました。サーバーの鍵が差し替えられたか、通信が傍受されている可能性があります。'**
+  String sshHostKeyChangedMessage(String endpoint);
+
+  /// No description provided for @sshHostKeyPinned.
+  ///
+  /// In ja, this message translates to:
+  /// **'保存済みの鍵'**
+  String get sshHostKeyPinned;
+
+  /// No description provided for @sshHostKeyPresented.
+  ///
+  /// In ja, this message translates to:
+  /// **'提示された鍵'**
+  String get sshHostKeyPresented;
+
+  /// No description provided for @sshHostKeyChangedResetHint.
+  ///
+  /// In ja, this message translates to:
+  /// **'サーバーの鍵を自分で差し替えた場合のみ、マシン設定で保存済みの鍵をリセットしてから再接続してください。'**
+  String get sshHostKeyChangedResetHint;
+
+  /// No description provided for @sshHostKeyOpenMachineSettings.
+  ///
+  /// In ja, this message translates to:
+  /// **'マシン設定'**
+  String get sshHostKeyOpenMachineSettings;
+
   /// No description provided for @deleteMachine.
   ///
   /// In ja, this message translates to:

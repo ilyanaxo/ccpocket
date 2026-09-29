@@ -38,6 +38,7 @@ class FileTransferDownloader {
     required String fileName,
     required int expectedSizeBytes,
     required FileTransferProgress onProgress,
+    Map<String, String> headers = const {},
   }) async {
     _cancelled = false;
     final file = await _createTargetFile(requestId, fileName);
@@ -53,7 +54,9 @@ class FileTransferDownloader {
     _client = client;
 
     try {
-      final request = http.Request('GET', url)..followRedirects = false;
+      final request = http.Request('GET', url)
+        ..followRedirects = false
+        ..headers.addAll(headers);
       final response = await client.send(request);
       if (response.statusCode != HttpStatus.ok) {
         throw FileTransferDownloadException(

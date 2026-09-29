@@ -1,12 +1,14 @@
 import 'package:ccpocket/features/session_list/widgets/machine_edit_sheet.dart';
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/models/ssh_host_key.dart';
 import 'package:ccpocket/services/ssh_startup_service.dart';
 import 'package:ccpocket/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _TestConnectionCall {
+  final String? machineId;
   final String host;
   final int sshPort;
   final String username;
@@ -21,6 +23,7 @@ class _TestConnectionCall {
   final String? jumpPrivateKey;
 
   const _TestConnectionCall({
+    required this.machineId,
     required this.host,
     required this.sshPort,
     required this.username,
@@ -45,6 +48,9 @@ void main() {
     String? existingSshPrivateKey,
     String? existingSshJumpPassword,
     String? existingSshJumpPrivateKey,
+    Map<String, SshHostKeyPin> existingSshHostKeys = const {},
+    Future<void> Function(String endpoint)? onResetSshHostKey,
+    SshResult? testConnectionResult,
     Locale locale = const Locale('en'),
     double keyboardInset = 0,
     void Function(Machine machine, String? apiKey)? onSaveAndConnect,
@@ -80,10 +86,13 @@ void main() {
               existingSshPrivateKey: existingSshPrivateKey,
               existingSshJumpPassword: existingSshJumpPassword,
               existingSshJumpPrivateKey: existingSshJumpPrivateKey,
+              existingSshHostKeys: existingSshHostKeys,
+              onResetSshHostKey: onResetSshHostKey,
               onSave: onSave,
               onSaveAndConnect: onSaveAndConnect,
               onTestConnection:
                   ({
+                    machineId,
                     required host,
                     required sshPort,
                     required username,
@@ -99,6 +108,7 @@ void main() {
                   }) async {
                     onTestConnectionCall?.call(
                       _TestConnectionCall(
+                        machineId: machineId,
                         host: host,
                         sshPort: sshPort,
                         username: username,
@@ -113,7 +123,7 @@ void main() {
                         jumpPrivateKey: jumpPrivateKey,
                       ),
                     );
-                    return SshResult.success();
+                    return testConnectionResult ?? SshResult.success();
                   },
             );
 
@@ -812,6 +822,134 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(savedSshPrivateKey, 'replacement-private-key');
+    });
+  });
+
+  group('MachineEditSheet SSH host keys', () {
+    const machine = Machine(
+      id: 'm-host-keys',
+      host: '127.0.0.1',
+      sshEnabled: true,
+      sshUsername: 'ana',
+      sshAuthType: SshAuthType.privateKey,
+      sshJumpHost: 'server.example.com',
+    );
+    const pinned = SshHostKeyPin(
+      type: 'ssh-ed25519',
+      fingerprint: 'SHA256:pinnedFingerprint',
+    );
+    Future<void> noSave({
+      required Machine machine,
+      String? apiKey,
+      String? sshPassword,
+      String? sshPrivateKey,
+      String? sshJumpPassword,
+      String? sshJumpPrivateKey,
+    }) async {}
+
+    testWidgets('shows the pinned fingerprint and resets the pin', (
+      tester,
+    ) async {
+      final resetEndpoints = <String>[];
+
+      await pumpSheet(
+        tester,
+        machine: machine,
+        existingSshPrivateKey: 'saved-private-key',
+        existingSshHostKeys: const {'server.example.com:22': pinned},
+        onResetSshHostKey: (endpoint) async => resetEndpoints.add(endpoint),
+        onSave: noSave,
+      );
+
+      final section = find.byKey(const ValueKey('ssh_host_keys_section'));
+      await tester.ensureVisible(section);
+      expect(find.text('SSH host keys'), findsOneWidget);
+      expect(find.text('server.example.com:22'), findsOneWidget);
+      expect(
+        find.text('ssh-ed25519\nSHA256:pinnedFingerprint'),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(
+          const ValueKey('ssh_host_key_reset_button_server.example.com:22'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(resetEndpoints, ['server.example.com:22']);
+      expect(find.text('server.example.com:22'), findsNothing);
+      expect(
+        find.text(
+          'No key pinned yet. The key is pinned on the first SSH connection.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Test Connection reports old and new fingerprints', (
+      tester,
+    ) async {
+      _TestConnectionCall? call;
+
+      await pumpSheet(
+        tester,
+        machine: machine,
+        existingSshPrivateKey: 'saved-private-key',
+        onTestConnectionCall: (value) => call = value,
+        testConnectionResult: SshResult.hostKeyMismatch(
+          const SshHostKeyMismatchException(
+            endpoint: 'server.example.com:22',
+            pinned: pinned,
+            presented: SshHostKeyPin(
+              type: 'ssh-ed25519',
+              fingerprint: 'SHA256:presentedFingerprint',
+            ),
+          ),
+        ),
+        onSave: noSave,
+      );
+
+      await tester.tap(find.text('Test Connection'));
+      await tester.pumpAndSettle();
+
+      expect(call!.machineId, 'm-host-keys');
+      expect(
+        find.textContaining(
+          'The SSH host key of server.example.com:22 does not match the '
+          'pinned key',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Pinned key: ssh-ed25519 SHA256:pinnedFingerprint'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining(
+          'Presented key: ssh-ed25519 SHA256:presentedFingerprint',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('hides host keys and passes no machine when adding', (
+      tester,
+    ) async {
+      _TestConnectionCall? call;
+
+      await pumpSheet(
+        tester,
+        machine: machine.copyWith(id: ''),
+        existingSshPrivateKey: 'saved-private-key',
+        onTestConnectionCall: (value) => call = value,
+        onSave: noSave,
+      );
+
+      expect(find.byKey(const ValueKey('ssh_host_keys_section')), findsNothing);
+      await tester.tap(find.text('Test Connection'));
+      await tester.pumpAndSettle();
+      expect(call!.machineId, isNull);
     });
   });
 }

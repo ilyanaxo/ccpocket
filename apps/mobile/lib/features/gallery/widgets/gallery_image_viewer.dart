@@ -7,6 +7,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../../l10n/app_localizations.dart';
 import '../../../models/messages.dart';
+import '../../../services/bridge_http_auth.dart';
 import '../../../widgets/workspace_pane_chrome.dart';
 import '../../../widgets/media_export_actions.dart';
 
@@ -149,13 +150,16 @@ class GalleryImageViewer extends HookWidget {
             onPageChanged: (index) => currentPage.value = index,
             itemBuilder: (context, index) {
               final image = imageList.value[index];
-              final imageUrl = '$httpBaseUrl${image.url}';
+              final request = BridgeHttpAuth.current.imageRequest(
+                '$httpBaseUrl${image.url}',
+              );
               return GestureDetector(
                 key: ValueKey(image.id),
                 behavior: HitTestBehavior.opaque,
                 onTap: () => chromeVisible.value = !chromeVisible.value,
                 child: ExtendedImage.network(
-                  imageUrl,
+                  request.url,
+                  headers: request.headers,
                   fit: BoxFit.contain,
                   cache: true,
                   cacheMaxAge: _kCacheMaxAge,

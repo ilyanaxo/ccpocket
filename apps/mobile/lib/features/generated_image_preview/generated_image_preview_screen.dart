@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:share_plus/share_plus.dart';
 
 import '../../l10n/app_localizations.dart';
+import '../../services/bridge_http_auth.dart';
 import '../../widgets/workspace_pane_chrome.dart';
 import '../../widgets/media_export_actions.dart';
 import 'generated_image_preview_item.dart';
@@ -283,8 +284,9 @@ Future<void> _shareGeneratedImage(
 
 Future<Uint8List> _downloadGeneratedImage(String url) async {
   try {
+    final uri = Uri.parse(url);
     final response = await http
-        .get(Uri.parse(url))
+        .get(uri, headers: BridgeHttpAuth.current.headersFor(uri))
         .timeout(const Duration(seconds: 30));
     if (response.statusCode != 200) {
       throw const _GeneratedImageDownloadException();

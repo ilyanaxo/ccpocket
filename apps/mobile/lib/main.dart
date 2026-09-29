@@ -154,6 +154,7 @@ void main() async {
 
   final bridge = BridgeService();
   bridge.onDisconnect = sshBridgeTunnelService?.closeAll;
+  bridge.resolveReconnectUrl = sshBridgeTunnelService?.refreshWsUrl;
   final fcmService = FcmService();
   final draftService = DraftService(prefs);
   final inAppReviewService = InAppReviewService(prefs: prefs);

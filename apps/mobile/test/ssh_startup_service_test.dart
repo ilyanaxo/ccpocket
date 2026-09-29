@@ -2,8 +2,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/models/ssh_host_key.dart';
 import 'package:ccpocket/services/machine_manager_service.dart';
+import 'package:ccpocket/services/ssh_host_key_verifier.dart';
 import 'package:ccpocket/services/ssh_startup_service.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -67,6 +70,7 @@ class _ConnectionCall {
   final String? password;
   final String? privateKey;
   final SshJumpConfig? jump;
+  final SshHostKeyVerifier hostKeyVerifier;
 
   const _ConnectionCall({
     required this.host,
@@ -76,12 +80,16 @@ class _ConnectionCall {
     required this.password,
     required this.privateKey,
     required this.jump,
+    required this.hostKeyVerifier,
   });
 }
 
 class _RecordingConnectionGateway implements SshConnectionGateway {
   final calls = <_ConnectionCall>[];
   final clients = <_FakeRemoteClient>[];
+
+  /// Host key fingerprint every server on the route presents.
+  String presentedFingerprint = 'SHA256:presented';
 
   @override
   Future<SshConnectionHandle> connect({
@@ -92,6 +100,7 @@ class _RecordingConnectionGateway implements SshConnectionGateway {
     String? password,
     String? privateKey,
     SshJumpConfig? jump,
+    required SshHostKeyVerifier hostKeyVerifier,
   }) async {
     calls.add(
       _ConnectionCall(
@@ -102,8 +111,24 @@ class _RecordingConnectionGateway implements SshConnectionGateway {
         password: password,
         privateKey: privateKey,
         jump: jump,
+        hostKeyVerifier: hostKeyVerifier,
       ),
     );
+    // Present host keys along the route as the dartssh2 handshake does; a
+    // rejected key closes the transport before authentication.
+    final route = [if (jump != null) (jump.host, jump.port), (host, port)];
+    for (final (routeHost, routePort) in route) {
+      final accepted = await hostKeyVerifier.handlerFor(routeHost, routePort)(
+        'ssh-ed25519',
+        utf8.encode(presentedFingerprint),
+      );
+      if (!accepted) {
+        hostKeyVerifier.rethrowRejection(
+          SSHAuthAbortError('Connection closed before authentication'),
+          StackTrace.current,
+        );
+      }
+    }
     final client = _FakeRemoteClient();
     clients.add(client);
     return SshConnectionHandle(client);
@@ -471,6 +496,92 @@ void main() {
       expect(jump.authType, SshAuthType.privateKey);
       expect(jump.jumpPassword, isNull);
       expect(jump.jumpPrivateKey, 'jump-key');
+    });
+  });
+
+  group('SshStartupService host key pinning', () {
+    const machine = Machine(
+      id: 'pinned',
+      host: 'target.internal',
+      sshEnabled: true,
+      sshUsername: 'target-user',
+      sshJumpHost: 'jump.example.com',
+    );
+    const presented = SshHostKeyPin(
+      type: 'ssh-ed25519',
+      fingerprint: 'SHA256:presented',
+    );
+
+    test('pins the key of every server on the route on first use', () async {
+      final manager = await createManager(machine);
+      final gateway = _RecordingConnectionGateway();
+      final service = SshStartupService(manager, connectionGateway: gateway);
+
+      final result = await service.startBridgeServer('pinned', password: 'pw');
+
+      expect(result.success, isTrue);
+      expect(await manager.getSshHostKeys('pinned'), {
+        'jump.example.com:22': presented,
+        'target.internal:22': presented,
+      });
+    });
+
+    test('blocks a changed key and reports both fingerprints', () async {
+      final manager = await createManager(machine);
+      const pinned = SshHostKeyPin(
+        type: 'ssh-ed25519',
+        fingerprint: 'SHA256:pinned',
+      );
+      await manager.pinSshHostKey('pinned', 'target.internal:22', pinned);
+      final gateway = _RecordingConnectionGateway();
+      final service = SshStartupService(manager, connectionGateway: gateway);
+
+      final result = await service.startBridgeServer('pinned', password: 'pw');
+
+      expect(result.success, isFalse);
+      final mismatch = result.hostKeyMismatch!;
+      expect(mismatch.endpoint, 'target.internal:22');
+      expect(mismatch.pinned, pinned);
+      expect(mismatch.presented, presented);
+      expect(result.error, contains('SHA256:pinned'));
+      expect(result.error, contains('SHA256:presented'));
+      expect(gateway.clients, isEmpty);
+      expect(
+        (await manager.getSshHostKeys('pinned'))['target.internal:22'],
+        pinned,
+      );
+    });
+
+    test('connection test checks pins without adding new ones', () async {
+      final manager = await createManager(machine);
+      final gateway = _RecordingConnectionGateway();
+      final service = SshStartupService(manager, connectionGateway: gateway);
+
+      final unpinned = await service.testConnectionWithCredentials(
+        machineId: 'pinned',
+        host: 'target.internal',
+        sshPort: 22,
+        username: 'target-user',
+        authType: SshAuthType.password,
+        password: 'pw',
+      );
+      expect(unpinned.success, isTrue);
+      expect(await manager.getSshHostKeys('pinned'), isEmpty);
+
+      await manager.pinSshHostKey(
+        'pinned',
+        'target.internal:22',
+        const SshHostKeyPin(type: 'ssh-ed25519', fingerprint: 'SHA256:old'),
+      );
+      final changed = await service.testConnectionWithCredentials(
+        machineId: 'pinned',
+        host: 'target.internal',
+        sshPort: 22,
+        username: 'target-user',
+        authType: SshAuthType.password,
+        password: 'pw',
+      );
+      expect(changed.hostKeyMismatch?.presented, presented);
     });
   });
 }

@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../../../l10n/app_localizations.dart';
 import '../../../models/machine.dart';
+import '../../../models/ssh_host_key.dart';
 import '../../../services/ssh_startup_service.dart';
 import '../../../theme/app_theme.dart';
 import '../../../utils/network_endpoint.dart';
+import 'ssh_host_key_mismatch_dialog.dart';
 
 /// Bottom sheet for adding or editing a remote machine configuration.
 class MachineEditSheet extends StatefulWidget {
@@ -28,6 +30,12 @@ class MachineEditSheet extends StatefulWidget {
   /// testing/saving only; never prefilled into the text field.
   final String? existingSshJumpPrivateKey;
 
+  /// SSH host keys pinned for the machine, keyed by `host:port` (edit mode).
+  final Map<String, SshHostKeyPin> existingSshHostKeys;
+
+  /// Forgets the host key pinned for an endpoint (edit mode).
+  final Future<void> Function(String endpoint)? onResetSshHostKey;
+
   /// Callback when save is pressed
   final Future<void> Function({
     required Machine machine,
@@ -43,8 +51,10 @@ class MachineEditSheet extends StatefulWidget {
   /// When provided, the save button label changes to "Add & Connect".
   final void Function(Machine machine, String? apiKey)? onSaveAndConnect;
 
-  /// Callback to test SSH connection
+  /// Callback to test SSH connection. [machineId] is set when editing a saved
+  /// machine, so pinned host keys are checked.
   final Future<SshResult> Function({
+    String? machineId,
     required String host,
     required int sshPort,
     required String username,
@@ -68,6 +78,8 @@ class MachineEditSheet extends StatefulWidget {
     this.existingSshPrivateKey,
     this.existingSshJumpPassword,
     this.existingSshJumpPrivateKey,
+    this.existingSshHostKeys = const {},
+    this.onResetSshHostKey,
     required this.onSave,
     this.onSaveAndConnect,
     required this.onTestConnection,
@@ -104,6 +116,9 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
   bool _isTesting = false;
   String? _testResult;
   bool _testSuccess = false;
+  late final Map<String, SshHostKeyPin> _sshHostKeys = Map.of(
+    widget.existingSshHostKeys,
+  );
 
   bool get isEditing => widget.machine?.id.isNotEmpty == true;
 
@@ -226,6 +241,7 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
 
     try {
       final result = await widget.onTestConnection(
+        machineId: isEditing ? widget.machine!.id : null,
         host: normalizeHostInput(_hostController.text),
         sshPort: int.tryParse(_sshPortController.text) ?? 22,
         username: _sshUsernameController.text,
@@ -263,9 +279,16 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
             : null,
       );
 
+      final mismatch = result.hostKeyMismatch;
       setState(() {
         _testResult = result.success
             ? l.machineEditConnectionSuccessful
+            : mismatch != null
+            ? [
+                l.sshHostKeyChangedMessage(mismatch.endpoint),
+                '${l.sshHostKeyPinned}: ${mismatch.pinned}',
+                '${l.sshHostKeyPresented}: ${mismatch.presented}',
+              ].join('\n')
             : result.error;
         _testSuccess = result.success;
       });
@@ -277,6 +300,12 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
     } finally {
       setState(() => _isTesting = false);
     }
+  }
+
+  Future<void> _resetSshHostKey(String endpoint) async {
+    await widget.onResetSshHostKey?.call(endpoint);
+    if (!mounted) return;
+    setState(() => _sshHostKeys.remove(endpoint));
   }
 
   Future<void> _save() async {
@@ -935,6 +964,16 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
                             ),
                           ),
                         ],
+
+                        if (isEditing) ...[
+                          const SizedBox(height: 24),
+                          _SshHostKeysSection(
+                            pins: _sshHostKeys,
+                            onReset: widget.onResetSshHostKey == null
+                                ? null
+                                : _resetSshHostKey,
+                          ),
+                        ],
                       ],
 
                       const SizedBox(height: 32),
@@ -1060,6 +1099,60 @@ class _ConnectionModeField extends StatelessWidget {
       onChanged: (next) {
         if (next != null) onChanged(next);
       },
+    );
+  }
+}
+
+/// Host keys pinned for the machine, each with a reset action.
+class _SshHostKeysSection extends StatelessWidget {
+  final Map<String, SshHostKeyPin> pins;
+  final ValueChanged<String>? onReset;
+
+  const _SshHostKeysSection({required this.pins, required this.onReset});
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final reset = onReset;
+    return Column(
+      key: const ValueKey('ssh_host_keys_section'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(
+          title: l.machineEditSshHostKeys,
+          subtitle: l.machineEditSshHostKeysSubtitle,
+        ),
+        const SizedBox(height: 12),
+        if (pins.isEmpty)
+          Text(
+            l.machineEditSshHostKeysEmpty,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        for (final MapEntry(key: endpoint, value: pin) in pins.entries)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _TileCard(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: SshHostKeyFingerprint(label: endpoint, pin: pin),
+                    ),
+                    TextButton(
+                      key: ValueKey('ssh_host_key_reset_button_$endpoint'),
+                      onPressed: reset == null ? null : () => reset(endpoint),
+                      child: Text(l.machineEditSshHostKeyReset),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

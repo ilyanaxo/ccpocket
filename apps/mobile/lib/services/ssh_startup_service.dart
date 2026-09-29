@@ -6,7 +6,9 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/machine.dart';
+import '../models/ssh_host_key.dart';
 import 'machine_manager_service.dart';
+import 'ssh_host_key_verifier.dart';
 
 /// Result of an SSH operation
 class SshResult {
@@ -14,13 +16,28 @@ class SshResult {
   final String? output;
   final String? error;
 
-  const SshResult({required this.success, this.output, this.error});
+  /// Set when the connection was blocked because a host key changed.
+  final SshHostKeyMismatchException? hostKeyMismatch;
+
+  const SshResult({
+    required this.success,
+    this.output,
+    this.error,
+    this.hostKeyMismatch,
+  });
 
   factory SshResult.success([String? output]) =>
       SshResult(success: true, output: output);
 
   factory SshResult.failure(String error) =>
       SshResult(success: false, error: error);
+
+  factory SshResult.hostKeyMismatch(SshHostKeyMismatchException mismatch) =>
+      SshResult(
+        success: false,
+        error: mismatch.toString(),
+        hostKeyMismatch: mismatch,
+      );
 }
 
 class SshJumpConfig {
@@ -69,6 +86,8 @@ class SshConnectionHandle {
 }
 
 abstract class SshConnectionGateway {
+  /// Connects to [host], through [jump] when given. [hostKeyVerifier] checks
+  /// the host key of every server on the route.
   Future<SshConnectionHandle> connect({
     required String host,
     required int port,
@@ -77,6 +96,7 @@ abstract class SshConnectionGateway {
     String? password,
     String? privateKey,
     SshJumpConfig? jump,
+    required SshHostKeyVerifier hostKeyVerifier,
   });
 }
 
@@ -98,6 +118,33 @@ class DartSshConnectionGateway implements SshConnectionGateway {
     String? password,
     String? privateKey,
     SshJumpConfig? jump,
+    required SshHostKeyVerifier hostKeyVerifier,
+  }) async {
+    try {
+      return await _connect(
+        host: host,
+        port: port,
+        username: username,
+        authType: authType,
+        password: password,
+        privateKey: privateKey,
+        jump: jump,
+        hostKeyVerifier: hostKeyVerifier,
+      );
+    } catch (error, stackTrace) {
+      hostKeyVerifier.rethrowRejection(error, stackTrace);
+    }
+  }
+
+  Future<SshConnectionHandle> _connect({
+    required String host,
+    required int port,
+    required String username,
+    required SshAuthType authType,
+    String? password,
+    String? privateKey,
+    SshJumpConfig? jump,
+    required SshHostKeyVerifier hostKeyVerifier,
   }) async {
     final identities = _validateCredentials(authType, password, privateKey);
     if (jump == null) {
@@ -112,6 +159,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
         authType: authType,
         password: password,
         identities: identities,
+        onVerifyHostKey: hostKeyVerifier.handlerFor(host, port),
       );
       return SshConnectionHandle(DartSshRemoteClient(client));
     }
@@ -132,6 +180,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
       authType: jump.authType,
       password: jump.jumpPassword,
       identities: jumpIdentities,
+      onVerifyHostKey: hostKeyVerifier.handlerFor(jump.host, jump.port),
     );
 
     try {
@@ -143,6 +192,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
         authType: authType,
         password: password,
         identities: identities,
+        hostKeyVerifier: hostKeyVerifier,
       );
       return SshConnectionHandle(
         DartSshRemoteClient(targetClient),
@@ -162,6 +212,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
     required SshAuthType authType,
     String? password,
     List<SSHKeyPair>? identities,
+    required SshHostKeyVerifier hostKeyVerifier,
   }) async {
     try {
       final targetSocket = await jumpClient
@@ -173,8 +224,11 @@ class DartSshConnectionGateway implements SshConnectionGateway {
         authType: authType,
         password: password,
         identities: identities,
+        onVerifyHostKey: hostKeyVerifier.handlerFor(host, port),
       );
     } on SSHError {
+      // A rejected host key fails over netcat just the same.
+      if (hostKeyVerifier.rejection != null) rethrow;
       final targetSocket = await _openNetcatSocket(
         jumpClient,
         host: host,
@@ -186,6 +240,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
         authType: authType,
         password: password,
         identities: identities,
+        onVerifyHostKey: hostKeyVerifier.handlerFor(host, port),
       );
     }
   }
@@ -205,6 +260,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
     required SshAuthType authType,
     String? password,
     List<SSHKeyPair>? identities,
+    required SSHHostkeyVerifyHandler onVerifyHostKey,
   }) async {
     final client = _createClient(
       socket,
@@ -212,6 +268,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
       authType: authType,
       password: password,
       identities: identities,
+      onVerifyHostKey: onVerifyHostKey,
     );
     try {
       await client.ping().timeout(connectionTimeout);
@@ -228,6 +285,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
     required SshAuthType authType,
     String? password,
     List<SSHKeyPair>? identities,
+    required SSHHostkeyVerifyHandler onVerifyHostKey,
   }) {
     if (authType == SshAuthType.password) {
       if (password == null || password.isEmpty) {
@@ -237,6 +295,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
         socket,
         username: username,
         onPasswordRequest: () => password,
+        onVerifyHostKey: onVerifyHostKey,
         printDebug: debugLog,
       );
     }
@@ -245,6 +304,7 @@ class DartSshConnectionGateway implements SshConnectionGateway {
       socket,
       username: username,
       identities: identities!,
+      onVerifyHostKey: onVerifyHostKey,
       printDebug: debugLog,
     );
   }
@@ -693,6 +753,8 @@ ${_startCommand.trim()}
       } finally {
         connection.close();
       }
+    } on SshHostKeyMismatchException catch (e) {
+      return SshResult.hostKeyMismatch(e);
     } on SSHAuthFailError {
       return SshResult.failure('Authentication failed');
     } on SSHAuthAbortError {
@@ -704,8 +766,12 @@ ${_startCommand.trim()}
     }
   }
 
-  /// Test SSH connection with inline credentials (for add/edit dialog)
+  /// Test SSH connection with inline credentials (for add/edit dialog).
+  ///
+  /// Host keys are checked against the pins of [machineId] when editing a
+  /// saved machine; the test itself pins nothing.
   Future<SshResult> testConnectionWithCredentials({
+    String? machineId,
     required String host,
     required int sshPort,
     required String username,
@@ -747,6 +813,11 @@ ${_startCommand.trim()}
           jumpPassword: jumpPassword,
           jumpPrivateKey: jumpPrivateKey,
         ),
+        hostKeyVerifier: SshHostKeyVerifier(
+          _machineManager,
+          machineId: machineId,
+          pinNewKeys: false,
+        ),
       );
 
       try {
@@ -763,6 +834,8 @@ ${_startCommand.trim()}
       } finally {
         connection.close();
       }
+    } on SshHostKeyMismatchException catch (e) {
+      return SshResult.hostKeyMismatch(e);
     } on SSHAuthFailError {
       return SshResult.failure('Authentication failed');
     } on SSHAuthAbortError {
@@ -861,6 +934,8 @@ ${_startCommand.trim()}
       } finally {
         connection.close();
       }
+    } on SshHostKeyMismatchException catch (e) {
+      return SshResult.hostKeyMismatch(e);
     } on SSHAuthFailError {
       return SshResult.failure('Authentication failed');
     } on SSHAuthAbortError {
@@ -888,6 +963,10 @@ ${_startCommand.trim()}
         machine,
         targetPassword: password,
         targetPrivateKey: privateKey,
+      ),
+      hostKeyVerifier: SshHostKeyVerifier(
+        _machineManager,
+        machineId: machine.id,
       ),
     );
   }

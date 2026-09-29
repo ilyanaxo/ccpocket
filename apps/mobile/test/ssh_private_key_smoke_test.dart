@@ -2,8 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/services/machine_manager_service.dart';
+import 'package:ccpocket/services/ssh_host_key_verifier.dart';
 import 'package:ccpocket/services/ssh_startup_service.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 String _privateKey() {
   final inline = Platform.environment['CCPOCKET_SSH_PRIVATE_KEY'];
@@ -15,6 +19,17 @@ String _privateKey() {
       Platform.environment['CCPOCKET_SSH_PRIVATE_KEY_FILE'] ??
       '../../tools/ssh-jump-smoke/generated/id_ed25519';
   return File(file).readAsStringSync();
+}
+
+/// Pins host keys like the app, in storage that lives for one test.
+Future<SshHostKeyVerifier> _hostKeyVerifier() async {
+  SharedPreferences.setMockInitialValues({});
+  FlutterSecureStorage.setMockInitialValues({});
+  final manager = MachineManagerService(
+    await SharedPreferences.getInstance(),
+    const FlutterSecureStorage(),
+  );
+  return SshHostKeyVerifier(manager, machineId: 'smoke');
 }
 
 void _printSshDebugOnFailure(String? message) {
@@ -50,6 +65,7 @@ void main() {
           username: username,
           authType: SshAuthType.privateKey,
           privateKey: privateKey,
+          hostKeyVerifier: await _hostKeyVerifier(),
         );
 
         try {
@@ -96,6 +112,7 @@ void main() {
               authType: SshAuthType.privateKey,
               jumpPrivateKey: privateKey,
             ),
+            hostKeyVerifier: await _hostKeyVerifier(),
           );
 
           try {

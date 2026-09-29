@@ -238,6 +238,22 @@
   "machineEditConnectionSuccessful": "接続に成功しました",
   "machineEditFillSshCredentials": "SSH 認証情報を入力してください",
   "machineEditAddAndConnect": "追加して接続",
+  "machineEditSshHostKeys": "SSH ホスト鍵",
+  "machineEditSshHostKeysSubtitle": "初回接続時に保存します。異なる鍵が提示された場合は接続をブロックします。",
+  "machineEditSshHostKeysEmpty": "保存済みの鍵はありません。最初の SSH 接続時に保存します。",
+  "machineEditSshHostKeyReset": "リセット",
+  "machineErrorSshHostKeyChanged": "SSH ホスト鍵が変更されたため接続をブロックしました",
+  "sshHostKeyChangedTitle": "SSH ホスト鍵が変更されました",
+  "sshHostKeyChangedMessage": "{endpoint} の SSH ホスト鍵が保存済みの鍵と一致しないため、接続をブロックしました。サーバーの鍵が差し替えられたか、通信が傍受されている可能性があります。",
+  "@sshHostKeyChangedMessage": {
+    "placeholders": {
+      "endpoint": { "type": "String" }
+    }
+  },
+  "sshHostKeyPinned": "保存済みの鍵",
+  "sshHostKeyPresented": "提示された鍵",
+  "sshHostKeyChangedResetHint": "サーバーの鍵を自分で差し替えた場合のみ、マシン設定で保存済みの鍵をリセットしてから再接続してください。",
+  "sshHostKeyOpenMachineSettings": "マシン設定",
 
   "deleteMachine": "マシンを削除",
   "deleteMachineConfirm": "\"{displayName}\" を削除しますか？保存された認証情報もすべて削除されます。",

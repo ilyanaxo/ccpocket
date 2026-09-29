@@ -688,6 +688,43 @@ class AppLocalizationsJa extends AppLocalizations {
   String get machineEditAddAndConnect => '追加して接続';
 
   @override
+  String get machineEditSshHostKeys => 'SSH ホスト鍵';
+
+  @override
+  String get machineEditSshHostKeysSubtitle =>
+      '初回接続時に保存します。異なる鍵が提示された場合は接続をブロックします。';
+
+  @override
+  String get machineEditSshHostKeysEmpty => '保存済みの鍵はありません。最初の SSH 接続時に保存します。';
+
+  @override
+  String get machineEditSshHostKeyReset => 'リセット';
+
+  @override
+  String get machineErrorSshHostKeyChanged => 'SSH ホスト鍵が変更されたため接続をブロックしました';
+
+  @override
+  String get sshHostKeyChangedTitle => 'SSH ホスト鍵が変更されました';
+
+  @override
+  String sshHostKeyChangedMessage(String endpoint) {
+    return '$endpoint の SSH ホスト鍵が保存済みの鍵と一致しないため、接続をブロックしました。サーバーの鍵が差し替えられたか、通信が傍受されている可能性があります。';
+  }
+
+  @override
+  String get sshHostKeyPinned => '保存済みの鍵';
+
+  @override
+  String get sshHostKeyPresented => '提示された鍵';
+
+  @override
+  String get sshHostKeyChangedResetHint =>
+      'サーバーの鍵を自分で差し替えた場合のみ、マシン設定で保存済みの鍵をリセットしてから再接続してください。';
+
+  @override
+  String get sshHostKeyOpenMachineSettings => 'マシン設定';
+
+  @override
   String get deleteMachine => 'マシンを削除';
 
   @override

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../models/messages.dart';
+import '../../services/bridge_http_auth.dart';
 import '../../services/bridge_service.dart';
 import '../../widgets/bubbles/image_preview.dart';
 import '../../widgets/workspace_pane_chrome.dart';
@@ -279,8 +280,10 @@ class _NetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final request = BridgeHttpAuth.current.imageRequest(url);
     return ExtendedImage.network(
-      url,
+      request.url,
+      headers: request.headers,
       fit: BoxFit.contain,
       cache: true,
       cacheMaxAge: const Duration(days: 7),

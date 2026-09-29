@@ -199,6 +199,7 @@ class _MetadataLine extends StatelessWidget {
         machineErrorBridgeNotFound => l.machineErrorBridgeNotFound,
         machineErrorSecureConnectionUnavailable =>
           l.machineErrorSecureConnectionUnavailable,
+        machineErrorSshHostKeyChanged => l.machineErrorSshHostKeyChanged,
         _ => lastError!,
       };
       return Row(

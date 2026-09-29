@@ -11,6 +11,7 @@ import 'package:ccpocket/features/session_list/workspace_shell_screen.dart';
 import 'package:ccpocket/features/settings/state/settings_cubit.dart';
 import 'package:ccpocket/l10n/app_localizations.dart';
 import 'package:ccpocket/models/machine.dart';
+import 'package:ccpocket/models/ssh_host_key.dart';
 import 'package:ccpocket/models/protocol_version.dart';
 import 'package:ccpocket/router/app_router.dart';
 import 'package:ccpocket/router/session_stack_navigation.dart';
@@ -52,6 +53,8 @@ class _MockBridgeService extends BridgeService {
   final _galleryController = StreamController<List<GalleryImage>>.broadcast();
   final _projectHistoryController = StreamController<List<String>>.broadcast();
   final _fileListController = StreamController<List<String>>.broadcast();
+  final _sshHostKeyMismatchController =
+      StreamController<SshHostKeyMismatchException>.broadcast();
 
   BridgeConnectionState _state;
   List<SessionInfo> _sessions = const [];
@@ -105,6 +108,10 @@ class _MockBridgeService extends BridgeService {
   Stream<List<String>> get fileList => _fileListController.stream;
 
   @override
+  Stream<SshHostKeyMismatchException> get sshHostKeyMismatches =>
+      _sshHostKeyMismatchController.stream;
+
+  @override
   bool get isConnected => _state == BridgeConnectionState.connected;
 
   @override
@@ -145,6 +152,10 @@ class _MockBridgeService extends BridgeService {
 
   void emitMessage(ServerMessage message) {
     _messageController.add(message);
+  }
+
+  void emitSshHostKeyMismatch(SshHostKeyMismatchException mismatch) {
+    _sshHostKeyMismatchController.add(mismatch);
   }
 
   void setGalleryImages(List<GalleryImage> images) {
@@ -219,6 +230,7 @@ class _MockBridgeService extends BridgeService {
     _galleryController.close();
     _projectHistoryController.close();
     _fileListController.close();
+    _sshHostKeyMismatchController.close();
   }
 }
 
@@ -359,6 +371,23 @@ class _StaticMachineManagerService implements MachineManagerService {
 
   @override
   Future<String?> getSshJumpPrivateKey(String machineId) async => null;
+
+  @override
+  Future<Map<String, SshHostKeyPin>> getSshHostKeys(String machineId) async =>
+      {};
+
+  @override
+  Future<void> pinSshHostKey(
+    String machineId,
+    String endpoint,
+    SshHostKeyPin pin,
+  ) async {}
+
+  @override
+  Future<void> clearSshHostKey(String machineId, String endpoint) async {}
+
+  @override
+  void reportSshHostKeyMismatch(String machineId) {}
 
   @override
   Future<String> buildWsUrl(String machineId) async => 'ws://127.0.0.1:8765';
@@ -570,6 +599,51 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     NotificationService.instance.clearActiveSession();
+  });
+
+  testWidgets('explains a changed SSH host key that stopped a reconnect', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _MockBridgeService(
+      initialState: BridgeConnectionState.disconnected,
+    );
+    final settingsCubit = await _createSettingsCubit(bridge);
+    final draftService = DraftService(await SharedPreferences.getInstance());
+    final revenueCatService = _FakeRevenueCatService();
+    final supportBannerService = await _createSupportBannerService();
+
+    await tester.pumpWidget(
+      _buildWorkspaceApp(
+        bridge: bridge,
+        settingsCubit: settingsCubit,
+        draftService: draftService,
+        revenueCatService: revenueCatService,
+        supportBannerService: supportBannerService,
+        sessionListOnly: true,
+      ),
+    );
+    await _pumpUi(tester);
+
+    bridge.emitSshHostKeyMismatch(
+      const SshHostKeyMismatchException(
+        endpoint: 'jump.example.com:22',
+        pinned: SshHostKeyPin(type: 'ssh-ed25519', fingerprint: 'SHA256:old'),
+        presented: SshHostKeyPin(
+          type: 'ssh-ed25519',
+          fingerprint: 'SHA256:new',
+        ),
+        machineId: 'tunnel',
+      ),
+    );
+    await _pumpUi(tester);
+
+    expect(
+      find.byKey(const ValueKey('ssh_host_key_mismatch_dialog')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('jump.example.com:22'), findsOneWidget);
   });
 
   testWidgets('shows a scoped localized Codex writer conflict', (tester) async {

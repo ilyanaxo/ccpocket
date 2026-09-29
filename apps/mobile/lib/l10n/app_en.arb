@@ -256,6 +256,22 @@
   "machineEditConnectionSuccessful": "Connection successful!",
   "machineEditFillSshCredentials": "Please fill in SSH credentials",
   "machineEditAddAndConnect": "Add & Connect",
+  "machineEditSshHostKeys": "SSH host keys",
+  "machineEditSshHostKeysSubtitle": "Pinned on the first connection. A different key blocks the connection.",
+  "machineEditSshHostKeysEmpty": "No key pinned yet. The key is pinned on the first SSH connection.",
+  "machineEditSshHostKeyReset": "Reset",
+  "machineErrorSshHostKeyChanged": "SSH host key changed. Connection blocked.",
+  "sshHostKeyChangedTitle": "SSH host key changed",
+  "sshHostKeyChangedMessage": "The SSH host key of {endpoint} does not match the pinned key, so the connection was blocked. The server key may have been replaced, or someone may be intercepting the connection.",
+  "@sshHostKeyChangedMessage": {
+    "placeholders": {
+      "endpoint": { "type": "String" }
+    }
+  },
+  "sshHostKeyPinned": "Pinned key",
+  "sshHostKeyPresented": "Presented key",
+  "sshHostKeyChangedResetHint": "Only if you replaced the server key yourself, reset the pinned key in the machine settings and connect again.",
+  "sshHostKeyOpenMachineSettings": "Machine settings",
 
   "deleteMachine": "Delete Machine",
   "deleteMachineConfirm": "Delete \"{displayName}\"? This will remove all saved credentials.",

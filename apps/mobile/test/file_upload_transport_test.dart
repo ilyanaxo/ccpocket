@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 class _UploadClient extends http.BaseClient {
   final bool corruptDigest;
   bool? followRedirects;
+  Map<String, String>? headers;
   Uint8List? received;
 
   _UploadClient({this.corruptDigest = false});
@@ -17,6 +18,7 @@ class _UploadClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     followRedirects = request.followRedirects;
+    headers = request.headers;
     received = await request.finalize().toBytes();
     final digest = sha256.convert(received!).toString();
     return http.StreamedResponse(
@@ -48,9 +50,14 @@ void main() {
         file: XFile.fromData(bytes, name: 'sample.bin'),
         expectedSizeBytes: bytes.length,
         onProgress: (sent, _) => progress.add(sent),
+        headers: const {'Authorization': 'Bearer bridge-secret'},
       );
 
       expect(client.followRedirects, isFalse);
+      expect(
+        client.headers,
+        containsPair('Authorization', 'Bearer bridge-secret'),
+      );
       expect(client.received, bytes);
       expect(progress.last, bytes.length);
       expect(result.sha256, sha256.convert(bytes).toString());

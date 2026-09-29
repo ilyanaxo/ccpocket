@@ -11,8 +11,10 @@ import 'package:uuid/uuid.dart';
 
 import '../constants/app_constants.dart';
 import '../models/machine.dart';
+import '../models/ssh_host_key.dart';
 import '../utils/network_endpoint.dart';
 import 'bridge_endpoint_probe.dart';
+import 'bridge_http_auth.dart';
 
 typedef BridgeWsUrlResolver = Future<String> Function(
   Machine machine, {
@@ -57,6 +59,7 @@ class MachineManagerService {
   BridgeWsUrlResolver? _bridgeWsUrlResolver;
   BridgeHttpBaseUrlResolver? _bridgeHttpBaseUrlResolver;
   Timer? _healthCheckTimer;
+  Future<void> _sshHostKeyUpdates = Future.value();
 
   MachineManagerService(
     this._prefs,
@@ -695,6 +698,7 @@ class MachineManagerService {
       final canProbeDirectly = !usesSshTunnel;
       if (machine.connectionMode == BridgeConnectionMode.automatic &&
           canProbeDirectly) {
+        final apiKey = await _readApiKeyForHttp(machineId);
         var result = await _endpointProbe.probe(
           host: machine.host,
           port: machine.port,
@@ -704,6 +708,7 @@ class MachineManagerService {
                     : BridgeConnectionMode.standardOnly
               : BridgeConnectionMode.automatic,
           timeout: timeout,
+          apiKey: apiKey,
         );
         if (!result.isReachable &&
             machine.hasResolvedTransport &&
@@ -713,6 +718,7 @@ class MachineManagerService {
             port: machine.port,
             mode: BridgeConnectionMode.secureOnly,
             timeout: timeout,
+            apiKey: apiKey,
           );
         }
         final latest = getMachine(machineId);
@@ -773,8 +779,11 @@ class MachineManagerService {
         password: password,
         promptForPassword: promptForPassword,
       );
-      final healthUrl = '$httpBaseUrl/health';
-      final response = await http.get(Uri.parse(healthUrl)).timeout(timeout);
+      final healthUri = Uri.parse('$httpBaseUrl/health');
+      final auth = await _httpAuth(machine, httpBaseUrl);
+      final response = await http
+          .get(healthUri, headers: auth.headersFor(healthUri))
+          .timeout(timeout);
 
       if (response.statusCode == 200) {
         _statusCache[machineId] = MachineStatus.online;
@@ -794,6 +803,8 @@ class MachineManagerService {
             : 'HTTP ${response.statusCode}';
         _versionCache.remove(machineId);
       }
+    } on SshHostKeyMismatchException {
+      _setSshHostKeyChanged(machineId);
     } on http.ClientException catch (e) {
       // Connection refused = server not running (offline), not network issue
       _statusCache[machineId] = MachineStatus.offline;
@@ -829,6 +840,19 @@ class MachineManagerService {
       before.hasResolvedTransport == after.hasResolvedTransport &&
       before.sshJumpHost == after.sshJumpHost;
 
+  /// Shows on [machineId] that a changed SSH host key blocked a connection,
+  /// e.g. an automatic reconnect through the Bridge tunnel.
+  void reportSshHostKeyMismatch(String machineId) {
+    _setSshHostKeyChanged(machineId);
+    _finishHealthCheck(machineId);
+  }
+
+  void _setSshHostKeyChanged(String machineId) {
+    _statusCache[machineId] = MachineStatus.unreachable;
+    _lastErrors[machineId] = machineErrorSshHostKeyChanged;
+    _versionCache.remove(machineId);
+  }
+
   MachineStatus _finishHealthCheck(String machineId) {
     _lastChecked[machineId] = DateTime.now();
     _notifyListeners();
@@ -847,9 +871,10 @@ class MachineManagerService {
         password: password,
         promptForPassword: promptForPassword,
       );
-      final versionUrl = '$httpBaseUrl/version';
+      final versionUri = Uri.parse('$httpBaseUrl/version');
+      final auth = await _httpAuth(machine, httpBaseUrl);
       final response = await http
-          .get(Uri.parse(versionUrl))
+          .get(versionUri, headers: auth.headersFor(versionUri))
           .timeout(const Duration(seconds: 3));
 
       if (response.statusCode == 200) {
@@ -862,6 +887,38 @@ class MachineManagerService {
         '[MachineManager] Failed to fetch version for ${machine.id}',
         e,
       );
+    }
+  }
+
+  /// Credentials for HTTP requests to [machine]'s Bridge at [httpBaseUrl].
+  ///
+  /// The API key is withheld where connecting would first ask the user to
+  /// confirm sending it over an automatically selected plaintext transport.
+  /// The Bridge connection of the app is the exception: the user confirmed
+  /// its key, and its WebSocket URL carries the key over the same transport.
+  Future<BridgeHttpAuth> _httpAuth(Machine machine, String httpBaseUrl) async {
+    final apiKey = await _readApiKeyForHttp(machine.id);
+    final withheld = shouldConfirmAutomaticWsWithApiKey(
+      connectionMode: machine.connectionMode,
+      useSsl: machine.useSsl,
+      usesEncryptedTunnel: machine.sshJumpHost?.trim().isNotEmpty == true,
+      apiKey: apiKey,
+    );
+    if (!withheld) return BridgeHttpAuth(baseUrl: httpBaseUrl, apiKey: apiKey);
+    final connection = BridgeHttpAuth.current;
+    final base = Uri.tryParse(httpBaseUrl);
+    if (base != null && connection.appliesTo(base)) return connection;
+    return BridgeHttpAuth(baseUrl: httpBaseUrl, apiKey: null);
+  }
+
+  /// The API key for status requests. /health answers without it, so an
+  /// unreadable key store (e.g. a locked keychain) must not fail the check.
+  Future<String?> _readApiKeyForHttp(String machineId) async {
+    try {
+      return await getApiKey(machineId);
+    } catch (error) {
+      logger.warning('[MachineManager] Failed to read API key', error);
+      return null;
     }
   }
 
@@ -936,6 +993,50 @@ class MachineManagerService {
     await _secureStorage.delete(
       key: '$_secureKeyPrefix${machineId}_jump_ssh_key',
     );
+    await _secureStorage.delete(key: _sshHostKeysKey(machineId));
+  }
+
+  String _sshHostKeysKey(String machineId) =>
+      '$_secureKeyPrefix${machineId}_ssh_host_keys';
+
+  /// SSH host keys pinned for a machine, keyed by `host:port`.
+  Future<Map<String, SshHostKeyPin>> getSshHostKeys(String machineId) async =>
+      decodeSshHostKeyPins(
+        await _secureStorage.read(key: _sshHostKeysKey(machineId)),
+      );
+
+  /// Pin [pin] as the host key of [endpoint] (`host:port`) for a machine.
+  Future<void> pinSshHostKey(
+    String machineId,
+    String endpoint,
+    SshHostKeyPin pin,
+  ) => _updateSshHostKeys(machineId, (pins) => pins[endpoint] = pin);
+
+  /// Forget the host key pinned for [endpoint], so the next connection pins
+  /// the key the server presents then.
+  Future<void> clearSshHostKey(String machineId, String endpoint) =>
+      _updateSshHostKeys(machineId, (pins) => pins.remove(endpoint));
+
+  Future<void> _updateSshHostKeys(
+    String machineId,
+    void Function(Map<String, SshHostKeyPin> pins) update,
+  ) {
+    // Serialize read-modify-write cycles so concurrent connections to two
+    // endpoints of one machine do not drop each other's pins.
+    final next = _sshHostKeyUpdates.then((_) async {
+      final pins = await getSshHostKeys(machineId);
+      update(pins);
+      if (pins.isEmpty) {
+        await _secureStorage.delete(key: _sshHostKeysKey(machineId));
+      } else {
+        await _secureStorage.write(
+          key: _sshHostKeysKey(machineId),
+          value: encodeSshHostKeyPins(pins),
+        );
+      }
+    });
+    _sshHostKeyUpdates = next.catchError((Object _) {});
+    return next;
   }
 
   /// Get API key for a machine

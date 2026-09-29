@@ -69,6 +69,7 @@ class FileUploadTransport {
     required XFile file,
     required int expectedSizeBytes,
     required FileUploadProgress onProgress,
+    Map<String, String> headers = const {},
   }) async {
     _cancelled = false;
     final client = _clientFactory();
@@ -80,7 +81,8 @@ class FileUploadTransport {
     try {
       final request = http.StreamedRequest('PUT', url)
         ..followRedirects = false
-        ..contentLength = expectedSizeBytes;
+        ..contentLength = expectedSizeBytes
+        ..headers.addAll(headers);
       final responseFuture = client.send(request);
       final writeFuture = () async {
         try {

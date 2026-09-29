@@ -99,6 +99,7 @@ class FileTransferCubit extends Cubit<FileTransferState> {
             ),
           );
         },
+        headers: bridge.httpAuth.headersFor(url),
       );
       if (_cancelled || isClosed) return;
       emit(

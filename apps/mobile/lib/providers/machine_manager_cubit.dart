@@ -5,6 +5,7 @@ import 'package:freezed_annotation/freezed_annotation.dart';
 
 import '../constants/app_constants.dart';
 import '../models/machine.dart';
+import '../models/ssh_host_key.dart';
 import '../services/bridge_latest_version_service.dart';
 import '../services/machine_manager_service.dart';
 import '../services/ssh_startup_service.dart';
@@ -38,6 +39,9 @@ abstract class MachineManagerState with _$MachineManagerState {
 
     /// Error message if any
     String? error,
+
+    /// Changed SSH host key that blocked the last SSH operation, if any.
+    SshHostKeyMismatchException? sshHostKeyMismatch,
 
     /// Success message if any
     String? successMessage,
@@ -312,6 +316,7 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
       state.copyWith(
         startingMachineId: machineId,
         error: null,
+        sshHostKeyMismatch: null,
         successMessage: null,
       ),
     );
@@ -353,6 +358,7 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
           state.copyWith(
             startingMachineId: null,
             error: result.error ?? 'Failed to start',
+            sshHostKeyMismatch: result.hostKeyMismatch,
           ),
         );
         return false;
@@ -398,7 +404,13 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
       return false;
     }
 
-    emit(state.copyWith(error: null, successMessage: null));
+    emit(
+      state.copyWith(
+        error: null,
+        sshHostKeyMismatch: null,
+        successMessage: null,
+      ),
+    );
 
     try {
       final result = await _sshService.stopBridgeServer(
@@ -415,7 +427,12 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
         emit(state.copyWith(successMessage: 'Bridge Server stopped'));
         return true;
       } else {
-        emit(state.copyWith(error: result.error ?? 'Failed to stop'));
+        emit(
+          state.copyWith(
+            error: result.error ?? 'Failed to stop',
+            sshHostKeyMismatch: result.hostKeyMismatch,
+          ),
+        );
         return false;
       }
     } catch (e) {
@@ -439,6 +456,7 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
       state.copyWith(
         updatingMachineId: machineId,
         error: null,
+        sshHostKeyMismatch: null,
         successMessage: null,
       ),
     );
@@ -492,6 +510,7 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
           state.copyWith(
             updatingMachineId: null,
             error: result.error ?? 'Failed to update',
+            sshHostKeyMismatch: result.hostKeyMismatch,
           ),
         );
         return false;
@@ -530,6 +549,7 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
 
   /// Test SSH connection with inline credentials (for add/edit dialog)
   Future<SshResult> testConnectionWithCredentials({
+    String? machineId,
     required String host,
     required int sshPort,
     required String username,
@@ -547,6 +567,7 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
       return SshResult.failure('SSH not available on this platform');
     }
     return await _sshService.testConnectionWithCredentials(
+      machineId: machineId,
       host: host,
       sshPort: sshPort,
       username: username,
@@ -588,6 +609,14 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
   Future<String?> getSshJumpPrivateKey(String machineId) =>
       _service.getSshJumpPrivateKey(machineId);
 
+  /// SSH host keys pinned for a machine, keyed by `host:port`.
+  Future<Map<String, SshHostKeyPin>> getSshHostKeys(String machineId) =>
+      _service.getSshHostKeys(machineId);
+
+  /// Forget a pinned SSH host key so the next connection pins the new key.
+  Future<void> clearSshHostKey(String machineId, String endpoint) =>
+      _service.clearSshHostKey(machineId, endpoint);
+
   /// Build WebSocket URL with API key
   Future<String> buildWsUrl(
     String machineId, {
@@ -619,7 +648,13 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
 
   /// Clear any error or success message
   void clearMessages() {
-    emit(state.copyWith(error: null, successMessage: null));
+    emit(
+      state.copyWith(
+        error: null,
+        sshHostKeyMismatch: null,
+        successMessage: null,
+      ),
+    );
   }
 
   @override

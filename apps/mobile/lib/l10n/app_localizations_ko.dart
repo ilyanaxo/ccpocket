@@ -687,6 +687,43 @@ class AppLocalizationsKo extends AppLocalizations {
   String get machineEditAddAndConnect => '추가하고 연결';
 
   @override
+  String get machineEditSshHostKeys => 'SSH 호스트 키';
+
+  @override
+  String get machineEditSshHostKeysSubtitle =>
+      '첫 연결 시 저장합니다. 다른 키가 제시되면 연결을 차단합니다.';
+
+  @override
+  String get machineEditSshHostKeysEmpty => '저장된 키가 없습니다. 첫 SSH 연결 시 저장합니다.';
+
+  @override
+  String get machineEditSshHostKeyReset => '초기화';
+
+  @override
+  String get machineErrorSshHostKeyChanged => 'SSH 호스트 키가 변경되어 연결을 차단했습니다';
+
+  @override
+  String get sshHostKeyChangedTitle => 'SSH 호스트 키가 변경되었습니다';
+
+  @override
+  String sshHostKeyChangedMessage(String endpoint) {
+    return '$endpoint의 SSH 호스트 키가 저장된 키와 일치하지 않아 연결을 차단했습니다. 서버 키가 교체되었거나 누군가 연결을 가로채고 있을 수 있습니다.';
+  }
+
+  @override
+  String get sshHostKeyPinned => '저장된 키';
+
+  @override
+  String get sshHostKeyPresented => '제시된 키';
+
+  @override
+  String get sshHostKeyChangedResetHint =>
+      '서버 키를 직접 교체한 경우에만 컴퓨터 설정에서 저장된 키를 초기화한 뒤 다시 연결하세요.';
+
+  @override
+  String get sshHostKeyOpenMachineSettings => '컴퓨터 설정';
+
+  @override
   String get deleteMachine => '컴퓨터 삭제';
 
   @override

@@ -27,6 +27,9 @@ class _TestBridgeService extends BridgeService {
   String? get httpBaseUrl => 'http://bridge.local:8765';
 
   @override
+  String? get apiKey => 'bridge-secret';
+
+  @override
   void send(ClientMessage message) {
     sentMessages.add(message);
     onSend?.call(message);
@@ -51,11 +54,13 @@ class _TestTransport extends FileUploadTransport {
     required XFile file,
     required int expectedSizeBytes,
     required FileUploadProgress onProgress,
+    Map<String, String> headers = const {},
   }) async {
     expect(
       url.toString(),
       'http://bridge.local:8765/api/uploads/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     );
+    expect(headers, {'Authorization': 'Bearer bridge-secret'});
     uploadedFiles.add(file.name);
     onProgress(expectedSizeBytes, expectedSizeBytes);
     return FileUploadTransportResult(

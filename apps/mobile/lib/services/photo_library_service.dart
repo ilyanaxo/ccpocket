@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
+import 'bridge_http_auth.dart';
+
 class PhotoLibraryService {
   static const channel = MethodChannel('ccpocket/photo_library');
 
@@ -11,7 +13,9 @@ class PhotoLibraryService {
   static Future<Uint8List> loadBytes(String url) async {
     final uri = Uri.parse(url);
     if (uri.scheme == 'data') return uri.data!.contentAsBytes();
-    final response = await http.get(uri).timeout(const Duration(seconds: 30));
+    final response = await http
+        .get(uri, headers: BridgeHttpAuth.current.headersFor(uri))
+        .timeout(const Duration(seconds: 30));
     if (response.statusCode != 200) throw StateError('Download failed');
     return response.bodyBytes;
   }

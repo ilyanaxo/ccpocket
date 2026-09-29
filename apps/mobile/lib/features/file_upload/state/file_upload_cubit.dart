@@ -177,6 +177,7 @@ class FileUploadCubit extends Cubit<FileUploadState> {
         if (_cancelled || isClosed) return;
         _updateItem(item.id, (value) => value.copyWith(sentBytes: sent));
       },
+      headers: bridge.httpAuth.headersFor(url),
     );
     if (_cancelled) return;
     _updateItem(

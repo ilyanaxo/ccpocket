@@ -17,6 +17,7 @@ import '../../models/new_session_params.dart';
 import '../../models/new_session_tab.dart';
 import '../../models/offline_pending_action.dart';
 import '../../models/protocol_version.dart';
+import '../../models/ssh_host_key.dart';
 import '../../providers/bridge_cubits.dart';
 import '../../providers/machine_manager_cubit.dart';
 import '../../providers/unseen_sessions_cubit.dart';
@@ -46,6 +47,7 @@ import 'widgets/home_content.dart';
 import 'widgets/machine_edit_sheet.dart';
 import 'widgets/session_list_app_bar.dart';
 import 'widgets/session_list_loading_view.dart';
+import 'widgets/ssh_host_key_mismatch_dialog.dart';
 import 'workspace_shell_screen.dart';
 
 export 'services/session_resume_coordinator.dart'
@@ -316,6 +318,7 @@ class _SessionListScreenState extends State<SessionListScreen>
 
   // Only subscription that remains: session_created navigation
   StreamSubscription<ServerMessage>? _messageSub;
+  StreamSubscription<SshHostKeyMismatchException>? _sshHostKeyMismatchSub;
   late final ArchiveRequestTracker _archiveRequests;
 
   // macOS app update
@@ -346,6 +349,11 @@ class _SessionListScreenState extends State<SessionListScreen>
     if (bridge.isConnected && bridge.lastUsageResult == null) {
       bridge.requestUsage();
     }
+    _sshHostKeyMismatchSub = bridge.sshHostKeyMismatches.listen((mismatch) {
+      if (mounted) {
+        unawaited(_showSshHostKeyMismatch(mismatch.machineId, mismatch));
+      }
+    });
     _messageSub = bridge.messages.listen((msg) {
       if (!mounted) return;
       if (msg is SystemMessage && msg.subtype == 'session_created') {
@@ -601,6 +609,7 @@ class _SessionListScreenState extends State<SessionListScreen>
           host: candidate.host,
           port: port,
           mode: probeMode,
+          apiKey: apiKey?.trim(),
         );
         final useSsl = probe.isReachable
             ? probe.useSsl
@@ -623,8 +632,20 @@ class _SessionListScreenState extends State<SessionListScreen>
       unawaited(machineManagerCubit.refreshLatestBridgeVersionIfStale());
     }
 
-    // Health check before connecting
-    final health = await BridgeService.checkHealth(url);
+    final trimmedApiKey = apiKey?.trim() ?? '';
+    final needsPlaintextApiKeyConfirmation = shouldConfirmAutomaticWsWithApiKey(
+      connectionMode: connectionMode,
+      useSsl: url.startsWith('wss://'),
+      usesEncryptedTunnel: false,
+      apiKey: trimmedApiKey,
+    );
+
+    // Health check before connecting. The API key is withheld until the user
+    // confirms sending it over an automatically selected plaintext transport.
+    final health = await BridgeService.checkHealth(
+      url,
+      apiKey: needsPlaintextApiKeyConfirmation ? null : trimmedApiKey,
+    );
     if (health == null && mounted) {
       final shouldConnect = await _showSetupGuide(url);
       if (shouldConnect != true) return;
@@ -632,13 +653,7 @@ class _SessionListScreenState extends State<SessionListScreen>
 
     if (!mounted) return;
     // Auto-save to Machines on successful health check (or user choosing to connect)
-    final trimmedApiKey = apiKey?.trim() ?? '';
-    if (shouldConfirmAutomaticWsWithApiKey(
-      connectionMode: connectionMode,
-      useSsl: url.startsWith('wss://'),
-      usesEncryptedTunnel: false,
-      apiKey: trimmedApiKey,
-    )) {
+    if (needsPlaintextApiKeyConfirmation) {
       final shouldContinue = await _confirmAutomaticWsWithApiKey();
       if (shouldContinue != true || !mounted) return;
     }
@@ -810,6 +825,7 @@ class _SessionListScreenState extends State<SessionListScreen>
     WidgetsBinding.instance.removeObserver(this);
     widget.deepLinkNotifier?.removeListener(_onDeepLink);
     _messageSub?.cancel();
+    _sshHostKeyMismatchSub?.cancel();
     _activeSessionsSub?.cancel();
     _unseenCubit.close();
     super.dispose();
@@ -2501,6 +2517,12 @@ class _SessionListScreenState extends State<SessionListScreen>
         machine.id,
         promptForPassword: () => _promptForPassword(machine.displayName),
       );
+    } on SshHostKeyMismatchException catch (e) {
+      if (mounted) unawaited(_showSshHostKeyMismatch(machine.id, e));
+      return false;
+    } on SshBridgeTunnelClosedException {
+      // A disconnect or another connection superseded this one.
+      return false;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -2582,6 +2604,39 @@ class _SessionListScreenState extends State<SessionListScreen>
   bool _canContinueConnection(bool Function()? shouldConnect) =>
       mounted && (shouldConnect?.call() ?? true);
 
+  Future<void> _showSshHostKeyMismatch(
+    String? machineId,
+    SshHostKeyMismatchException mismatch,
+  ) {
+    final cubit = context.read<MachineManagerCubit?>();
+    return showDialog<void>(
+      context: context,
+      builder: (_) => SshHostKeyMismatchDialog(
+        mismatch: mismatch,
+        onOpenMachineSettings: machineId == null || cubit == null
+            ? null
+            : () {
+                final machine = cubit.state.machines
+                    .where((item) => item.machine.id == machineId)
+                    .firstOrNull;
+                if (machine != null && mounted) _editMachine(machine);
+              },
+      ),
+    );
+  }
+
+  /// Shows why an SSH start, stop or update of [machineId] failed.
+  void _showSshActionError(String machineId, String fallbackError) {
+    final state = context.read<MachineManagerCubit>().state;
+    final mismatch = state.sshHostKeyMismatch;
+    if (mismatch != null) {
+      unawaited(_showSshHostKeyMismatch(machineId, mismatch));
+      return;
+    }
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(state.error ?? fallbackError)));
+  }
+
   bool _hasSameConnectionTarget(Machine before, Machine after) =>
       before.host == after.host &&
       before.port == after.port &&
@@ -2620,10 +2675,7 @@ class _SessionListScreenState extends State<SessionListScreen>
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(l.bridgeServerUpdated)));
     } else if (mounted) {
-      final error = cubit.state.error;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error ?? l.failedToUpdateServer)));
+      _showSshActionError(m.machine.id, l.failedToUpdateServer);
     }
   }
 
@@ -2647,10 +2699,7 @@ class _SessionListScreenState extends State<SessionListScreen>
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(l.bridgeServerStarted)));
     } else if (mounted) {
-      final error = cubit.state.error;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error ?? l.failedToStartServer)));
+      _showSshActionError(m.machine.id, l.failedToStartServer);
     }
   }
 
@@ -2674,9 +2723,7 @@ class _SessionListScreenState extends State<SessionListScreen>
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(l.bridgeServerStopped)));
     } else if (mounted) {
-      final error = cubit.state.error;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error ?? l.failedToStopServer)));
+      _showSshActionError(m.machine.id, l.failedToStopServer);
     }
   }
 
@@ -2725,6 +2772,7 @@ class _SessionListScreenState extends State<SessionListScreen>
     final sshPrivateKey = await cubit.getSshPrivateKey(m.machine.id);
     final sshJumpPassword = await cubit.getSshJumpPassword(m.machine.id);
     final sshJumpPrivateKey = await cubit.getSshJumpPrivateKey(m.machine.id);
+    final sshHostKeys = await cubit.getSshHostKeys(m.machine.id);
 
     if (!mounted) return;
 
@@ -2740,6 +2788,9 @@ class _SessionListScreenState extends State<SessionListScreen>
         existingSshPrivateKey: sshPrivateKey,
         existingSshJumpPassword: sshJumpPassword,
         existingSshJumpPrivateKey: sshJumpPrivateKey,
+        existingSshHostKeys: sshHostKeys,
+        onResetSshHostKey: (endpoint) =>
+            cubit.clearSshHostKey(m.machine.id, endpoint),
         onSave:
             ({
               required machine,

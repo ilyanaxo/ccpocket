@@ -232,6 +232,22 @@
   "machineEditConnectionSuccessful": "连接成功",
   "machineEditFillSshCredentials": "请输入 SSH 认证信息",
   "machineEditAddAndConnect": "添加并连接",
+  "machineEditSshHostKeys": "SSH 主机密钥",
+  "machineEditSshHostKeysSubtitle": "首次连接时保存。提供不同的密钥时将阻止连接。",
+  "machineEditSshHostKeysEmpty": "尚未保存密钥。首次 SSH 连接时保存。",
+  "machineEditSshHostKeyReset": "重置",
+  "machineErrorSshHostKeyChanged": "SSH 主机密钥已变更，连接已被阻止",
+  "sshHostKeyChangedTitle": "SSH 主机密钥已变更",
+  "sshHostKeyChangedMessage": "{endpoint} 的 SSH 主机密钥与已保存的密钥不一致，因此已阻止连接。服务器密钥可能已被更换，也可能有人在拦截连接。",
+  "@sshHostKeyChangedMessage": {
+    "placeholders": {
+      "endpoint": { "type": "String" }
+    }
+  },
+  "sshHostKeyPinned": "已保存的密钥",
+  "sshHostKeyPresented": "提供的密钥",
+  "sshHostKeyChangedResetHint": "仅当你自己更换了服务器密钥时，才在机器设置中重置已保存的密钥，然后重新连接。",
+  "sshHostKeyOpenMachineSettings": "机器设置",
 
   "deleteMachine": "删除机器",
   "deleteMachineConfirm": "要删除“{displayName}”吗？这会移除所有已保存的凭据。",

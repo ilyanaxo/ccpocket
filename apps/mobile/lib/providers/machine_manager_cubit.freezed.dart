@@ -23,7 +23,8 @@ mixin _$MachineManagerState {
  String? get latestBridgeVersion;/// Whether the latest Bridge version is being checked.
  bool get isCheckingLatestBridgeVersion;/// Error message from the latest version check, if any.
  String? get latestBridgeVersionError;/// Error message if any
- String? get error;/// Success message if any
+ String? get error;/// Changed SSH host key that blocked the last SSH operation, if any.
+ SshHostKeyMismatchException? get sshHostKeyMismatch;/// Success message if any
  String? get successMessage;
 /// Create a copy of MachineManagerState
 /// with the given fields replaced by the non-null parameter values.
@@ -35,16 +36,16 @@ $MachineManagerStateCopyWith<MachineManagerState> get copyWith => _$MachineManag
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is MachineManagerState&&const DeepCollectionEquality().equals(other.machines, machines)&&(identical(other.isLoading, isLoading) || other.isLoading == isLoading)&&(identical(other.startingMachineId, startingMachineId) || other.startingMachineId == startingMachineId)&&(identical(other.updatingMachineId, updatingMachineId) || other.updatingMachineId == updatingMachineId)&&(identical(other.latestBridgeVersion, latestBridgeVersion) || other.latestBridgeVersion == latestBridgeVersion)&&(identical(other.isCheckingLatestBridgeVersion, isCheckingLatestBridgeVersion) || other.isCheckingLatestBridgeVersion == isCheckingLatestBridgeVersion)&&(identical(other.latestBridgeVersionError, latestBridgeVersionError) || other.latestBridgeVersionError == latestBridgeVersionError)&&(identical(other.error, error) || other.error == error)&&(identical(other.successMessage, successMessage) || other.successMessage == successMessage));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is MachineManagerState&&const DeepCollectionEquality().equals(other.machines, machines)&&(identical(other.isLoading, isLoading) || other.isLoading == isLoading)&&(identical(other.startingMachineId, startingMachineId) || other.startingMachineId == startingMachineId)&&(identical(other.updatingMachineId, updatingMachineId) || other.updatingMachineId == updatingMachineId)&&(identical(other.latestBridgeVersion, latestBridgeVersion) || other.latestBridgeVersion == latestBridgeVersion)&&(identical(other.isCheckingLatestBridgeVersion, isCheckingLatestBridgeVersion) || other.isCheckingLatestBridgeVersion == isCheckingLatestBridgeVersion)&&(identical(other.latestBridgeVersionError, latestBridgeVersionError) || other.latestBridgeVersionError == latestBridgeVersionError)&&(identical(other.error, error) || other.error == error)&&(identical(other.sshHostKeyMismatch, sshHostKeyMismatch) || other.sshHostKeyMismatch == sshHostKeyMismatch)&&(identical(other.successMessage, successMessage) || other.successMessage == successMessage));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(machines),isLoading,startingMachineId,updatingMachineId,latestBridgeVersion,isCheckingLatestBridgeVersion,latestBridgeVersionError,error,successMessage);
+int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(machines),isLoading,startingMachineId,updatingMachineId,latestBridgeVersion,isCheckingLatestBridgeVersion,latestBridgeVersionError,error,sshHostKeyMismatch,successMessage);
 
 @override
 String toString() {
-  return 'MachineManagerState(machines: $machines, isLoading: $isLoading, startingMachineId: $startingMachineId, updatingMachineId: $updatingMachineId, latestBridgeVersion: $latestBridgeVersion, isCheckingLatestBridgeVersion: $isCheckingLatestBridgeVersion, latestBridgeVersionError: $latestBridgeVersionError, error: $error, successMessage: $successMessage)';
+  return 'MachineManagerState(machines: $machines, isLoading: $isLoading, startingMachineId: $startingMachineId, updatingMachineId: $updatingMachineId, latestBridgeVersion: $latestBridgeVersion, isCheckingLatestBridgeVersion: $isCheckingLatestBridgeVersion, latestBridgeVersionError: $latestBridgeVersionError, error: $error, sshHostKeyMismatch: $sshHostKeyMismatch, successMessage: $successMessage)';
 }
 
 
@@ -55,7 +56,7 @@ abstract mixin class $MachineManagerStateCopyWith<$Res>  {
   factory $MachineManagerStateCopyWith(MachineManagerState value, $Res Function(MachineManagerState) _then) = _$MachineManagerStateCopyWithImpl;
 @useResult
 $Res call({
- List<MachineWithStatus> machines, bool isLoading, String? startingMachineId, String? updatingMachineId, String? latestBridgeVersion, bool isCheckingLatestBridgeVersion, String? latestBridgeVersionError, String? error, String? successMessage
+ List<MachineWithStatus> machines, bool isLoading, String? startingMachineId, String? updatingMachineId, String? latestBridgeVersion, bool isCheckingLatestBridgeVersion, String? latestBridgeVersionError, String? error, SshHostKeyMismatchException? sshHostKeyMismatch, String? successMessage
 });
 
 
@@ -72,7 +73,7 @@ class _$MachineManagerStateCopyWithImpl<$Res>
 
 /// Create a copy of MachineManagerState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? machines = null,Object? isLoading = null,Object? startingMachineId = freezed,Object? updatingMachineId = freezed,Object? latestBridgeVersion = freezed,Object? isCheckingLatestBridgeVersion = null,Object? latestBridgeVersionError = freezed,Object? error = freezed,Object? successMessage = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? machines = null,Object? isLoading = null,Object? startingMachineId = freezed,Object? updatingMachineId = freezed,Object? latestBridgeVersion = freezed,Object? isCheckingLatestBridgeVersion = null,Object? latestBridgeVersionError = freezed,Object? error = freezed,Object? sshHostKeyMismatch = freezed,Object? successMessage = freezed,}) {
   return _then(MachineManagerState(
 machines: null == machines ? _self.machines : machines // ignore: cast_nullable_to_non_nullable
 as List<MachineWithStatus>,isLoading: null == isLoading ? _self.isLoading : isLoading // ignore: cast_nullable_to_non_nullable
@@ -82,7 +83,8 @@ as String?,latestBridgeVersion: freezed == latestBridgeVersion ? _self.latestBri
 as String?,isCheckingLatestBridgeVersion: null == isCheckingLatestBridgeVersion ? _self.isCheckingLatestBridgeVersion : isCheckingLatestBridgeVersion // ignore: cast_nullable_to_non_nullable
 as bool,latestBridgeVersionError: freezed == latestBridgeVersionError ? _self.latestBridgeVersionError : latestBridgeVersionError // ignore: cast_nullable_to_non_nullable
 as String?,error: freezed == error ? _self.error : error // ignore: cast_nullable_to_non_nullable
-as String?,successMessage: freezed == successMessage ? _self.successMessage : successMessage // ignore: cast_nullable_to_non_nullable
+as String?,sshHostKeyMismatch: freezed == sshHostKeyMismatch ? _self.sshHostKeyMismatch : sshHostKeyMismatch // ignore: cast_nullable_to_non_nullable
+as SshHostKeyMismatchException?,successMessage: freezed == successMessage ? _self.successMessage : successMessage // ignore: cast_nullable_to_non_nullable
 as String?,
   ));
 }
@@ -168,10 +170,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( List<MachineWithStatus> machines,  bool isLoading,  String? startingMachineId,  String? updatingMachineId,  String? latestBridgeVersion,  bool isCheckingLatestBridgeVersion,  String? latestBridgeVersionError,  String? error,  String? successMessage)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( List<MachineWithStatus> machines,  bool isLoading,  String? startingMachineId,  String? updatingMachineId,  String? latestBridgeVersion,  bool isCheckingLatestBridgeVersion,  String? latestBridgeVersionError,  String? error,  SshHostKeyMismatchException? sshHostKeyMismatch,  String? successMessage)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _MachineManagerState() when $default != null:
-return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.updatingMachineId,_that.latestBridgeVersion,_that.isCheckingLatestBridgeVersion,_that.latestBridgeVersionError,_that.error,_that.successMessage);case _:
+return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.updatingMachineId,_that.latestBridgeVersion,_that.isCheckingLatestBridgeVersion,_that.latestBridgeVersionError,_that.error,_that.sshHostKeyMismatch,_that.successMessage);case _:
   return orElse();
 
 }
@@ -189,10 +191,10 @@ return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.upd
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( List<MachineWithStatus> machines,  bool isLoading,  String? startingMachineId,  String? updatingMachineId,  String? latestBridgeVersion,  bool isCheckingLatestBridgeVersion,  String? latestBridgeVersionError,  String? error,  String? successMessage)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( List<MachineWithStatus> machines,  bool isLoading,  String? startingMachineId,  String? updatingMachineId,  String? latestBridgeVersion,  bool isCheckingLatestBridgeVersion,  String? latestBridgeVersionError,  String? error,  SshHostKeyMismatchException? sshHostKeyMismatch,  String? successMessage)  $default,) {final _that = this;
 switch (_that) {
 case _MachineManagerState():
-return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.updatingMachineId,_that.latestBridgeVersion,_that.isCheckingLatestBridgeVersion,_that.latestBridgeVersionError,_that.error,_that.successMessage);case _:
+return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.updatingMachineId,_that.latestBridgeVersion,_that.isCheckingLatestBridgeVersion,_that.latestBridgeVersionError,_that.error,_that.sshHostKeyMismatch,_that.successMessage);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -209,10 +211,10 @@ return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.upd
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( List<MachineWithStatus> machines,  bool isLoading,  String? startingMachineId,  String? updatingMachineId,  String? latestBridgeVersion,  bool isCheckingLatestBridgeVersion,  String? latestBridgeVersionError,  String? error,  String? successMessage)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( List<MachineWithStatus> machines,  bool isLoading,  String? startingMachineId,  String? updatingMachineId,  String? latestBridgeVersion,  bool isCheckingLatestBridgeVersion,  String? latestBridgeVersionError,  String? error,  SshHostKeyMismatchException? sshHostKeyMismatch,  String? successMessage)?  $default,) {final _that = this;
 switch (_that) {
 case _MachineManagerState() when $default != null:
-return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.updatingMachineId,_that.latestBridgeVersion,_that.isCheckingLatestBridgeVersion,_that.latestBridgeVersionError,_that.error,_that.successMessage);case _:
+return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.updatingMachineId,_that.latestBridgeVersion,_that.isCheckingLatestBridgeVersion,_that.latestBridgeVersionError,_that.error,_that.sshHostKeyMismatch,_that.successMessage);case _:
   return null;
 
 }
@@ -224,7 +226,7 @@ return $default(_that.machines,_that.isLoading,_that.startingMachineId,_that.upd
 
 
 class _MachineManagerState implements MachineManagerState {
-  const _MachineManagerState({ List<MachineWithStatus> machines = const [], this.isLoading = false, this.startingMachineId, this.updatingMachineId, this.latestBridgeVersion, this.isCheckingLatestBridgeVersion = false, this.latestBridgeVersionError, this.error, this.successMessage}): _machines = machines;
+  const _MachineManagerState({ List<MachineWithStatus> machines = const [], this.isLoading = false, this.startingMachineId, this.updatingMachineId, this.latestBridgeVersion, this.isCheckingLatestBridgeVersion = false, this.latestBridgeVersionError, this.error, this.sshHostKeyMismatch, this.successMessage}): _machines = machines;
   
 
 /// List of machines with their current status
@@ -250,6 +252,8 @@ class _MachineManagerState implements MachineManagerState {
 @override final  String? latestBridgeVersionError;
 /// Error message if any
 @override final  String? error;
+/// Changed SSH host key that blocked the last SSH operation, if any.
+@override final  SshHostKeyMismatchException? sshHostKeyMismatch;
 /// Success message if any
 @override final  String? successMessage;
 
@@ -263,16 +267,16 @@ _$MachineManagerStateCopyWith<_MachineManagerState> get copyWith => __$MachineMa
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _MachineManagerState&&const DeepCollectionEquality().equals(other._machines, _machines)&&(identical(other.isLoading, isLoading) || other.isLoading == isLoading)&&(identical(other.startingMachineId, startingMachineId) || other.startingMachineId == startingMachineId)&&(identical(other.updatingMachineId, updatingMachineId) || other.updatingMachineId == updatingMachineId)&&(identical(other.latestBridgeVersion, latestBridgeVersion) || other.latestBridgeVersion == latestBridgeVersion)&&(identical(other.isCheckingLatestBridgeVersion, isCheckingLatestBridgeVersion) || other.isCheckingLatestBridgeVersion == isCheckingLatestBridgeVersion)&&(identical(other.latestBridgeVersionError, latestBridgeVersionError) || other.latestBridgeVersionError == latestBridgeVersionError)&&(identical(other.error, error) || other.error == error)&&(identical(other.successMessage, successMessage) || other.successMessage == successMessage));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _MachineManagerState&&const DeepCollectionEquality().equals(other._machines, _machines)&&(identical(other.isLoading, isLoading) || other.isLoading == isLoading)&&(identical(other.startingMachineId, startingMachineId) || other.startingMachineId == startingMachineId)&&(identical(other.updatingMachineId, updatingMachineId) || other.updatingMachineId == updatingMachineId)&&(identical(other.latestBridgeVersion, latestBridgeVersion) || other.latestBridgeVersion == latestBridgeVersion)&&(identical(other.isCheckingLatestBridgeVersion, isCheckingLatestBridgeVersion) || other.isCheckingLatestBridgeVersion == isCheckingLatestBridgeVersion)&&(identical(other.latestBridgeVersionError, latestBridgeVersionError) || other.latestBridgeVersionError == latestBridgeVersionError)&&(identical(other.error, error) || other.error == error)&&(identical(other.sshHostKeyMismatch, sshHostKeyMismatch) || other.sshHostKeyMismatch == sshHostKeyMismatch)&&(identical(other.successMessage, successMessage) || other.successMessage == successMessage));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_machines),isLoading,startingMachineId,updatingMachineId,latestBridgeVersion,isCheckingLatestBridgeVersion,latestBridgeVersionError,error,successMessage);
+int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_machines),isLoading,startingMachineId,updatingMachineId,latestBridgeVersion,isCheckingLatestBridgeVersion,latestBridgeVersionError,error,sshHostKeyMismatch,successMessage);
 
 @override
 String toString() {
-  return 'MachineManagerState(machines: $machines, isLoading: $isLoading, startingMachineId: $startingMachineId, updatingMachineId: $updatingMachineId, latestBridgeVersion: $latestBridgeVersion, isCheckingLatestBridgeVersion: $isCheckingLatestBridgeVersion, latestBridgeVersionError: $latestBridgeVersionError, error: $error, successMessage: $successMessage)';
+  return 'MachineManagerState(machines: $machines, isLoading: $isLoading, startingMachineId: $startingMachineId, updatingMachineId: $updatingMachineId, latestBridgeVersion: $latestBridgeVersion, isCheckingLatestBridgeVersion: $isCheckingLatestBridgeVersion, latestBridgeVersionError: $latestBridgeVersionError, error: $error, sshHostKeyMismatch: $sshHostKeyMismatch, successMessage: $successMessage)';
 }
 
 
@@ -283,7 +287,7 @@ abstract mixin class _$MachineManagerStateCopyWith<$Res> implements $MachineMana
   factory _$MachineManagerStateCopyWith(_MachineManagerState value, $Res Function(_MachineManagerState) _then) = __$MachineManagerStateCopyWithImpl;
 @override @useResult
 $Res call({
- List<MachineWithStatus> machines, bool isLoading, String? startingMachineId, String? updatingMachineId, String? latestBridgeVersion, bool isCheckingLatestBridgeVersion, String? latestBridgeVersionError, String? error, String? successMessage
+ List<MachineWithStatus> machines, bool isLoading, String? startingMachineId, String? updatingMachineId, String? latestBridgeVersion, bool isCheckingLatestBridgeVersion, String? latestBridgeVersionError, String? error, SshHostKeyMismatchException? sshHostKeyMismatch, String? successMessage
 });
 
 
@@ -300,7 +304,7 @@ class __$MachineManagerStateCopyWithImpl<$Res>
 
 /// Create a copy of MachineManagerState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? machines = null,Object? isLoading = null,Object? startingMachineId = freezed,Object? updatingMachineId = freezed,Object? latestBridgeVersion = freezed,Object? isCheckingLatestBridgeVersion = null,Object? latestBridgeVersionError = freezed,Object? error = freezed,Object? successMessage = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? machines = null,Object? isLoading = null,Object? startingMachineId = freezed,Object? updatingMachineId = freezed,Object? latestBridgeVersion = freezed,Object? isCheckingLatestBridgeVersion = null,Object? latestBridgeVersionError = freezed,Object? error = freezed,Object? sshHostKeyMismatch = freezed,Object? successMessage = freezed,}) {
   return _then(_MachineManagerState(
 machines: null == machines ? _self._machines : machines // ignore: cast_nullable_to_non_nullable
 as List<MachineWithStatus>,isLoading: null == isLoading ? _self.isLoading : isLoading // ignore: cast_nullable_to_non_nullable
@@ -310,7 +314,8 @@ as String?,latestBridgeVersion: freezed == latestBridgeVersion ? _self.latestBri
 as String?,isCheckingLatestBridgeVersion: null == isCheckingLatestBridgeVersion ? _self.isCheckingLatestBridgeVersion : isCheckingLatestBridgeVersion // ignore: cast_nullable_to_non_nullable
 as bool,latestBridgeVersionError: freezed == latestBridgeVersionError ? _self.latestBridgeVersionError : latestBridgeVersionError // ignore: cast_nullable_to_non_nullable
 as String?,error: freezed == error ? _self.error : error // ignore: cast_nullable_to_non_nullable
-as String?,successMessage: freezed == successMessage ? _self.successMessage : successMessage // ignore: cast_nullable_to_non_nullable
+as String?,sshHostKeyMismatch: freezed == sshHostKeyMismatch ? _self.sshHostKeyMismatch : sshHostKeyMismatch // ignore: cast_nullable_to_non_nullable
+as SshHostKeyMismatchException?,successMessage: freezed == successMessage ? _self.successMessage : successMessage // ignore: cast_nullable_to_non_nullable
 as String?,
   ));
 }

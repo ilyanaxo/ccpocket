@@ -34,6 +34,10 @@ void main() {
     final downloader = FileTransferDownloader(
       clientFactory: () => _StreamingClient((request) async {
         expect(request.followRedirects, isFalse);
+        expect(
+          request.headers,
+          containsPair('Authorization', 'Bearer bridge-secret'),
+        );
         return http.StreamedResponse(
           Stream.fromIterable([
             [1, 2],
@@ -52,6 +56,7 @@ void main() {
       fileName: 'report.pdf',
       expectedSizeBytes: 5,
       onProgress: (received, total) => progress.add((received, total)),
+      headers: const {'Authorization': 'Bearer bridge-secret'},
     );
 
     expect(await File(localPath).readAsBytes(), [1, 2, 3, 4, 5]);
