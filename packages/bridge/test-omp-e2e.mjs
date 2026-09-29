@@ -44,7 +44,7 @@
  * it started.
  */
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1145,6 +1145,12 @@ async function reportSessionFiles() {
         rmSync(file.slice(0, -".jsonl".length), { recursive: true, force: true });
       }
       removed += 1;
+      // Drop the per-cwd bucket too once it holds nothing else.
+      try {
+        rmdirSync(dirname(file));
+      } catch {
+        // not empty or already gone
+      }
     }
   }
   if (args.cleanup) console.log(`cleanup: removed ${removed} session files`);
