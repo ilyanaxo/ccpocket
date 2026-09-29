@@ -22,7 +22,11 @@ class FakeWritable extends EventEmitter {
 }
 
 class FakeReadable extends EventEmitter {
+  public destroyed = false;
   setEncoding(_encoding: string): void {}
+  destroy(): void {
+    this.destroyed = true;
+  }
 }
 
 class FakeChildProcess extends EventEmitter {
@@ -34,10 +38,12 @@ class FakeChildProcess extends EventEmitter {
     this.signals.push(signal ?? "SIGTERM");
     return true;
   }
+  /** Node order: output, `exit`, then `close` once stdio is drained. */
   finish(code: number, stdout = "", stderr = ""): void {
     if (stdout) this.stdout.emit("data", stdout);
     if (stderr) this.stderr.emit("data", stderr);
     this.emit("exit", code, null);
+    this.emit("close", code, null);
   }
 }
 
@@ -114,6 +120,36 @@ describe("runOmpPrint", () => {
     await expect(run).resolves.toBe("chore(greet): expand greeting");
   });
 
+  it("keeps omp from reading files named as @path in the prompt or stdin", async () => {
+    // omp v18.3.2 utils/file-mentions.ts: a mention is this pattern at the
+    // start of the first message or after whitespace, a bracket or a quote.
+    const ompMentions = (text: string): string[] =>
+      [...text.matchAll(/@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g)]
+        .filter((match) => match.index === 0 || /[\s([{<"'`]/.test(text[match.index - 1]))
+        .map((match) => match[0]);
+    const prompt = "@README.md Title (see @docs/a.md)";
+    const diff = [
+      "@.env",
+      "+Copy the example file to @.env and fill in your token.",
+      "+Keys: '@~/.ssh/id_ed25519' (@/etc/passwd) [@x] {@y} <@z> \"@w\" `@v` @\"quoted path\"",
+      "+Contact: user@example.com",
+    ].join("\n");
+    expect(ompMentions(`${diff}\n${prompt}`)).toHaveLength(12);
+
+    const run = runOmpPrint({ cwd: "/proj", prompt, stdin: diff, env: {} });
+    const child = fakeChildren[0];
+    const sentPrompt = (spawnMock.mock.calls[0][1] as string[]).at(-1)!;
+    const sentStdin = child.stdin!.writes.join("");
+    // omp combines stdin and the prompt into its first message.
+    expect(ompMentions(`${sentStdin}\n${sentPrompt}`)).toEqual([]);
+    expect(sentPrompt.replaceAll("\u2060", "")).toBe(prompt);
+    expect(sentStdin.replaceAll("\u2060", "")).toBe(diff);
+
+    // A guarded `@` the model copies into its answer comes back plain.
+    child.finish(0, "docs: point setup at \u2060@.env\n");
+    await expect(run).resolves.toBe("docs: point setup at @.env");
+  });
+
   it("rejects with the stderr tail on a non-zero exit", async () => {
     const run = runOmpPrint({ cwd: "/proj", prompt: "p", model: "baseten/does-not-exist", env: {} });
     // OBSERVED P11f
@@ -122,6 +158,41 @@ describe("runOmpPrint", () => {
       code: "omp_print_failed",
       message: expect.stringContaining('Model "baseten/does-not-exist" not found'),
     });
+  });
+
+  it("keeps output and stderr that are read after the exit event", async () => {
+    // Node can emit `exit` before the last chunks are read, for example when
+    // the event loop was blocked while omp finished.
+    const run = runOmpPrint({ cwd: "/proj", prompt: "p", env: {} });
+    fakeChildren[0].emit("exit", 0, null);
+    fakeChildren[0].stdout.emit("data", "A generated title\n");
+    fakeChildren[0].emit("close", 0, null);
+    await expect(run).resolves.toBe("A generated title");
+
+    const failed = runOmpPrint({ cwd: "/proj", prompt: "p", env: {} });
+    fakeChildren[1].emit("exit", 1, null);
+    fakeChildren[1].stderr.emit("data", 'Model "x" not found\n');
+    fakeChildren[1].emit("close", 1, null);
+    await expect(failed).rejects.toMatchObject({
+      code: "omp_print_failed",
+      message: 'omp -p exited with code 1: Model "x" not found',
+    });
+  });
+
+  it("settles 2 s after exit when a grandchild keeps the pipes open", async () => {
+    vi.useFakeTimers();
+    const run = runOmpPrint({ cwd: "/proj", prompt: "p", env: {} });
+    const child = fakeChildren[0];
+    child.stdout.emit("data", "Title\n");
+    child.emit("exit", 0, null);
+    let result: string | undefined;
+    void run.then((value) => (result = value));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(result).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result).toBe("Title");
+    expect(child.stdout.destroyed).toBe(true);
+    expect(child.stderr.destroyed).toBe(true);
   });
 
   it("kills the child on timeout", async () => {

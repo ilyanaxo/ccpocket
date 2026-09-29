@@ -2000,6 +2000,7 @@ export class BridgeWebSocketServer {
         content,
         ...(typeof msg.toolName === "string" ? { toolName: msg.toolName } : {}),
         ...(images.length > 0 ? { images } : {}),
+        ...(typeof msg.timestamp === "string" ? { timestamp: msg.timestamp } : {}),
       });
     }
 
@@ -5220,36 +5221,58 @@ export class BridgeWebSocketServer {
               session.provider === provider &&
               session.claudeSessionId === msg.sessionId,
           );
-        if (activeSession) {
+        const sendLive = (session: SessionSummary): void => {
           this.send(ws, {
             type: "session_link_resolution",
             requestId: msg.requestId,
             sourceSessionId: msg.sessionId,
             status: "live",
-            bridgeSessionId: activeSession.id,
-            provider: activeSession.provider,
+            bridgeSessionId: session.id,
+            provider: session.provider,
           });
+        };
+        // An omp session whose child exited takes no input: answer with its
+        // recent entry, whose resume replaces the exited Bridge session
+        // (docs/omp-integration.md §2.6). Without an entry it opens as is.
+        const activeProcess = activeSession
+          ? this.sessionManager.get(activeSession.id)?.process
+          : undefined;
+        const exitedOmpSessionId =
+          activeProcess instanceof OmpProcess && !activeProcess.isAlive
+            ? activeSession?.claudeSessionId
+            : undefined;
+        if (activeSession && !exitedOmpSessionId) {
+          sendLive(activeSession);
           break;
         }
+        const lookupProvider = exitedOmpSessionId ? "omp" : provider;
 
         try {
           const { sessions } = await getAllRecentSessions({
             limit: 1,
-            provider,
-            sessionId: msg.sessionId,
+            provider: lookupProvider,
+            sessionId: exitedOmpSessionId ?? msg.sessionId,
             archivedSessionIds: this.archiveStore.archivedIds(),
           });
           const recentSession = sessions[0];
+          if (activeSession && !recentSession) {
+            sendLive(activeSession);
+            break;
+          }
           this.send(ws, {
             type: "session_link_resolution",
             requestId: msg.requestId,
             sourceSessionId: msg.sessionId,
             status: recentSession ? "recent" : "unavailable",
-            provider,
+            provider: lookupProvider,
             ...(recentSession ? { recentSession } : {}),
           } as Record<string, unknown>);
         } catch (err) {
           console.error("[ws] Failed to resolve session link:", err);
+          if (activeSession) {
+            sendLive(activeSession);
+            break;
+          }
           this.send(ws, {
             type: "session_link_resolution",
             requestId: msg.requestId,
@@ -9811,6 +9834,12 @@ export class BridgeWebSocketServer {
         errorCode: "set_omp_model_failed",
       });
     };
+    if (!process.isAlive) {
+      // An exited child never applies the change: no "applies later" tip and
+      // no wait for the catalogue.
+      rejectChange("The omp process is not running. Resume the session to continue.");
+      return;
+    }
     await this.ensureOmpModelsLoaded();
     const model = msg.model?.trim();
     const targetModel = model ?? session.ompSettings?.model ?? process.settings.model;
@@ -9829,7 +9858,7 @@ export class BridgeWebSocketServer {
         return;
       }
     }
-    if (!process.isWaitingForInput) {
+    if (process.isAlive && !process.isWaitingForInput) {
       this.sendTip(ws, session.id, "omp_change_deferred", session);
     }
     session.lastActivityAt = new Date();

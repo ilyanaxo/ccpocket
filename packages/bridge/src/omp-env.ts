@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -52,6 +53,42 @@ export function missingSpawnCwd(err: unknown, cwd: string): string | null {
   const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
   if (code !== "ENOENT") return null;
   return existsSync(cwd) ? null : cwd;
+}
+
+/** Longest wait for a child's stdio to close after its `exit` event. */
+export const OMP_STDIO_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * Call `onClosed(code, signal)` once, after the child has exited and its
+ * stdout and stderr have been read to the end (`close`).
+ *
+ * Node can emit `exit` before the last output chunk is read, for example when
+ * the event loop was blocked while the child finished, so a result built on
+ * `exit` can miss output. If a grandchild keeps an inherited pipe open,
+ * `close` never comes: `graceMs` after `exit` the pipes are destroyed and
+ * `onClosed` runs with what was read.
+ */
+export function onChildClosed(
+  child: ChildProcess,
+  onClosed: (code: number | null, signal: NodeJS.Signals | null) => void,
+  graceMs: number = OMP_STDIO_CLOSE_GRACE_MS,
+): void {
+  let done = false;
+  let graceTimer: NodeJS.Timeout | undefined;
+  const settle = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (done) return;
+    done = true;
+    if (graceTimer) clearTimeout(graceTimer);
+    onClosed(code, signal);
+  };
+  child.once("exit", (code, signal) => {
+    graceTimer = setTimeout(() => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      settle(code, signal);
+    }, graceMs);
+  });
+  child.once("close", (code, signal) => settle(code, signal));
 }
 
 /**

@@ -85,7 +85,9 @@ class FakeChild extends EventEmitter {
   exit(code: number | null): void {
     if (this.exited) return;
     this.exited = true;
+    // Node order: `exit`, then `close` once stdio is drained.
     this.emit("exit", code, null);
+    this.emit("close", code, null);
   }
 }
 
@@ -1246,6 +1248,28 @@ describe("omp input, queue and tool actions", () => {
     expect(history.some((m) => m.subtype === "omp_settings")).toBe(false);
   });
 
+  it("rejects set_omp_model at once, without the deferred tip, when the omp child exited", async () => {
+    await bridgeAny().refreshOmpModels();
+    const ws = await connect(true);
+    const { sessionId, sim } = await startOmp(ws, { model: `baseten/${GLM.id}` });
+    sim.child.exit(1);
+    await until(() => sent(ws).some((m) => m.type === "error" && m.errorCode === "omp_process_exited"));
+    const before = sent(ws).length;
+
+    await handle(ws, { type: "set_omp_model", sessionId, thinkingLevel: "max" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const after = sent(ws).slice(before);
+    expect(after).toEqual([
+      expect.objectContaining({
+        type: "error",
+        sessionId,
+        errorCode: "set_omp_model_failed",
+        message: "The omp process is not running. Resume the session to continue.",
+      }),
+    ]);
+    expect(sim.commandsOf("set_thinking_level")).toHaveLength(0);
+  });
+
   it("maps set_permission_mode, rejects plan/auto and respawns in the same Bridge session", async () => {
     const ws = await connect(true);
     const { sessionId, sim } = await startOmp(ws);
@@ -1601,6 +1625,46 @@ describe("omp resume", () => {
     await until(() => sims[1].commandsOf("prompt").length === 1);
   });
 
+  it("resolves a link to an omp session whose child exited to its recent entry", async () => {
+    writeSessionFile({ id: "omp-link-crashed", cwd: projectDir, users: [{ id: "u1", text: "x" }] });
+    const ws = await connect(true);
+    await handle(ws, {
+      type: "resume_session",
+      sessionId: "omp-link-crashed",
+      projectPath: projectDir,
+      provider: "omp",
+    });
+    const created = await until(() => lastOf(ws, (m) => m.subtype === "session_created"));
+    const bridgeId = String(created.sessionId);
+    const { sessionId: unsavedId } = await startOmp(ws);
+    sims[0].child.exit(1);
+    sims[1].child.exit(1);
+    await until(() => sent(ws).filter((m) => m.errorCode === "omp_process_exited").length === 2);
+
+    // A local notification carries the Bridge id, a push the omp id.
+    for (const [requestId, sessionId, provider] of [
+      ["by-bridge-id", bridgeId, "claude"],
+      ["by-omp-id", "omp-link-crashed", "omp"],
+    ]) {
+      await handle(ws, { type: "resolve_session_link", requestId, sessionId, provider });
+      const resolution = await until(() =>
+        lastOf(ws, (m) => m.type === "session_link_resolution" && m.requestId === requestId),
+      );
+      expect(resolution).toMatchObject({
+        sourceSessionId: sessionId,
+        status: "recent",
+        provider: "omp",
+        recentSession: { sessionId: "omp-link-crashed", provider: "omp" },
+      });
+    }
+
+    // Nothing to resume from yet: the exited session opens as before.
+    await handle(ws, { type: "resolve_session_link", requestId: "unsaved", sessionId: unsavedId, provider: "claude" });
+    expect(
+      await until(() => lastOf(ws, (m) => m.type === "session_link_resolution" && m.requestId === "unsaved")),
+    ).toMatchObject({ status: "live", bridgeSessionId: unsavedId, provider: "omp" });
+  });
+
   it("answers omp_session_not_found for an unknown id", async () => {
     const ws = await connect(true);
     await handle(ws, {
@@ -1728,6 +1792,50 @@ describe("omp resume", () => {
     await resuming;
     await until(() => lastOf(ws, (m) => m.subtype === "session_created" && m.resumeRequestId === "again"));
     expect(sims).toHaveLength(2);
+  });
+
+  it("keeps the timestamp of a past tool result", async () => {
+    const file = writeSessionFile({ id: "omp-tool-time", cwd: projectDir, users: [{ id: "u1", text: "Run: echo hi" }] });
+    const toolLines = [
+      {
+        type: "message",
+        id: "a-call",
+        parentId: "a0",
+        timestamp: "2026-09-28T18:58:00.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo hi" } }],
+          provider: "baseten",
+          model: GLM.id,
+          stopReason: "toolUse",
+        },
+      },
+      {
+        type: "message",
+        id: "r-call",
+        parentId: "a-call",
+        timestamp: "2026-09-28T18:59:19.125Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "bash",
+          content: [{ type: "text", text: "hi" }],
+        },
+      },
+    ];
+    writeFileSync(file, `${readFileSync(file, "utf8")}${toolLines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    const ws = await connect(true);
+    await handle(ws, {
+      type: "resume_session",
+      sessionId: "omp-tool-time",
+      projectPath: projectDir,
+      provider: "omp",
+    });
+    const created = await until(() => lastOf(ws, (m) => m.subtype === "session_created"));
+    await handle(ws, { type: "get_history", sessionId: String(created.sessionId) });
+    const past = await until(() => lastOf(ws, (m) => m.type === "past_history"));
+    const result = (past.messages as Frame[]).find((m) => m.role === "tool_result");
+    expect(result).toMatchObject({ toolUseId: "call-1", timestamp: "2026-09-28T18:59:19.125Z" });
   });
 
   it("registers blob images for past history without sending omp references", async () => {
@@ -1891,6 +1999,38 @@ describe("omp recent sessions, rename and archive", () => {
     expect(sims).toHaveLength(3);
     expect(sims[2].commandsOf("set_session_name")[0]).toMatchObject({ name: "From recent" });
     expect(bridgeAny().sessionManager.get(bridgeId).name).toBe("From recent");
+  });
+
+  it("writes the auto-rename name to the file when the session stopped while omp -p ran", async () => {
+    const file = writeSessionFile({ id: "omp-new-1", cwd: projectDir, users: [{ id: "u1", text: "x" }] });
+    rpcBehaviour = (sim) => {
+      sim.state = { ...sim.state, sessionFile: file };
+    };
+    const original = spawnMock.getMockImplementation()!;
+    let printStarted = false;
+    spawnMock.mockImplementation((command: string, argv: string[], options: { cwd: string }) => {
+      if (argv[0] !== "-p") return original(command, argv, options);
+      printStarted = true;
+      const child = new FakeChild();
+      setTimeout(() => {
+        child.stdout.emit("data", "Deploy pipeline fix\n");
+        child.exit(0);
+      }, 150);
+      return child;
+    });
+    const ws = await connect(true);
+    const { sessionId, sim } = await startOmp(ws, { autoRename: true });
+    await handle(ws, { type: "input", sessionId, text: "Fix the deploy pipeline" });
+    await until(() => lastOf(ws, (m) => m.type === "result" && m.sessionId === sessionId));
+    await until(() => printStarted);
+    await handle(ws, { type: "stop_session", sessionId });
+
+    const helper = await until(() => sims[1]);
+    expect(flag(helper.argv, "--mode")).toBe("rpc");
+    expect(flag(helper.argv, "--resume")).toBe(file);
+    await until(() => helper.commandsOf("set_session_name").length > 0);
+    expect(helper.commandsOf("set_session_name")[0]).toMatchObject({ name: "Deploy pipeline fix" });
+    expect(sim.commandsOf("set_session_name")).toHaveLength(0);
   });
 
   it("archives an omp session with the Bridge marker only", async () => {

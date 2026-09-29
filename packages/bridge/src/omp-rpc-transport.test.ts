@@ -26,7 +26,11 @@ class FakeWritable extends EventEmitter {
 }
 
 class FakeReadable extends EventEmitter {
+  public destroyed = false;
   setEncoding(_encoding: string): void {}
+  destroy(): void {
+    this.destroyed = true;
+  }
 }
 
 class FakeChildProcess extends EventEmitter {
@@ -44,6 +48,11 @@ class FakeChildProcess extends EventEmitter {
   }
   send(frame: unknown): void {
     this.stdout.emit("data", `${JSON.stringify(frame)}\n`);
+  }
+  /** Node order: `exit`, then `close` once stdio is drained. */
+  exit(code: number | null): void {
+    this.emit("exit", code, null);
+    this.emit("close", code, null);
   }
 }
 
@@ -494,9 +503,46 @@ describe("OmpRpcTransport", () => {
       await negotiate(child);
       transport.openOutbox();
       const pending = transport.request({ type: "get_state" });
-      child.emit("exit", 0, null);
+      child.exit(0);
       await expect(pending).rejects.toMatchObject({ code: "omp_process_exited" });
       await expect(transport.exited).resolves.toBe(0);
+    });
+
+    it("reads frames and responses that arrive after the exit event", async () => {
+      // Node can emit `exit` before the last stdout chunk is read, for example
+      // when the event loop was blocked while omp finished.
+      const { transport, child, frames } = startTransport();
+      await negotiate(child);
+      transport.openOutbox();
+      const pending = transport.request({ type: "get_state" });
+      const exit = vi.fn();
+      transport.on("exit", exit);
+      child.emit("exit", 1, null);
+      child.send({ id: "b2", type: "response", command: "get_state", success: true, data: { ok: true } });
+      child.send({ type: "notice", message: "last words" });
+      expect(exit).not.toHaveBeenCalled();
+      child.emit("close", 1, null);
+      await expect(pending).resolves.toEqual({ ok: true });
+      expect(frames).toContainEqual({ type: "notice", message: "last words" });
+      expect(exit).toHaveBeenCalledWith(1);
+      await expect(transport.exited).resolves.toBe(1);
+    });
+
+    it("settles 2 s after exit when a grandchild keeps the pipes open", async () => {
+      vi.useFakeTimers();
+      const { transport, child } = startTransport();
+      await negotiate(child);
+      transport.openOutbox();
+      const pending = transport.request({ type: "prompt", message: "p" }, { timeoutMs: null });
+      const rejected = expect(pending).rejects.toMatchObject({ code: "omp_process_exited" });
+      child.emit("exit", 0, null);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(transport.hasExited).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(transport.hasExited).toBe(true);
+      expect(child.stdout.destroyed).toBe(true);
+      expect(child.stderr.destroyed).toBe(true);
     });
   });
 
@@ -509,12 +555,26 @@ describe("OmpRpcTransport", () => {
       transport.on("exit", exit);
       // OBSERVED P12a
       child.stderr.emit("data", 'Model "baseten/does-not-exist" not found\n\nSet an API key environment variable:\n');
-      child.emit("exit", 1, null);
+      child.exit(1);
       expect(failed.mock.calls[0][0]).toMatchObject({
         code: "omp_start_failed",
         message: expect.stringContaining('omp exited before it was ready (code 1): Model "baseten/does-not-exist" not found'),
       });
       expect(exit).toHaveBeenCalledWith(1);
+    });
+
+    it("keeps the stderr tail that is read after the exit event", () => {
+      const { transport, child } = startTransport();
+      const failed = vi.fn();
+      transport.on("failed", failed);
+      child.emit("exit", 1, null);
+      child.stderr.emit("data", "Invalid OMP profile: x\n");
+      expect(failed).not.toHaveBeenCalled();
+      child.emit("close", 1, null);
+      expect(failed.mock.calls[0][0]).toMatchObject({
+        code: "omp_start_failed",
+        message: "omp exited before it was ready (code 1): Invalid OMP profile: x",
+      });
     });
 
     function failingSpawn(cwd: string) {

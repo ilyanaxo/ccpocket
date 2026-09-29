@@ -45,8 +45,10 @@ class FakeChildProcess extends EventEmitter {
     this.signals.push(signal ?? "SIGTERM");
     return true;
   }
+  /** Node order: `exit`, then `close` once stdio is drained. */
   exit(code: number | null): void {
     this.emit("exit", code, null);
+    this.emit("close", code, null);
   }
 }
 

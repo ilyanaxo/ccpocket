@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { missingSpawnCwd, resolveOmpBin, sanitizedOmpEnv } from "./omp-env.js";
+import { missingSpawnCwd, onChildClosed, resolveOmpBin, sanitizedOmpEnv } from "./omp-env.js";
 import {
   ompError,
   type OmpApprovalMode,
@@ -157,7 +157,11 @@ export class OmpRpcTransport extends EventEmitter<OmpRpcTransportEvents> {
   private readonly maxLineChars: number;
   private readonly logPrefix: string;
 
-  /** Resolves when the child has exited (or failed to spawn). */
+  /**
+   * Resolves when the child has exited and its stdout and stderr have been
+   * read (`close`, or 2 s after `exit` when a grandchild holds the pipes), or
+   * when it failed to spawn.
+   */
   readonly exited: Promise<number | null>;
 
   constructor(options: OmpRpcTransportOptions = {}) {
@@ -231,7 +235,11 @@ export class OmpRpcTransport extends EventEmitter<OmpRpcTransportEvents> {
       }
       console.error(`${this.logPrefix} process error: ${err.message}`);
     });
-    child.on("exit", (code) => this.handleExit(code));
+    // The child is gone, so it can no longer become ready.
+    child.on("exit", () => this.clearReadyTimer());
+    // Settle only after stdout and stderr are drained: the last frames and
+    // the stderr tail can still be unread when `exit` fires.
+    onChildClosed(child, (code) => this.handleExit(code));
 
     this.readyTimer = setTimeout(() => {
       this.readyTimer = null;
@@ -531,10 +539,7 @@ export class OmpRpcTransport extends EventEmitter<OmpRpcTransportEvents> {
       console.warn(`${this.logPrefix} ignored a second ready frame`);
       return;
     }
-    if (this.readyTimer) {
-      clearTimeout(this.readyTimer);
-      this.readyTimer = null;
-    }
+    this.clearReadyTimer();
     const versions = Array.isArray(frame.supportedProtocolVersions)
       ? frame.supportedProtocolVersions
       : [];
@@ -641,10 +646,7 @@ export class OmpRpcTransport extends EventEmitter<OmpRpcTransportEvents> {
 
   private handleExit(code: number | null): void {
     if (this.state === "exited") return;
-    if (this.readyTimer) {
-      clearTimeout(this.readyTimer);
-      this.readyTimer = null;
-    }
+    this.clearReadyTimer();
     if (this.state === "spawned" || this.state === "negotiating") {
       this.failStart(
         ompError(
@@ -658,10 +660,7 @@ export class OmpRpcTransport extends EventEmitter<OmpRpcTransportEvents> {
 
   private markExited(code: number | null): void {
     if (this.state === "exited") return;
-    if (this.readyTimer) {
-      clearTimeout(this.readyTimer);
-      this.readyTimer = null;
-    }
+    this.clearReadyTimer();
     this.state = "exited";
     this.chunkSlot = null;
     const error = exitedError();
@@ -671,6 +670,12 @@ export class OmpRpcTransport extends EventEmitter<OmpRpcTransportEvents> {
     for (const id of [...this.pending.keys()]) this.rejectPending(id, error);
     this.exitResolve(code);
     this.emit("exit", code);
+  }
+
+  private clearReadyTimer(): void {
+    if (!this.readyTimer) return;
+    clearTimeout(this.readyTimer);
+    this.readyTimer = null;
   }
 
   private failStart(error: OmpCodedError): void {

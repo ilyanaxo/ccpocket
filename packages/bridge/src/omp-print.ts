@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { OMP_CLI_NOT_FOUND_MESSAGE } from "./omp-rpc-transport.js";
 import {
   missingSpawnCwd,
+  onChildClosed,
   resolveOmpAssistModel,
   resolveOmpBin,
   sanitizedOmpEnv,
@@ -14,6 +15,20 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 const STDERR_TAIL_CHARS = 2_000;
 /** Print mode waits for every MCP server before the first turn (default 30 s). */
 const PRINT_MCP_TIMEOUT_MS = "3000";
+/** U+2060 WORD JOINER: invisible, and omp does not accept it before a file mention. */
+const MENTION_GUARD = "\u2060";
+
+/**
+ * omp reads every file or directory named as `@path` in the first message
+ * (stdin plus prompt) into the model context, without a tool call or an
+ * approval, so `--no-tools` and `always-ask` do not cover it. A mention counts
+ * only at the start or after whitespace, a bracket or a quote (omp v18.3.2
+ * `utils/file-mentions.ts`). Print runs carry untrusted text (staged diffs,
+ * transcripts), so every `@` gets a WORD JOINER in front; the text reads the same.
+ */
+function guardFileMentions(text: string): string {
+  return text.replaceAll("@", `${MENTION_GUARD}@`);
+}
 
 export interface OmpPrintOptions {
   cwd: string;
@@ -52,7 +67,8 @@ export function buildOmpPrintArgs(options: { prompt: string; model?: string }): 
 }
 
 /**
- * Run `omp -p` and resolve with its trimmed stdout.
+ * Run `omp -p` and resolve with its trimmed stdout. `@path` mentions in the
+ * prompt and stdin are not resolved (`guardFileMentions`).
  *
  * `spawn` rather than `execFile`: `omp -p` reads a non-TTY stdin until EOF,
  * and async `execFile` cannot close it; a sync variant would block the event
@@ -69,7 +85,7 @@ export function runOmpPrint(options: OmpPrintOptions): Promise<string> {
     let killTimer: NodeJS.Timeout | undefined;
 
     const args = buildOmpPrintArgs({
-      prompt: options.prompt,
+      prompt: guardFileMentions(options.prompt),
       model: resolveOmpAssistModel(options.model, env),
     });
     const child = spawn(resolveOmpBin(env), args, {
@@ -131,10 +147,13 @@ export function runOmpPrint(options: OmpPrintOptions): Promise<string> {
       }
       finish(ompError("omp_print_failed", `omp -p could not be started: ${err.message}`));
     });
-    child.on("exit", (code, signal) => {
+    child.on("exit", () => {
       if (killTimer) clearTimeout(killTimer);
+    });
+    onChildClosed(child, (code, signal) => {
       if (code === 0) {
-        finish(null, stdout.trim());
+        // The model may copy a guarded `@` from the input.
+        finish(null, stdout.replaceAll(MENTION_GUARD, "").trim());
         return;
       }
       const reason = stderr.trim() || (signal ? `killed by ${signal}` : "no output");
@@ -145,7 +164,7 @@ export function runOmpPrint(options: OmpPrintOptions): Promise<string> {
       child.stdin.on("error", () => {
         // The child may exit before reading everything (for example a bad model).
       });
-      child.stdin.write(options.stdin);
+      child.stdin.write(guardFileMentions(options.stdin));
       child.stdin.end();
     }
   });

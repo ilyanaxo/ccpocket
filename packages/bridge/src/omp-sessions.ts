@@ -5,7 +5,7 @@ import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { decodeJsonStringPrefix, readJsonlLines } from "./jsonl-partial.js";
-import { resolveOmpBin, resolveOmpStore, sanitizedOmpEnv } from "./omp-env.js";
+import { onChildClosed, resolveOmpBin, resolveOmpStore, sanitizedOmpEnv } from "./omp-env.js";
 import { OmpRpcTransport } from "./omp-rpc-transport.js";
 import { isRecord, ompMessageText } from "./omp-tool-mapping.js";
 import {
@@ -628,7 +628,7 @@ export function listOmpModels(
       }
       finish(ompError("omp_models_failed", `omp models could not be started: ${err.message}`));
     });
-    child.on("exit", (code) => {
+    onChildClosed(child, (code) => {
       if (code !== 0) {
         finish(null, { models: [], availability: "no_models" });
         return;

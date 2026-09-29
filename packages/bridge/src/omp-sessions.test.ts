@@ -47,6 +47,11 @@ class FakeChildProcess extends EventEmitter {
   send(frame: unknown): void {
     this.stdout.emit("data", `${JSON.stringify(frame)}\n`);
   }
+  /** Node order: `exit`, then `close` once stdio is drained. */
+  exit(code: number | null): void {
+    this.emit("exit", code, null);
+    this.emit("close", code, null);
+  }
 }
 
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
@@ -463,7 +468,7 @@ describe("renameOmpRecentSession (§6.3)", () => {
         child.send({ id: command.id, type: "response", command: command.type, success: true });
       }
     });
-    child.stdin.on("end", () => queueMicrotask(() => child.emit("exit", 0, null)));
+    child.stdin.on("end", () => queueMicrotask(() => child.exit(0)));
     queueMicrotask(() =>
       child.send({ type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 }),
     );
@@ -568,7 +573,7 @@ describe("renameOmpRecentSession (§6.3)", () => {
           child.send({ id: cmd.id, type: "response", command: cmd.type, success: false, error: "Session name cannot be empty" });
         }
       });
-      child.stdin.on("end", () => queueMicrotask(() => child.emit("exit", 0, null)));
+      child.stdin.on("end", () => queueMicrotask(() => child.exit(0)));
       queueMicrotask(() => child.send({ type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2] }));
       return child;
     });
@@ -600,7 +605,7 @@ describe("listOmpModels (§7.1)", () => {
     modelsChild((child) => {
       child.stdout.emit("data", output.slice(0, 100));
       child.stdout.emit("data", output.slice(100));
-      child.emit("exit", 0, null);
+      child.exit(0);
     });
     const result = await listOmpModels({ env: { BRIDGE_OMP_BIN: "/opt/omp", TMUX_PANE: "%3" } });
     expect(fakeChildren[0].command).toBe("/opt/omp");
@@ -622,6 +627,20 @@ describe("listOmpModels (§7.1)", () => {
     ]);
   });
 
+  it("keeps output that is read after the exit event", async () => {
+    // Node can emit `exit` before the last stdout chunk is read, for example
+    // when the event loop was blocked while omp finished.
+    modelsChild((child) => {
+      child.emit("exit", 0, null);
+      child.stdout.emit("data", '{"models":[{"provider":"p","id":"m","name":"M","input":["text"]}]}\n');
+      child.emit("close", 0, null);
+    });
+    await expect(listOmpModels({ env: {} })).resolves.toEqual({
+      models: [{ selector: "p/m", provider: "p", name: "M", thinkingLevels: ["off"], input: ["text"] }],
+      availability: "available",
+    });
+  });
+
   it("filters thinking levels the Bridge does not know", () => {
     expect(
       parseOmpModels({ models: [{ provider: "p", id: "m", name: "M", thinking: ["high", "ultra", "max"], input: ["text"] }] }),
@@ -637,16 +656,16 @@ describe("listOmpModels (§7.1)", () => {
 
     modelsChild((child) => {
       child.stdout.emit("data", '{"models":[]}');
-      child.emit("exit", 0, null);
+      child.exit(0);
     });
     await expect(listOmpModels({ env: {} })).resolves.toEqual({ models: [], availability: "no_models" });
 
-    modelsChild((child) => child.emit("exit", 1, null));
+    modelsChild((child) => child.exit(1));
     await expect(listOmpModels({ env: {} })).resolves.toEqual({ models: [], availability: "no_models" });
 
     modelsChild((child) => {
       child.stdout.emit("data", "not json");
-      child.emit("exit", 0, null);
+      child.exit(0);
     });
     await expect(listOmpModels({ env: {} })).rejects.toMatchObject({ code: "omp_models_failed" });
   });

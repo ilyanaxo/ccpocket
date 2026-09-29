@@ -23,9 +23,11 @@ import {
   type CodexStartOptions,
 } from "./codex-process.js";
 import { OmpProcess } from "./omp-process.js";
+import { renameOmpRecentSession } from "./omp-sessions.js";
 import {
   ompEntryIdFromUuid,
   ompEntryUuid,
+  ompErrorCode,
   type OmpSettings,
   type OmpStartOptions,
   type OmpThinkingLevel,
@@ -1599,11 +1601,28 @@ export class SessionManager {
 
     if (session.provider === "omp") {
       if (!(session.process instanceof OmpProcess)) return false;
+      if (session.process.isAlive) {
+        try {
+          await session.process.setSessionName(name);
+          return true;
+        } catch (err) {
+          if (ompErrorCode(err) !== "omp_process_exited") {
+            console.warn(`[session] Failed to name omp session:`, err);
+            return false;
+          }
+        }
+      }
+      // The child exited or is stopping (stop, crash, eviction) while the
+      // name was generated: write it to the session file instead.
+      if (!session.claudeSessionId) return false;
       try {
-        await session.process.setSessionName(name);
-        return true;
+        return await renameOmpRecentSession({
+          sessionId: session.claudeSessionId,
+          name,
+          projectPath: session.ompCwd ?? session.worktreePath ?? session.projectPath,
+        });
       } catch (err) {
-        console.warn(`[session] Failed to name omp session:`, err);
+        console.warn(`[session] Failed to name stopped omp session:`, err);
         return false;
       }
     }
