@@ -25,6 +25,23 @@ String? _errorTitle(String? errorCode, AppLocalizations l) {
     'incompatible_protocol' => l.protocolIncompatibleTitle,
     'auto_mode_unavailable' => 'Auto Mode Unavailable',
     'codex_warning' => 'Codex Warning',
+    'omp_cli_not_found' => 'omp CLI Not Installed',
+    'omp_start_failed' => 'omp Failed to Start',
+    'omp_protocol_unsupported' => 'omp Version Not Supported',
+    'omp_process_exited' => 'omp Stopped',
+    'omp_unsupported_platform' => 'omp Not Supported on This Platform',
+    'omp_notice' => 'omp Notice',
+    'omp_info' => 'omp',
+    'omp_session_not_found' => 'omp Session Not Found',
+    'omp_session_already_open' => 'omp Session Already Open',
+    'omp_session_busy' => 'omp Session Busy',
+    'omp_history_too_large' => 'omp History Too Large',
+    'omp_mode_unsupported' => 'Mode Not Available in omp',
+    'omp_respawn_failed' => 'omp Restart Failed',
+    'omp_sandbox_unsupported' => 'omp Has No Sandbox',
+    'set_omp_model_failed' => 'omp Model Change Failed',
+    'set_omp_model_unsupported' => 'omp Model Change Not Supported',
+    'omp_name_cannot_be_cleared' => l.ompNameCannotBeCleared,
     _ => null,
   };
 }
@@ -53,6 +70,17 @@ String? _errorHint(
       ProtocolUpdateTarget.both => l.protocolUpdateBothBody,
     },
     'auto_mode_unavailable' => 'Use Default mode here, or switch to a Claude environment that supports Auto mode',
+    // No copyable install command: omp has no single install line.
+    'omp_cli_not_found' => 'Install omp on the Bridge machine or set BRIDGE_OMP_BIN, then restart Bridge',
+    'omp_start_failed' =>
+      'Check the omp model and login on the Bridge machine, then try again',
+    'omp_protocol_unsupported' => 'Update omp on the Bridge machine',
+    'omp_process_exited' => 'Resume the session to continue',
+    'omp_session_already_open' =>
+      'Stop the running session before resuming it with other settings',
+    'omp_session_busy' =>
+      'Wait until the previous omp process has exited, then try again',
+    'omp_respawn_failed' => 'Resume the session to continue',
     _ => null,
   };
 }
@@ -88,13 +116,26 @@ bool _isClaudeOAuthOptInRequired(String? errorCode) {
   return errorCode == 'claude_oauth_opt_in_required';
 }
 
-/// Whether the errorCode represents a non-critical warning (amber style).
-bool _isWarning(String? errorCode) {
-  return errorCode == 'git_not_available' ||
-      errorCode == 'bridge_update_required' ||
-      errorCode == 'auto_mode_unavailable' ||
-      errorCode == 'claude_oauth_opt_in_required' ||
-      errorCode == 'codex_warning';
+enum _ErrorTone { error, warning, neutral }
+
+/// Style of the bubble: non-critical warnings are amber, omp's informational
+/// notifications (`omp_info`) neutral, everything else an error.
+_ErrorTone _toneFor(String? errorCode) {
+  return switch (errorCode) {
+    'git_not_available' ||
+    'bridge_update_required' ||
+    'auto_mode_unavailable' ||
+    'claude_oauth_opt_in_required' ||
+    'codex_warning' ||
+    'omp_notice' ||
+    'omp_session_already_open' ||
+    'omp_session_busy' ||
+    'omp_mode_unsupported' ||
+    'omp_sandbox_unsupported' ||
+    'omp_name_cannot_be_cleared' => _ErrorTone.warning,
+    'omp_info' => _ErrorTone.neutral,
+    _ => _ErrorTone.error,
+  };
 }
 
 class ErrorBubble extends StatelessWidget {
@@ -112,17 +153,28 @@ class ErrorBubble extends StatelessWidget {
     final title = _errorTitle(resolvedErrorCode, l);
     final hint = _errorHint(resolvedErrorCode, l, message);
     final hasStructured = title != null;
-    final isWarn = _isWarning(resolvedErrorCode);
+    final tone = _toneFor(resolvedErrorCode);
+    final isWarn = tone != _ErrorTone.error;
+    final cs = Theme.of(context).colorScheme;
 
-    final bubbleColor = isWarn
-        ? appColors.warningBubble
-        : appColors.errorBubble;
-    final borderColor = isWarn
-        ? appColors.warningBubbleBorder
-        : appColors.errorBubbleBorder;
-    final textColor = isWarn ? appColors.warningText : appColors.errorText;
+    final bubbleColor = switch (tone) {
+      _ErrorTone.warning => appColors.warningBubble,
+      _ErrorTone.neutral => cs.surfaceContainerHigh,
+      _ErrorTone.error => appColors.errorBubble,
+    };
+    final borderColor = switch (tone) {
+      _ErrorTone.warning => appColors.warningBubbleBorder,
+      _ErrorTone.neutral => cs.outlineVariant,
+      _ErrorTone.error => appColors.errorBubbleBorder,
+    };
+    final textColor = switch (tone) {
+      _ErrorTone.warning => appColors.warningText,
+      _ErrorTone.neutral => cs.onSurfaceVariant,
+      _ErrorTone.error => appColors.errorText,
+    };
 
     return Container(
+      key: ValueKey('error_bubble_${tone.name}'),
       margin: const EdgeInsets.symmetric(
         vertical: AppSpacing.bubbleMarginV,
         horizontal: AppSpacing.bubbleMarginH,

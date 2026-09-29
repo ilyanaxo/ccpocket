@@ -29,8 +29,6 @@ enum NewSessionTab {
   }
 }
 
-enum EnabledAgentsMode { both, codex, claude }
-
 extension NewSessionTabL10n on NewSessionTab {
   String localizedLabel(AppLocalizations l) => switch (this) {
     NewSessionTab.codex => l.newSessionTabCodex,
@@ -99,40 +97,6 @@ Set<Provider> effectiveProviders(
       .toSet();
   if (effective.isNotEmpty) return effective;
   return {Provider.claude, Provider.codex};
-}
-
-EnabledAgentsMode enabledAgentsModeFromTabs(List<NewSessionTab> tabs) {
-  final set = tabs.toSet();
-  final hasCodex = set.contains(NewSessionTab.codex);
-  final hasClaude = set.contains(NewSessionTab.claude);
-  if (hasCodex && !hasClaude) return EnabledAgentsMode.codex;
-  if (hasClaude && !hasCodex) return EnabledAgentsMode.claude;
-  return EnabledAgentsMode.both;
-}
-
-List<NewSessionTab> tabsForEnabledAgentsMode(
-  EnabledAgentsMode mode,
-  List<NewSessionTab> current,
-) {
-  switch (mode) {
-    case EnabledAgentsMode.both:
-      final ordered = [
-        for (final tab in current)
-          if (NewSessionTab.values.contains(tab)) tab,
-      ];
-      final set = ordered.toSet();
-      if (!set.contains(NewSessionTab.codex)) {
-        ordered.add(NewSessionTab.codex);
-      }
-      if (!set.contains(NewSessionTab.claude)) {
-        ordered.add(NewSessionTab.claude);
-      }
-      return ordered;
-    case EnabledAgentsMode.codex:
-      return const [NewSessionTab.codex];
-    case EnabledAgentsMode.claude:
-      return const [NewSessionTab.claude];
-  }
 }
 
 bool isNewSessionTabEnabled(

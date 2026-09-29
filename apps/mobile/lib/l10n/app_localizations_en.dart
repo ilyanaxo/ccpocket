@@ -3229,4 +3229,102 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get finderRevealFailed =>
       'Could not show the file in Finder. Check the file and Bridge connection.';
+
+  @override
+  String get ompMessagePlaceholder => 'Message omp...';
+
+  @override
+  String get autoRenameOmpSessions => 'Auto Rename (omp)';
+
+  @override
+  String get autoRenameOmpSessionsSubtitle =>
+      'Name omp sessions automatically after the first agent response';
+
+  @override
+  String get ompDefaultModel => 'omp default';
+
+  @override
+  String get ompApprovalMenuTitle => 'omp approval mode';
+
+  @override
+  String get ompApprovalAlwaysAsk => 'Ask every time';
+
+  @override
+  String get ompApprovalAlwaysAskDescription =>
+      'Ask before edits, commands and MCP tools';
+
+  @override
+  String get ompApprovalWrite => 'Allow writes';
+
+  @override
+  String get ompApprovalWriteDescription =>
+      'Edits and MCP tools run without asking; commands still ask. Your omp allow rules also apply.';
+
+  @override
+  String get ompApprovalYolo => 'Run everything';
+
+  @override
+  String get ompApprovalYoloDescription => 'Run everything without asking';
+
+  @override
+  String get ompApprovalChipAlwaysAsk => 'Ask';
+
+  @override
+  String get ompApprovalChipWrite => 'Writes';
+
+  @override
+  String get ompApprovalChipYolo => 'All';
+
+  @override
+  String get ompApproveAlwaysScope =>
+      'Allows every call of this tool in this session';
+
+  @override
+  String get ompAskDeclineAborts => 'Declining stops omp\'s current turn';
+
+  @override
+  String get ompChangeDeferredTip =>
+      'The change applies when omp is idle and its background jobs have finished';
+
+  @override
+  String get ompAdditionalDirsDescription =>
+      'Extra directories omp may read and work in. They do not grant write access by themselves.';
+
+  @override
+  String get ompNotDetected => 'omp was not found on this Bridge';
+
+  @override
+  String get ompNoModels => 'omp has no usable model. Log in with omp first.';
+
+  @override
+  String get ompNotAvailableOnBridge => 'Update the Bridge to use omp';
+
+  @override
+  String get ompStartNeedsBridgeUpdate =>
+      'This Bridge cannot start omp sessions. Update the Bridge.';
+
+  @override
+  String get bridgeUpdateRequiredForOmp =>
+      'This omp session needs a newer Bridge';
+
+  @override
+  String get ompNameCannotBeCleared => 'omp session names cannot be cleared';
+
+  @override
+  String get ompSessionDone => 'omp session done';
+
+  @override
+  String get ompCwdMissingTip =>
+      'The recorded directory no longer exists; omp continues in the project directory';
+
+  @override
+  String get ompModelIgnoredTip =>
+      'The requested model is not available in omp; the session keeps its model';
+
+  @override
+  String get ompModeMappedTip =>
+      'omp has no plan or auto mode; the session asks before actions';
+
+  @override
+  String get enabledAgentsAtLeastOne => 'Keep at least one agent enabled';
 }

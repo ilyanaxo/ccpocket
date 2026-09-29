@@ -1,11 +1,16 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ccpocket/models/messages.dart';
 import 'package:ccpocket/features/session_list/session_list_screen.dart';
 import 'package:ccpocket/features/settings/state/settings_state.dart';
 import 'package:ccpocket/models/new_session_params.dart';
+import 'package:ccpocket/models/new_session_tab.dart';
+import 'package:ccpocket/theme/app_theme.dart';
+import 'package:ccpocket/theme/provider_style.dart';
 
 RecentSession _session({
   required String projectPath,
@@ -265,6 +270,189 @@ void main() {
     });
   });
 
+  group('buildResumeCommand omp', () {
+    test('resumes with the stored approval mode', () {
+      final session = _session(
+        projectPath: '/home/user/my-app',
+        sessionId: '01a0e960-d626-7359-b8e8-44ce5c598088',
+        provider: 'omp',
+      );
+
+      expect(
+        buildResumeCommand(session),
+        "cd '/home/user/my-app' && omp --resume "
+        "'01a0e960-d626-7359-b8e8-44ce5c598088' --approval-mode always-ask",
+      );
+      expect(
+        buildResumeCommand(
+          session,
+          ompExecutionMode: ExecutionMode.acceptEdits,
+        ),
+        endsWith('--approval-mode write'),
+      );
+      expect(
+        buildResumeCommand(session, ompExecutionMode: ExecutionMode.fullAccess),
+        endsWith('--approval-mode yolo'),
+      );
+    });
+
+    test('omp restores extra directories itself', () {
+      final session = RecentSession(
+        sessionId: 'omp-1',
+        provider: 'omp',
+        firstPrompt: 'test',
+        created: '2025-01-01T00:00:00Z',
+        modified: '2025-01-01T00:00:00Z',
+        gitBranch: 'main',
+        projectPath: '/home/user/my-app',
+        isSidechain: false,
+        workspace: const SessionWorkspaceInfo(
+          kind: 'project',
+          rootPaths: ['/home/user/my-app', '/home/user/shared'],
+        ),
+      );
+
+      expect(buildResumeCommand(session), isNot(contains('--add-dir')));
+    });
+
+    test('reads the approval mode from the per-session settings', () {
+      expect(
+        ompExecutionModeFromSessionSettings(null),
+        ExecutionMode.defaultMode,
+      );
+      expect(
+        ompExecutionModeFromSessionSettings({'executionMode': 'fullAccess'}),
+        ExecutionMode.fullAccess,
+      );
+      expect(
+        ompExecutionModeFromSessionSettings({'permissionMode': 'acceptEdits'}),
+        ExecutionMode.acceptEdits,
+      );
+      // omp has no plan mode.
+      expect(
+        ompExecutionModeFromSessionSettings({'permissionMode': 'plan'}),
+        ExecutionMode.defaultMode,
+      );
+    });
+  });
+
+  group('buildOmpStartMessage', () {
+    test('matches the omp-start contract fixture', () {
+      final fixture = jsonDecode(
+        File('../../test/fixtures/protocol/v1/omp-start.json')
+            .readAsStringSync(),
+      ) as Map<String, dynamic>;
+      final params = NewSessionParams(
+        projectPath: '/home/user/project',
+        provider: Provider.omp,
+        executionMode: ExecutionMode.acceptEdits,
+        ompModel: 'baseten/zai-org/GLM-5.3-Fast',
+        ompThinkingLevel: 'high',
+      );
+
+      final message = buildOmpStartMessage(
+        params,
+        autoRename: true,
+        requestId: 'pending_1790447032742',
+      );
+
+      expect(jsonDecode(message.toJson()), fixture);
+    });
+
+    test('omp default sends neither model nor thinking level', () {
+      final params = NewSessionParams(
+        projectPath: '/home/user/project',
+        provider: Provider.omp,
+        ompThinkingLevel: 'high',
+        useWorktree: true,
+        worktreeBranch: 'fix/login',
+        additionalWritableRoots: const ['/home/user/shared'],
+      );
+
+      final json = jsonDecode(
+        buildOmpStartMessage(
+          params,
+          autoRename: false,
+          requestId: 'pending_1',
+        ).toJson(),
+      ) as Map<String, dynamic>;
+
+      expect(json.containsKey('model'), isFalse);
+      expect(json.containsKey('thinkingLevel'), isFalse);
+      expect(json['executionMode'], 'default');
+      expect(json['permissionMode'], 'default');
+      expect(json['useWorktree'], isTrue);
+      expect(json['worktreeBranch'], 'fix/login');
+      expect(json['additionalWritableRoots'], ['/home/user/shared']);
+      for (final key in const [
+        'planMode',
+        'sandboxMode',
+        'effort',
+        'modelReasoningEffort',
+        'approvalPolicy',
+        'codexPermissionsMode',
+        'serviceTier',
+        'networkAccessEnabled',
+        'webSearchMode',
+        'profile',
+      ]) {
+        expect(json.containsKey(key), isFalse, reason: key);
+      }
+    });
+  });
+
+  group('visibleNewSessionTabs', () {
+    const all = [NewSessionTab.claude, NewSessionTab.omp, NewSessionTab.codex];
+
+    test('offers omp only when the Bridge supports it', () {
+      expect(visibleNewSessionTabs(all, OmpSupport.supported), all);
+      expect(visibleNewSessionTabs(all, OmpSupport.unknown), [
+        NewSessionTab.claude,
+        NewSessionTab.codex,
+      ]);
+      expect(visibleNewSessionTabs(all, OmpSupport.unsupported), [
+        NewSessionTab.claude,
+        NewSessionTab.codex,
+      ]);
+    });
+
+    test('falls back to Claude and Codex when only omp is enabled', () {
+      expect(
+        visibleNewSessionTabs(const [NewSessionTab.omp], OmpSupport.unknown),
+        [NewSessionTab.codex, NewSessionTab.claude],
+      );
+      expect(
+        visibleNewSessionTabs(const [NewSessionTab.omp], OmpSupport.supported),
+        [NewSessionTab.omp],
+      );
+    });
+  });
+
+  testWidgets('providers have distinct colours and icons', (tester) async {
+    late Map<Provider, ProviderStyle> styles;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: Builder(
+          builder: (context) {
+            styles = {
+              for (final provider in Provider.values)
+                provider: providerStyleFor(context, provider),
+            };
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    final scheme = AppTheme.darkTheme.colorScheme;
+    expect(styles[Provider.claude]!.foreground, scheme.primary);
+    expect(styles[Provider.codex]!.foreground, scheme.secondary);
+    expect(styles[Provider.omp]!.foreground, scheme.tertiary);
+    expect(styles[Provider.omp]!.icon, Icons.pie_chart_outline);
+    expect(providerFromRaw('omp'), Provider.omp);
+  });
+
   group('filterByQuery', () {
     final querySessions = [
       _session(
@@ -390,10 +578,19 @@ void main() {
       const settings = SettingsState(
         autoRenameCodexSessions: true,
         autoRenameClaudeSessions: false,
+        autoRenameOmpSessions: false,
       );
 
       expect(autoRenameForProvider(settings, Provider.codex), isTrue);
       expect(autoRenameForProvider(settings, Provider.claude), isFalse);
+      expect(autoRenameForProvider(settings, Provider.omp), isFalse);
+      expect(
+        autoRenameForProvider(
+          settings.copyWith(autoRenameOmpSessions: true),
+          Provider.omp,
+        ),
+        isTrue,
+      );
 
       final codexJson = jsonDecode(
         ClientMessage.start(

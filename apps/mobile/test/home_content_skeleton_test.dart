@@ -949,6 +949,40 @@ void main() {
       },
     );
 
+    testWidgets('pending omp start explains a Bridge without omp', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildHomeContent(
+          offlinePendingActions: [
+            OfflinePendingAction(
+              id: 'pending-omp-start',
+              kind: OfflinePendingActionKind.start,
+              projectPath: '/home/user/project-a',
+              provider: 'omp',
+              createdAt: DateTime.utc(2026, 1, 1),
+              bridgeUpdateRequired: true,
+            ),
+          ],
+          recentSessions: const [],
+          isInitialLoading: false,
+          cubit: cubit,
+          draftService: draftService,
+          revenueCatService: revenueCatService,
+          supportBannerService: supportBannerService,
+        ),
+      );
+      await tester.pump();
+
+      final l = AppLocalizations.of(tester.element(find.byType(HomeContent)));
+      expect(find.text(l.ompStartNeedsBridgeUpdate), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('pending_action_bridge_update_icon')),
+        findsOneWidget,
+      );
+      expect(find.text(l.pendingActionWillCreateOnReconnect), findsNothing);
+    });
+
     testWidgets('labels an accepted resume as restoring', (tester) async {
       await tester.pumpWidget(
         _buildHomeContent(

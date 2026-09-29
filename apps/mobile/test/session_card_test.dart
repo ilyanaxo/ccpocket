@@ -1427,6 +1427,146 @@ void main() {
     });
   });
 
+  group('RunningSessionCard omp', () {
+    testWidgets('shows the omp model, thinking level and approval mode', (
+      tester,
+    ) async {
+      final session = SessionInfo.fromJson({
+        'id': 'omp-running',
+        'provider': 'omp',
+        'projectPath': '/home/user/my-app',
+        'status': 'running',
+        'createdAt': DateTime.now().toIso8601String(),
+        'lastActivityAt': DateTime.now().toIso8601String(),
+        'permissionMode': 'acceptEdits',
+        'executionMode': 'acceptEdits',
+        'ompSettings': {
+          'model': 'baseten/zai-org/GLM-5.3-Fast',
+          'thinkingLevel': 'high',
+        },
+      });
+
+      await tester.pumpWidget(
+        _wrap(RunningSessionCard(session: session, onTap: () {})),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(
+        find.text('zai-org/GLM-5.3-Fast · High  ${l.ompApprovalChipWrite}'),
+        findsOneWidget,
+      );
+      // Not the Claude summary.
+      expect(find.textContaining('accept-edits'), findsNothing);
+    });
+
+    testWidgets('approve always is session-scoped with the scope note', (
+      tester,
+    ) async {
+      String? approvedAlways;
+      final session = SessionInfo(
+        id: 'omp-approval',
+        provider: 'omp',
+        projectPath: '/home/user/my-app',
+        status: 'waiting_approval',
+        createdAt: DateTime.now().toIso8601String(),
+        lastActivityAt: DateTime.now().toIso8601String(),
+        pendingPermission: const PermissionRequestMessage(
+          toolUseId: 'call-1',
+          toolName: 'Bash',
+          input: {
+            'command': 'echo hi',
+            'approvalDetails': ['Command: echo hi'],
+          },
+        ),
+      );
+
+      await tester.pumpWidget(
+        _wrap(
+          RunningSessionCard(
+            session: session,
+            onTap: () {},
+            onApproveAlways: (id) => approvedAlways = id,
+          ),
+        ),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      final alwaysButton = find.byKey(const ValueKey('approve_always_button'));
+      expect(
+        find.descendant(
+          of: alwaysButton,
+          matching: find.textContaining(l.approveSessionMain),
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining(l.approveAlways), findsNothing);
+      expect(find.text(l.approve), findsOneWidget);
+      expect(find.text(l.ompApproveAlwaysScope), findsOneWidget);
+
+      await tester.tap(alwaysButton);
+      expect(approvedAlways, 'call-1');
+    });
+
+    testWidgets('Claude keeps the permanent approve-always wording', (
+      tester,
+    ) async {
+      final session = SessionInfo(
+        id: 'claude-approval',
+        provider: 'claude',
+        projectPath: '/home/user/my-app',
+        status: 'waiting_approval',
+        createdAt: DateTime.now().toIso8601String(),
+        lastActivityAt: DateTime.now().toIso8601String(),
+        pendingPermission: const PermissionRequestMessage(
+          toolUseId: 'call-2',
+          toolName: 'Bash',
+          input: {'command': 'echo hi'},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _wrap(
+          RunningSessionCard(
+            session: session,
+            onTap: () {},
+            onApproveAlways: (_) {},
+          ),
+        ),
+      );
+
+      final l = AppLocalizations.of(tester.element(find.byType(Scaffold)));
+      expect(find.textContaining(l.approveAlways), findsOneWidget);
+      expect(find.text(l.ompApproveAlwaysScope), findsNothing);
+    });
+  });
+
+  group('RecentSessionCard omp', () {
+    testWidgets('shows the recorded omp model and thinking level', (
+      tester,
+    ) async {
+      final session = RecentSession.fromJson({
+        'sessionId': '01a0e960-d626-7359-b8e8-44ce5c598088',
+        'provider': 'omp',
+        'firstPrompt': 'Fix the login',
+        'created': DateTime.now().toIso8601String(),
+        'modified': DateTime.now().toIso8601String(),
+        'gitBranch': '',
+        'projectPath': '/home/user/my-app',
+        'isSidechain': false,
+        'ompSettings': {
+          'model': 'anthropic/claude-opus-4-7',
+          'thinkingLevel': 'max',
+        },
+      });
+
+      await tester.pumpWidget(
+        _wrap(RecentSessionCard(session: session, onTap: () {})),
+      );
+
+      expect(find.text('claude-opus-4-7 · Max'), findsOneWidget);
+    });
+  });
+
   group('RecentSessionCard', () {
     testWidgets('always shows an empty pin button and calls toggle', (
       tester,

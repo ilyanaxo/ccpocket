@@ -508,10 +508,6 @@ class SettingsCubit extends Cubit<SettingsState> {
     emit(state.copyWith(showHiddenDirectories: show));
   }
 
-  void setEnabledAgentsMode(EnabledAgentsMode mode) {
-    setNewSessionTabs(tabsForEnabledAgentsMode(mode, state.newSessionTabs));
-  }
-
   /// Enables or disables one agent. The last enabled agent cannot be
   /// disabled (the call is then ignored).
   void setAgentEnabled(Provider provider, bool enabled) {

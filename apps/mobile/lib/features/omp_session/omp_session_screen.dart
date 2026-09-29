@@ -1,7 +1,5 @@
-import '../explore/explore_screen.dart';
-import '../file_browser/file_browser_reference.dart';
-
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
@@ -14,29 +12,22 @@ import '../../hooks/use_app_resume_callback.dart';
 import '../../hooks/use_scroll_tracking.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/messages.dart';
-import '../../models/new_session_params.dart'
-    show permissionModeFromRaw, sandboxModeFromRaw;
+import '../../models/new_session_params.dart' show permissionModeFromRaw;
 import '../../providers/bridge_cubits.dart';
 import '../../providers/machine_manager_cubit.dart';
 import '../../router/app_router.dart';
-import '../workspace/widgets/workspace_session_route_adapter.dart';
 import '../../router/session_stack_navigation.dart';
 import '../../services/bridge_service.dart';
 import '../../services/chat_message_handler.dart';
 import '../../services/draft_service.dart';
-import '../../utils/composer_tokens.dart';
 import '../../services/notification_service.dart';
 import '../../theme/app_theme.dart';
+import '../../utils/composer_tokens.dart';
 import '../../utils/diff_parser.dart';
 import '../../utils/network_endpoint.dart';
 import '../../utils/terminal_launcher.dart';
-import '../session_list/workspace_shell_screen.dart';
-import '../session_link/widgets/session_unavailable_view.dart';
-import '../settings/state/settings_cubit.dart';
 import '../../widgets/approval_bar.dart';
 import '../../widgets/bubbles/ask_user_question_widget.dart';
-import '../../widgets/message_bubble.dart';
-import '../../widgets/plan_detail_sheet.dart';
 import '../../widgets/rename_session_dialog.dart';
 import '../../widgets/screenshot_sheet.dart';
 import '../../widgets/session_name_title.dart';
@@ -44,25 +35,34 @@ import '../../widgets/workspace_pane_chrome.dart';
 import '../chat_session/state/chat_session_cubit.dart';
 import '../chat_session/state/chat_session_state.dart';
 import '../chat_session/state/streaming_state_cubit.dart';
+import '../chat_session/utils/session_usage.dart';
 import '../chat_session/widgets/bottom_overlay_layout.dart';
 import '../chat_session/widgets/chat_input_with_overlays.dart';
 import '../chat_session/widgets/chat_message_list.dart';
+import '../chat_session/widgets/queued_input_panel.dart';
 import '../chat_session/widgets/reconnect_banner.dart';
 import '../chat_session/widgets/scroll_to_bottom_button.dart';
 import '../chat_session/widgets/session_file_list_scope.dart';
 import '../chat_session/widgets/session_mode_bar.dart';
 import '../chat_session/widgets/status_line_flexible_space.dart';
-import '../chat_session/utils/session_usage.dart';
+import '../claude_session/widgets/rewind_message_list_sheet.dart'
+    show UserMessageHistorySheet;
+import '../claude_session/widgets/usage_summary_bar.dart';
+import '../codex_session/widgets/codex_rewind_dialog.dart';
+import '../explore/explore_screen.dart';
 import '../explore/state/explore_state.dart';
+import '../file_browser/file_browser_reference.dart';
 import '../git/state/git_status_cubit.dart';
 import '../git/state/git_view_cache_service.dart';
-import 'widgets/rewind_action_sheet.dart';
-import 'widgets/rewind_message_list_sheet.dart' show UserMessageHistorySheet;
-import 'widgets/usage_summary_bar.dart';
+import '../session_link/widgets/session_unavailable_view.dart';
+import '../session_list/workspace_shell_screen.dart';
+import '../settings/state/settings_cubit.dart';
+import 'state/omp_session_cubit.dart';
 
 const _fileListRefreshToolNames = {
   'Edit',
   'FileEdit',
+  'FileChange',
   'MultiEdit',
   'Write',
   'NotebookEdit',
@@ -79,13 +79,16 @@ class _NoopListenable implements Listenable {
   void removeListener(VoidCallback listener) {}
 }
 
-/// Outer widget that creates screen-scoped [ChatSessionCubit] and
-/// [StreamingStateCubit] via [MultiBlocProvider], replacing Riverpod's
-/// Family (autoDispose) pattern.
+/// omp chat screen.
 ///
-/// When [isPending] is true, shows a loading overlay until [session_created]
-/// is received from the bridge, then swaps to the real session.
-class ClaudeSessionScreen extends StatefulWidget {
+/// Follows the Codex screen: the Bridge keeps a one-item input queue and
+/// rewinds the conversation into a new Bridge session. omp has no plan mode,
+/// sandbox, goals, tool suggestions, CLI join or fork, and failed messages
+/// are not retried (a retry while omp is busy would be queued and drained as
+/// a second entry). Shares `ChatMessageList`, `ChatInputWithOverlays` and
+/// `SessionModeBar` through [OmpSessionCubit], which extends
+/// [ChatSessionCubit].
+class OmpSessionScreen extends StatefulWidget {
   final String sessionId;
   final String? projectPath;
   final SessionWorkspaceInfo? workspace;
@@ -93,7 +96,6 @@ class ClaudeSessionScreen extends StatefulWidget {
   final String? worktreePath;
   final bool isPending;
   final String? initialPermissionMode;
-  final String? initialSandboxMode;
   final VoidCallback? onBackToSessions;
   final bool hideSessionBackButton;
 
@@ -101,7 +103,7 @@ class ClaudeSessionScreen extends StatefulWidget {
   /// with subtype `session_created` (race condition fix).
   final ValueNotifier<SystemMessage?>? pendingSessionCreated;
 
-  const ClaudeSessionScreen({
+  const OmpSessionScreen({
     super.key,
     required this.sessionId,
     this.projectPath,
@@ -110,77 +112,27 @@ class ClaudeSessionScreen extends StatefulWidget {
     this.worktreePath,
     this.isPending = false,
     this.initialPermissionMode,
-    this.initialSandboxMode,
     this.pendingSessionCreated,
     this.onBackToSessions,
     this.hideSessionBackButton = false,
   });
 
   @override
-  State<ClaudeSessionScreen> createState() => _ClaudeSessionScreenState();
+  State<OmpSessionScreen> createState() => _OmpSessionScreenState();
 }
 
-@RoutePage(name: 'ClaudeSessionRoute')
-class WorkspaceClaudeSessionScreen extends StatelessWidget {
-  final String sessionId;
-  final String? projectPath;
-  final SessionWorkspaceInfo? workspace;
-  final String? gitBranch;
-  final String? worktreePath;
-  final bool isPending;
-  final String? initialPermissionMode;
-  final String? initialSandboxMode;
-  final ValueNotifier<SystemMessage?>? pendingSessionCreated;
-  final VoidCallback? onBackToSessions;
-  final bool hideSessionBackButton;
-
-  const WorkspaceClaudeSessionScreen({
-    super.key,
-    required this.sessionId,
-    this.projectPath,
-    this.workspace,
-    this.gitBranch,
-    this.worktreePath,
-    this.isPending = false,
-    this.initialPermissionMode,
-    this.initialSandboxMode,
-    this.pendingSessionCreated,
-    this.onBackToSessions,
-    this.hideSessionBackButton = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return WorkspaceSessionRouteAdapter(
-      selection: WorkspaceSessionSelection(
-        sessionId: sessionId,
-        provider: Provider.claude,
-        projectPath: projectPath,
-        workspace: workspace,
-        gitBranch: gitBranch,
-        worktreePath: worktreePath,
-        isPending: isPending,
-        permissionMode: initialPermissionMode,
-        sandboxMode: initialSandboxMode,
-        pendingSessionCreated: pendingSessionCreated,
-      ),
-    );
-  }
-}
-
-class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
+class _OmpSessionScreenState extends State<OmpSessionScreen> {
   late String _sessionId;
   late String? _projectPath;
   late SessionWorkspaceInfo? _workspace;
-  late String? _worktreePath;
   late String? _gitBranch;
+  late String? _worktreePath;
   late bool _isPending;
   var _explorerCurrentPath = '';
   List<String> _recentPeekedFiles = const [];
   PermissionMode? _permissionMode;
-  SandboxMode? _sandboxMode;
   StreamSubscription<ServerMessage>? _pendingSub;
-  StreamSubscription<ServerMessage>? _sessionSwitchSub;
+  StreamSubscription<ServerMessage>? _sessionReplacedSub;
   StreamSubscription<String>? _sessionStoppedSub;
   final Object _sessionRouteOwner = Object();
   Object? _sessionRouteIdentity;
@@ -192,11 +144,10 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     _sessionId = widget.sessionId;
     _projectPath = widget.projectPath;
     _workspace = widget.workspace;
-    _worktreePath = widget.worktreePath;
     _gitBranch = widget.gitBranch;
+    _worktreePath = widget.worktreePath;
     _isPending = widget.isPending;
     _permissionMode = permissionModeFromRaw(widget.initialPermissionMode);
-    _sandboxMode = sandboxModeFromRaw(widget.initialSandboxMode);
     final explorerHistory = bridge.getExplorerHistory(_sessionId);
     _explorerCurrentPath = explorerHistory.currentPath;
     _recentPeekedFiles = explorerHistory.recentPeekedFiles;
@@ -204,7 +155,7 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     if (_isPending) {
       _listenForSessionCreated();
     }
-    _listenForSessionSwitch();
+    _listenForSessionReplaced();
     _listenForSessionStopped();
   }
 
@@ -232,7 +183,7 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
       routeIdentity: routeIdentity,
       owner: _sessionRouteOwner,
       sessionId: _sessionId,
-      provider: 'claude',
+      provider: Provider.omp.value,
     );
     final shell = WorkspaceShellScreen.maybeOf(context);
     if (shell != null) {
@@ -240,7 +191,7 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     } else if (ModalRoute.of(context)?.isCurrent ?? false) {
       NotificationService.instance.setActiveSession(
         sessionId: _sessionId,
-        provider: 'claude',
+        provider: Provider.omp.value,
       );
     }
   }
@@ -259,7 +210,6 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     _pendingSub = bridge.messages.listen((msg) {
       if (msg is SystemMessage && msg.subtype == 'session_created') {
         if (msg.requestId != null && msg.requestId != _sessionId) return;
-        // Filter by projectPath to avoid picking up another session's event
         if (widget.projectPath != null &&
             msg.projectPath != null &&
             msg.projectPath != widget.projectPath) {
@@ -275,14 +225,13 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
         _pendingSub?.cancel();
         _pendingSub = null;
         widget.pendingSessionCreated?.removeListener(_onPendingSessionCreated);
-        final errorText = msg.message;
         if (widget.onBackToSessions case final onBack?) {
           onBack();
         } else {
           context.router.maybePop();
         }
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(errorText)));
+            .showSnackBar(SnackBar(content: Text(msg.message)));
       }
     });
   }
@@ -298,12 +247,12 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     }
   }
 
-  /// Listen for session switches (clear context, rewind, etc.).
-  /// When the bridge destroys the old session and creates a new one with
-  /// sourceSessionId pointing to this session, we switch seamlessly.
-  void _listenForSessionSwitch() {
+  /// A conversation rewind replaces the Bridge session: the Bridge sends a
+  /// `session_created` whose `sourceSessionId` is this session, and the
+  /// screen follows it.
+  void _listenForSessionReplaced() {
     final bridge = context.read<BridgeService>();
-    _sessionSwitchSub = bridge.messages.listen((msg) {
+    _sessionReplacedSub = bridge.messages.listen((msg) {
       if (msg is SystemMessage &&
           msg.subtype == 'session_created' &&
           msg.sourceSessionId == _sessionId &&
@@ -314,6 +263,29 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
         _switchSession(msg);
       }
     });
+  }
+
+  void _switchSession(SystemMessage msg) {
+    final oldId = _sessionId;
+    final newId = msg.sessionId!;
+    final draftService = context.read<DraftService>();
+    final bridge = context.read<BridgeService>();
+    bridge.migrateExplorerHistory(oldId, newId);
+    final explorerHistory = bridge.getExplorerHistory(newId);
+    draftService.migrateDraft(oldId, newId);
+    draftService.migrateImageDraft(oldId, newId);
+    setState(() {
+      _sessionId = newId;
+      _projectPath = msg.projectPath ?? _projectPath;
+      _workspace = msg.workspace ?? _workspace;
+      _worktreePath = msg.worktreePath ?? _worktreePath;
+      _gitBranch = msg.worktreeBranch ?? _gitBranch;
+      _permissionMode =
+          permissionModeFromRaw(msg.permissionMode) ?? _permissionMode;
+      _explorerCurrentPath = explorerHistory.currentPath;
+      _recentPeekedFiles = explorerHistory.recentPeekedFiles;
+    });
+    _syncSessionRouteIdentity();
   }
 
   void _resolveSession(SystemMessage msg) {
@@ -328,11 +300,10 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
       _sessionId = newId;
       _projectPath = msg.projectPath ?? _projectPath;
       _workspace = msg.workspace ?? _workspace;
-      _worktreePath = msg.worktreePath ?? _worktreePath;
       _gitBranch = msg.worktreeBranch ?? _gitBranch;
+      _worktreePath = msg.worktreePath ?? _worktreePath;
       _permissionMode =
           permissionModeFromRaw(msg.permissionMode) ?? _permissionMode;
-      _sandboxMode = sandboxModeFromRaw(msg.sandboxMode) ?? _sandboxMode;
       _isPending = false;
     });
     _syncSessionRouteIdentity();
@@ -366,33 +337,8 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     });
   }
 
-  /// Switch to a new session (e.g. after clear context / sandbox toggle).
-  void _switchSession(SystemMessage msg) {
-    final oldId = _sessionId;
-    final newId = msg.sessionId!;
-    final draftService = context.read<DraftService>();
-    final bridge = context.read<BridgeService>();
-    bridge.migrateExplorerHistory(oldId, newId);
-    final explorerHistory = bridge.getExplorerHistory(newId);
-    draftService.migrateDraft(oldId, newId);
-    draftService.migrateImageDraft(oldId, newId);
-    setState(() {
-      _sessionId = newId;
-      _projectPath = msg.projectPath ?? _projectPath;
-      _workspace = msg.workspace ?? _workspace;
-      _worktreePath = msg.worktreePath ?? _worktreePath;
-      _gitBranch = msg.worktreeBranch ?? _gitBranch;
-      _permissionMode =
-          permissionModeFromRaw(msg.permissionMode) ?? _permissionMode;
-      _sandboxMode = sandboxModeFromRaw(msg.sandboxMode) ?? _sandboxMode;
-      _explorerCurrentPath = explorerHistory.currentPath;
-      _recentPeekedFiles = explorerHistory.recentPeekedFiles;
-    });
-    _syncSessionRouteIdentity();
-  }
-
   @override
-  void didUpdateWidget(covariant ClaudeSessionScreen oldWidget) {
+  void didUpdateWidget(covariant OmpSessionScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.sessionId == widget.sessionId &&
         oldWidget.projectPath == widget.projectPath &&
@@ -400,8 +346,7 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
         oldWidget.worktreePath == widget.worktreePath &&
         oldWidget.gitBranch == widget.gitBranch &&
         oldWidget.isPending == widget.isPending &&
-        oldWidget.initialPermissionMode == widget.initialPermissionMode &&
-        oldWidget.initialSandboxMode == widget.initialSandboxMode) {
+        oldWidget.initialPermissionMode == widget.initialPermissionMode) {
       return;
     }
 
@@ -416,7 +361,6 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
       _gitBranch = widget.gitBranch;
       _isPending = widget.isPending;
       _permissionMode = permissionModeFromRaw(widget.initialPermissionMode);
-      _sandboxMode = sandboxModeFromRaw(widget.initialSandboxMode);
       _explorerCurrentPath = explorerHistory.currentPath;
       _recentPeekedFiles = explorerHistory.recentPeekedFiles;
     });
@@ -434,7 +378,7 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
     }
     widget.pendingSessionCreated?.removeListener(_onPendingSessionCreated);
     _pendingSub?.cancel();
-    _sessionSwitchSub?.cancel();
+    _sessionReplacedSub?.cancel();
     _sessionStoppedSub?.cancel();
     super.dispose();
   }
@@ -442,7 +386,6 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
   @override
   Widget build(BuildContext context) {
     if (_isPending) {
-      final l = AppLocalizations.of(context);
       final shell = WorkspaceShellScreen.maybeOf(context);
       final chrome = _resolveSessionPaneChrome(context, shell);
       final leading = _sessionAppBarLeading(
@@ -464,20 +407,20 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
             ),
           ),
         ),
-        body: Center(
+        body: const Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const CircularProgressIndicator.adaptive(),
-              const SizedBox(height: 16),
-              Text(l.creatingSession, style: const TextStyle(fontSize: 16)),
+              CircularProgressIndicator.adaptive(),
+              SizedBox(height: 16),
+              Text('Creating session...', style: TextStyle(fontSize: 16)),
             ],
           ),
         ),
       );
     }
 
-    return _ChatScreenProviders(
+    return _OmpProviders(
       key: ValueKey(_sessionId),
       sessionId: _sessionId,
       projectPath: _projectPath,
@@ -487,15 +430,17 @@ class _ClaudeSessionScreenState extends State<ClaudeSessionScreen> {
       explorerCurrentPath: _explorerCurrentPath,
       recentPeekedFiles: _recentPeekedFiles,
       permissionMode: _permissionMode,
-      sandboxMode: _sandboxMode,
       onBackToSessions: widget.onBackToSessions,
       hideSessionBackButton: widget.hideSessionBackButton,
     );
   }
 }
 
-/// Wrapper that creates screen-scoped cubits once per session.
-class _ChatScreenProviders extends StatelessWidget {
+// ---------------------------------------------------------------------------
+// Provider wrapper — creates OmpSessionCubit + StreamingStateCubit
+// ---------------------------------------------------------------------------
+
+class _OmpProviders extends StatelessWidget {
   final String sessionId;
   final String? projectPath;
   final SessionWorkspaceInfo? workspace;
@@ -504,11 +449,10 @@ class _ChatScreenProviders extends StatelessWidget {
   final String explorerCurrentPath;
   final List<String> recentPeekedFiles;
   final PermissionMode? permissionMode;
-  final SandboxMode? sandboxMode;
   final VoidCallback? onBackToSessions;
   final bool hideSessionBackButton;
 
-  const _ChatScreenProviders({
+  const _OmpProviders({
     super.key,
     required this.sessionId,
     this.projectPath,
@@ -518,7 +462,6 @@ class _ChatScreenProviders extends StatelessWidget {
     this.explorerCurrentPath = '',
     this.recentPeekedFiles = const [],
     this.permissionMode,
-    this.sandboxMode,
     this.onBackToSessions,
     this.hideSessionBackButton = false,
   });
@@ -529,16 +472,15 @@ class _ChatScreenProviders extends StatelessWidget {
     return MultiBlocProvider(
       providers: [
         BlocProvider(create: (_) => StreamingStateCubit()),
-        BlocProvider(
-          create: (context) => ChatSessionCubit(
+        // Register as ChatSessionCubit so shared widgets can find it.
+        BlocProvider<ChatSessionCubit>(
+          create: (context) => OmpSessionCubit(
             sessionId: sessionId,
-            provider: Provider.claude,
             bridge: bridge,
             streamingCubit: context.read<StreamingStateCubit>(),
             initialExplorerCurrentPath: explorerCurrentPath,
             initialRecentPeekedFiles: recentPeekedFiles,
             initialPermissionMode: permissionMode,
-            initialSandboxMode: sandboxMode,
             initialProjectPath: projectPath,
             initialWorktreePath: worktreePath,
             initialGitBranch: gitBranch,
@@ -548,7 +490,7 @@ class _ChatScreenProviders extends StatelessWidget {
       child: SessionFileListScope(
         bridge: bridge,
         fallbackProjectPath: projectPath,
-        child: _ChatScreenBody(
+        child: _OmpChatBody(
           sessionId: sessionId,
           projectPath: projectPath,
           workspace: workspace,
@@ -562,7 +504,11 @@ class _ChatScreenProviders extends StatelessWidget {
   }
 }
 
-class _ChatScreenBody extends HookWidget {
+// ---------------------------------------------------------------------------
+// Chat body
+// ---------------------------------------------------------------------------
+
+class _OmpChatBody extends HookWidget {
   final String sessionId;
   final String? projectPath;
   final SessionWorkspaceInfo? workspace;
@@ -571,7 +517,7 @@ class _ChatScreenBody extends HookWidget {
   final VoidCallback? onBackToSessions;
   final bool hideSessionBackButton;
 
-  const _ChatScreenBody({
+  const _OmpChatBody({
     required this.sessionId,
     this.projectPath,
     this.workspace,
@@ -583,11 +529,10 @@ class _ChatScreenBody extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final l = AppLocalizations.of(context);
     final appColors = Theme.of(context).extension<AppColors>()!;
+    final l = AppLocalizations.of(context);
     final shell = WorkspaceShellScreen.maybeOf(context);
     final presentationListenable = shell?.presentationListenable;
-
     // Mutable branch state (refreshed from Bridge)
     final currentBranch = useState(gitBranch);
     final showRemoteGitStatusBadge = context.select(
@@ -603,12 +548,10 @@ class _ChatScreenBody extends HookWidget {
     isBackgroundRef.value = isBackground;
     final scroll = useScrollTracking(sessionId);
 
-    // Plan feedback controller (for plan approval rejection message)
-    final planFeedbackController = useTextEditingController();
-
-    // Chat input controller (managed here to preserve text across rebuilds)
+    // Chat input controller
     final chatInputController = useMemoized(ComposerTextEditingController.new);
     useEffect(() => chatInputController.dispose, [chatInputController]);
+    final planFeedbackController = useTextEditingController();
     final draftService = context.read<DraftService>();
 
     // --- Draft persistence: restore on mount, auto-save on change ---
@@ -637,12 +580,11 @@ class _ChatScreenBody extends HookWidget {
         chatInputController.removeListener(onChanged);
       };
     }, [sessionId]);
-
-    // Collapse tool results notifier
+    // Collapse tool results notifier (shared widget needs it)
     final collapseToolResults = useMemoized(() => ValueNotifier<int>(0));
     useEffect(() => collapseToolResults.dispose, const []);
 
-    // Scroll-to-user-entry notifier (set by message history sheet)
+    // Scroll-to-user-entry notifier (for message history jump)
     final scrollToUserEntry = useMemoized(
       () => ValueNotifier<UserChatEntry?>(null),
     );
@@ -671,7 +613,7 @@ class _ChatScreenBody extends HookWidget {
       showRemoteGitStatusBadge: showRemoteGitStatusBadge,
     );
     final parentState = context
-        .findAncestorStateOfType<_ClaudeSessionScreenState>();
+        .findAncestorStateOfType<_OmpSessionScreenState>();
     void handleExploreResult(ExploreScreenResult result) {
       if (!context.mounted) return;
       parentState?.updateExplorerState(
@@ -820,9 +762,6 @@ class _ChatScreenBody extends HookWidget {
     // --- App resume: verify WebSocket health + refresh history ---
     // Only triggers on genuine resume from paused/hidden/detached, not from
     // inactive (e.g. Android notification shade).
-    // If still connected, refresh history directly (BlocListener won't fire).
-    // If disconnected, ensureConnected triggers reconnect → BlocListener
-    // fires → refreshHistory is called there.
     useAppResumeCallback(lifecycleState, () {
       final bridge = context.read<BridgeService>();
       bridge.ensureConnected();
@@ -848,9 +787,9 @@ class _ChatScreenBody extends HookWidget {
     // --- Destructure state ---
     final status = sessionState.status;
     final approval = sessionState.approval;
-    final inPlanMode = sessionState.inPlanMode;
+    final queuedInput = sessionState.queuedInput;
 
-    // Approval state pattern matching
+    // Approval state pattern matching (omp: permission + ask-user only)
     String? pendingToolUseId;
     PermissionRequestMessage? pendingPermission;
     String? askToolUseId;
@@ -860,48 +799,22 @@ class _ChatScreenBody extends HookWidget {
       case ApprovalPermission(:final toolUseId, :final request):
         pendingToolUseId = toolUseId;
         pendingPermission = request;
-        askToolUseId = null;
-        askInput = null;
       case ApprovalAskUser(:final toolUseId, :final input):
-        pendingToolUseId = null;
-        pendingPermission = null;
         askToolUseId = toolUseId;
         askInput = input;
-
       case ApprovalNone():
-        pendingToolUseId = null;
-        pendingPermission = null;
-        askToolUseId = null;
-        askInput = null;
+        break;
     }
 
-    final isPlanApproval = pendingPermission?.toolName == 'ExitPlanMode';
-
-    // --- Action callbacks ---
     void approveToolUse() {
       if (pendingToolUseId == null) return;
       context.read<ChatSessionCubit>().approve(pendingToolUseId);
       planFeedbackController.clear();
     }
 
-    void approveWithClearContext() {
-      if (pendingToolUseId == null) return;
-      context.read<ChatSessionCubit>().approve(
-        pendingToolUseId,
-        clearContext: true,
-      );
-      planFeedbackController.clear();
-    }
-
     void rejectToolUse() {
       if (pendingToolUseId == null) return;
-      final feedback = isPlanApproval
-          ? planFeedbackController.text.trim()
-          : null;
-      context.read<ChatSessionCubit>().reject(
-        pendingToolUseId,
-        message: feedback != null && feedback.isNotEmpty ? feedback : null,
-      );
+      context.read<ChatSessionCubit>().reject(pendingToolUseId);
       planFeedbackController.clear();
     }
 
@@ -915,11 +828,15 @@ class _ChatScreenBody extends HookWidget {
       context.read<ChatSessionCubit>().answer(toolUseId, result);
     }
 
+    void declineQuestion(String toolUseId) {
+      HapticFeedback.mediumImpact();
+      context.read<ChatSessionCubit>().reject(toolUseId);
+    }
+
     // --- Build ---
     return BlocListener<ConnectionCubit, BridgeConnectionState>(
       listener: (context, state) {
         if (state == BridgeConnectionState.connected) {
-          _retryFailedMessages(context, sessionId);
           context.read<ChatSessionCubit>().refreshHistory();
         }
       },
@@ -928,14 +845,13 @@ class _ChatScreenBody extends HookWidget {
           const SingleActivator(LogicalKeyboardKey.escape): () {
             Navigator.of(context).maybePop();
           },
-          // Cmd+Shift+P: cycle permission mode
+          // Cmd+Shift+P: approval mode menu
           const SingleActivator(
             LogicalKeyboardKey.keyP,
             meta: true,
             shift: true,
           ): () {
-            final cubit = context.read<ChatSessionCubit>();
-            showPermissionModeMenu(context, cubit);
+            showOmpApprovalMenu(context, context.read<ChatSessionCubit>());
           },
           // Cmd+Enter: approve pending tool use
           const SingleActivator(LogicalKeyboardKey.enter, meta: true): () {
@@ -985,7 +901,7 @@ class _ChatScreenBody extends HookWidget {
                     ),
                     flexibleSpace: StatusLineFlexibleSpace(
                       status: status,
-                      inPlanMode: inPlanMode,
+                      inPlanMode: false,
                     ),
                     actions: [
                       if (effectiveProjectPath != null)
@@ -1100,121 +1016,17 @@ class _ChatScreenBody extends HookWidget {
                             );
                           },
                         ),
-                      PopupMenuButton<String>(
-                        key: const ValueKey('session_overflow_menu'),
-                        icon: Icon(
-                          Icons.more_horiz,
-                          size: 18,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      _OmpOverflowMenu(
+                        sessionId: sessionId,
+                        projectPath: effectiveProjectPath,
+                        showMessageHistoryItem: !showMessageHistoryAction,
+                        onShowMessageHistory: () => _showUserMessageHistory(
+                          context,
+                          scrollToUserEntry,
+                          sessionId,
+                          chatInputController,
+                          draftService,
                         ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 32,
-                          minHeight: 32,
-                        ),
-                        onSelected: (value) {
-                          switch (value) {
-                            case 'history':
-                              _showUserMessageHistory(
-                                context,
-                                scrollToUserEntry,
-                                sessionId,
-                                chatInputController,
-                                draftService,
-                              );
-                            case 'screenshot':
-                              if (effectiveProjectPath == null) return;
-                              showScreenshotSheet(
-                                context: context,
-                                bridge: context.read<BridgeService>(),
-                                projectPath: effectiveProjectPath,
-                                sessionId: sessionId,
-                              );
-                            case 'gallery':
-                              _openGalleryScreen(context, sessionId: sessionId);
-                            case 'rename':
-                              _renameSession(context, sessionId);
-                            case 'terminal':
-                              _openInTerminal(context, effectiveProjectPath);
-                          }
-                        },
-                        itemBuilder: (context) {
-                          final terminalConfig = context
-                              .read<SettingsCubit>()
-                              .state
-                              .terminalApp;
-                          return [
-                            PopupMenuItem(
-                              key: const ValueKey('menu_rename'),
-                              value: 'rename',
-                              child: ListTile(
-                                leading: const Icon(
-                                  Icons.edit_outlined,
-                                  size: 20,
-                                ),
-                                title: Text(l.rename),
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                              ),
-                            ),
-                            if (!showMessageHistoryAction)
-                              PopupMenuItem(
-                                key: const ValueKey('menu_message_history'),
-                                value: 'history',
-                                child: ListTile(
-                                  leading: const Icon(
-                                    Icons.chat_outlined,
-                                    size: 20,
-                                  ),
-                                  title: Text(l.messageHistory),
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                ),
-                              ),
-                            if (effectiveProjectPath != null)
-                              PopupMenuItem(
-                                key: const ValueKey('menu_screenshot'),
-                                value: 'screenshot',
-                                child: ListTile(
-                                  leading: const Icon(
-                                    Icons.screenshot_monitor,
-                                    size: 20,
-                                  ),
-                                  title: Text(l.screenshot),
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                ),
-                              ),
-                            PopupMenuItem(
-                              key: const ValueKey('menu_gallery'),
-                              value: 'gallery',
-                              child: ListTile(
-                                leading: const Icon(
-                                  Icons.collections,
-                                  size: 20,
-                                ),
-                                title: Text(l.gallery),
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                              ),
-                            ),
-                            if (FeatureFlags.current.isEnabled(
-                                  AppFeature.terminalAppIntegration,
-                                ) &&
-                                terminalConfig.isConfigured &&
-                                effectiveProjectPath != null)
-                              PopupMenuItem(
-                                key: const ValueKey('menu_terminal'),
-                                value: 'terminal',
-                                child: ListTile(
-                                  leading: const Icon(Icons.terminal, size: 20),
-                                  title: Text(l.openInTerminal),
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                ),
-                              ),
-                          ];
-                        },
                       ),
                     ],
                   ),
@@ -1263,62 +1075,50 @@ class _ChatScreenBody extends HookWidget {
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  if (askToolUseId != null && askInput != null)
+                                  if (askToolUseId case final askId?
+                                      when askInput != null) ...[
                                     AskUserQuestionWidget(
-                                      toolUseId: askToolUseId,
+                                      toolUseId: askId,
                                       input: askInput,
-                                      agentName: 'Claude',
+                                      agentName: Provider.omp.label,
                                       onAnswer: answerQuestion,
                                     ),
-                                  if (pendingToolUseId != null)
+                                    OmpAskDeclineBar(
+                                      abortsTurn: !_isOmpGenericDialogId(askId),
+                                      onDecline: () => declineQuestion(askId),
+                                    ),
+                                  ],
+                                  if (pendingToolUseId != null) ...[
                                     ApprovalBar(
                                       key: ValueKey(
                                         'approval_$pendingToolUseId',
                                       ),
                                       appColors: appColors,
                                       pendingPermission: pendingPermission,
-                                      isPlanApproval: isPlanApproval,
+                                      isPlanApproval: false,
+                                      planApprovalUiMode:
+                                          PlanApprovalUiMode.codex,
                                       planFeedbackController:
                                           planFeedbackController,
                                       onApprove: approveToolUse,
                                       onReject: rejectToolUse,
                                       onApproveAlways: approveAlwaysToolUse,
-                                      onApproveClearContext: isPlanApproval
-                                          ? approveWithClearContext
-                                          : null,
-                                      onViewPlan: isPlanApproval
-                                          ? () {
-                                              final originalText =
-                                                  _extractPlanText(
-                                                    sessionState.entries,
-                                                  );
-                                              if (originalText == null) return;
-                                              showPlanDetailSheet(
-                                                context,
-                                                originalText,
-                                              );
-                                            }
-                                          : null,
                                     ),
+                                    if (pendingPermission
+                                            ?.canApproveForSession ??
+                                        true)
+                                      const OmpApproveAlwaysScopeNote(),
+                                  ],
                                 ],
                               ),
                             ),
                           ),
                     topOverlay: sessionState.sessionContextLoaded
-                        ? Positioned(
+                        ? const Positioned(
                             top: 0,
                             left: 0,
                             right: 0,
-                            child: Center(
-                              child: SessionModeBar(
-                                onBeforeRestart: () async {
-                                  draftService.saveDraft(
-                                    sessionId,
-                                    chatInputController.text,
-                                  );
-                                },
-                              ),
-                            ),
+                            child: Center(child: SessionModeBar()),
                           )
                         : null,
                     floatingButtonBuilder: (overlayHeight) {
@@ -1338,11 +1138,9 @@ class _ChatScreenBody extends HookWidget {
                       scrollController: scroll.controller,
                       httpBaseUrl: context.read<BridgeService>().httpBaseUrl,
                       projectPath: effectiveProjectPath,
-                      onRetryMessage: (entry) {
-                        context.read<ChatSessionCubit>().retryMessage(entry);
-                      },
+                      onRetryMessage: null,
                       onRewindMessage: (entry) {
-                        _showRewindActionSheet(
+                        _showOmpRewindDialog(
                           context,
                           entry,
                           sessionId: sessionId,
@@ -1350,8 +1148,8 @@ class _ChatScreenBody extends HookWidget {
                           draftService: draftService,
                         );
                       },
-                      collapseToolResults: collapseToolResults,
                       scrollToUserEntry: scrollToUserEntry,
+                      collapseToolResults: collapseToolResults,
                       bottomPadding: 8,
                       isCodex: false,
                       isReadingHistory: scroll.isReadingHistory,
@@ -1363,17 +1161,47 @@ class _ChatScreenBody extends HookWidget {
                   ),
                 ),
                 if (approval is ApprovalNone)
+                  if (queuedInput != null)
+                    CodexQueuedInputPanel(
+                      item: queuedInput,
+                      isOfflinePending: ChatSessionCubit.isOfflineQueuedInput(
+                        queuedInput,
+                      ),
+                      isDeliveryPending:
+                          ChatSessionCubit.isDeliveryPendingQueuedInput(
+                            queuedInput,
+                          ),
+                      onSteer:
+                          ChatSessionCubit.isOfflineQueuedInput(queuedInput) ||
+                              ChatSessionCubit.isDeliveryPendingQueuedInput(
+                                queuedInput,
+                              )
+                          ? null
+                          : () => context
+                                .read<ChatSessionCubit>()
+                                .steerQueuedInput(queuedInput),
+                      onEdit: () => moveQueuedInputToComposer(
+                        inputController: chatInputController,
+                        item: queuedInput,
+                        cancelQueuedInput: () => context
+                            .read<ChatSessionCubit>()
+                            .cancelQueuedInput(queuedInput),
+                      ),
+                      onCancel: () => context
+                          .read<ChatSessionCubit>()
+                          .cancelQueuedInput(queuedInput),
+                    ),
+                if (approval is ApprovalNone)
                   ChatInputWithOverlays(
                     sessionId: sessionId,
                     workspace: workspace,
                     status: status,
                     onGoToLatest: scroll.goToLatest,
                     inputController: chatInputController,
+                    hintText: l.ompMessagePlaceholder,
+                    inputBlocked: queuedInput != null,
                     initialDiffSelection: diffSelectionFromNav.value,
-                    onDiffSelectionConsumed: () {
-                      // Don't null — keep for AppBar navigation.
-                      // The value is cleared via onDiffSelectionCleared.
-                    },
+                    onDiffSelectionConsumed: () {},
                     onDiffSelectionCleared: () =>
                         diffSelectionFromNav.value = null,
                     onOpenGitScreen: effectiveProjectPath != null
@@ -1392,6 +1220,208 @@ class _ChatScreenBody extends HookWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Whether [toolUseId] names a generic omp extension or slash-command dialog
+/// (§4.4) rather than a question of omp's `ask` tool.
+bool _isOmpGenericDialogId(String toolUseId) =>
+    toolUseId.startsWith('omp-dialog:');
+
+/// Decline action for an omp question. omp can only decline an `ask` question
+/// by cancelling it, which stops the whole turn, so the action says so
+/// ([abortsTurn]). A generic dialog is only cancelled; that it stops the turn
+/// is not established, so it gets the action without the note.
+class OmpAskDeclineBar extends StatelessWidget {
+  final VoidCallback onDecline;
+  final bool abortsTurn;
+
+  const OmpAskDeclineBar({
+    super.key,
+    required this.onDecline,
+    this.abortsTurn = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    final appColors = Theme.of(context).extension<AppColors>()!;
+    return Material(
+      color: appColors.askBubble.withValues(alpha: 0.7),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 8, 4),
+          child: Row(
+            children: [
+              if (abortsTurn) ...[
+                Icon(Icons.info_outline, size: 14, color: appColors.subtleText),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    l.ompAskDeclineAborts,
+                    key: const ValueKey('omp_ask_decline_note'),
+                    style: TextStyle(fontSize: 12, color: appColors.subtleText),
+                  ),
+                ),
+              ] else
+                const Spacer(),
+              TextButton(
+                key: const ValueKey('omp_ask_decline_button'),
+                onPressed: onDecline,
+                child: Text(l.reject),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Scope of omp's approve-always: every call of that tool for the rest of
+/// this session.
+class OmpApproveAlwaysScopeNote extends StatelessWidget {
+  const OmpApproveAlwaysScopeNote({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    final appColors = Theme.of(context).extension<AppColors>()!;
+    return Material(
+      color: appColors.approvalBar,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              Icon(Icons.info_outline, size: 14, color: appColors.subtleText),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  l.ompApproveAlwaysScope,
+                  key: const ValueKey('omp_approve_always_scope'),
+                  style: TextStyle(fontSize: 12, color: appColors.subtleText),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OmpOverflowMenu extends StatelessWidget {
+  final String sessionId;
+  final String? projectPath;
+  final bool showMessageHistoryItem;
+  final VoidCallback onShowMessageHistory;
+
+  const _OmpOverflowMenu({
+    required this.sessionId,
+    required this.projectPath,
+    required this.showMessageHistoryItem,
+    required this.onShowMessageHistory,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final projectPath = this.projectPath;
+    return PopupMenuButton<String>(
+      key: const ValueKey('session_overflow_menu'),
+      icon: Icon(
+        Icons.more_horiz,
+        size: 18,
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+      onSelected: (value) {
+        switch (value) {
+          case 'history':
+            onShowMessageHistory();
+          case 'screenshot':
+            if (projectPath == null) return;
+            showScreenshotSheet(
+              context: context,
+              bridge: context.read<BridgeService>(),
+              projectPath: projectPath,
+              sessionId: sessionId,
+            );
+          case 'gallery':
+            _openGalleryScreen(context, sessionId: sessionId);
+          case 'rename':
+            _renameSession(context, sessionId);
+          case 'terminal':
+            _openInTerminal(context, projectPath);
+        }
+      },
+      itemBuilder: (context) {
+        final terminalConfig = context.read<SettingsCubit>().state.terminalApp;
+        final l = AppLocalizations.of(context);
+        return [
+          const PopupMenuItem(
+            key: ValueKey('menu_rename'),
+            value: 'rename',
+            child: ListTile(
+              leading: Icon(Icons.edit_outlined, size: 20),
+              title: Text('Rename'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+          if (showMessageHistoryItem)
+            PopupMenuItem(
+              key: const ValueKey('menu_message_history'),
+              value: 'history',
+              child: ListTile(
+                leading: const Icon(Icons.chat_outlined, size: 20),
+                title: Text(l.messageHistory),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          if (projectPath != null)
+            const PopupMenuItem(
+              key: ValueKey('menu_screenshot'),
+              value: 'screenshot',
+              child: ListTile(
+                leading: Icon(Icons.screenshot_monitor, size: 20),
+                title: Text('Screenshot'),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          const PopupMenuItem(
+            key: ValueKey('menu_gallery'),
+            value: 'gallery',
+            child: ListTile(
+              leading: Icon(Icons.collections, size: 20),
+              title: Text('Gallery'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+          if (FeatureFlags.current.isEnabled(
+                AppFeature.terminalAppIntegration,
+              ) &&
+              terminalConfig.isConfigured &&
+              projectPath != null)
+            PopupMenuItem(
+              key: const ValueKey('menu_terminal'),
+              value: 'terminal',
+              child: ListTile(
+                leading: const Icon(Icons.terminal, size: 20),
+                title: Text(l.openInTerminal),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+        ];
+      },
     );
   }
 }
@@ -1427,6 +1457,10 @@ WorkspacePaneChrome _resolveSessionPaneChrome(
     slot: WorkspacePaneSlot.center,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 enum _GitBadgeTone { dirty, remote }
 
@@ -1466,10 +1500,6 @@ Color? _gitBadgeColor(BuildContext context, _GitBadgeTone? tone) {
     null => null,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Navigation helpers
-// ---------------------------------------------------------------------------
 
 Future<void> _openGitScreen(
   BuildContext context,
@@ -1512,9 +1542,11 @@ void _openGalleryScreen(BuildContext context, {required String sessionId}) {
   context.router.push(GalleryRoute(sessionId: sessionId));
 }
 
-// ---------------------------------------------------------------------------
-// Top-level helpers
-// ---------------------------------------------------------------------------
+/// Local notification payload for omp: `main.dart` routes a JSON payload
+/// with a provider, a bare id would open the Claude screen.
+@visibleForTesting
+String ompNotificationPayload(String sessionId) =>
+    jsonEncode({'sessionId': sessionId, 'provider': Provider.omp.value});
 
 void _executeSideEffects(
   Set<ChatSideEffect> effects, {
@@ -1523,14 +1555,15 @@ void _executeSideEffects(
   required bool remoteNotificationsReady,
   required ApprovalState approval,
   required AppLocalizations l,
-  required ValueNotifier<int> collapseToolResults,
   required TextEditingController planFeedbackController,
+  required ValueNotifier<int> collapseToolResults,
   required bool Function() isReadingHistory,
 }) {
   final useLocalNotification = shouldUseLocalNotificationFallback(
     isBackground: isBackground,
     remoteNotificationsReady: remoteNotificationsReady,
   );
+  final payload = ompNotificationPayload(sessionId);
   for (final effect in effects) {
     switch (effect) {
       case ChatSideEffect.heavyHaptic:
@@ -1553,7 +1586,7 @@ void _executeSideEffects(
               permission,
               l: l,
               id: 1,
-              payload: sessionId,
+              payload: payload,
             );
           }
         }
@@ -1565,37 +1598,23 @@ void _executeSideEffects(
               permission,
               l: l,
               id: 2,
-              payload: sessionId,
+              payload: payload,
             );
           }
         }
+      // omp has no goals.
       case ChatSideEffect.notifyGoalProgress:
       case ChatSideEffect.notifyGoalComplete:
       case ChatSideEffect.notifyGoalBlocked:
       case ChatSideEffect.notifyGoalBudgetLimited:
       case ChatSideEffect.notifyGoalUsageLimited:
-        if (useLocalNotification) {
-          final title = switch (effect) {
-            ChatSideEffect.notifyGoalProgress => l.notifyGoalProgress,
-            ChatSideEffect.notifyGoalComplete => l.notifyGoalComplete,
-            ChatSideEffect.notifyGoalBlocked => l.notifyGoalBlocked,
-            ChatSideEffect.notifyGoalBudgetLimited => l.notifyGoalBudgetLimited,
-            ChatSideEffect.notifyGoalUsageLimited => l.notifyGoalUsageLimited,
-            _ => '',
-          };
-          NotificationService.instance.show(
-            title: title,
-            body: title,
-            id: 3,
-            payload: sessionId,
-          );
-        }
+        break;
       case ChatSideEffect.notifySessionComplete:
         if (useLocalNotification) {
           NotificationService.instance.showSessionCompleteNotification(
-            body: 'Session done',
+            body: l.ompSessionDone,
             id: 3,
-            payload: sessionId,
+            payload: payload,
           );
         }
     }
@@ -1610,59 +1629,8 @@ PermissionRequestMessage? _notificationPermissionFor(ApprovalState approval) {
       toolName: 'AskUserQuestion',
       input: input,
     ),
-    ApprovalNone() => null,
     _ => null,
   };
-}
-
-/// Walk entries in reverse to find the latest [AssistantServerMessage] that
-/// contains an `ExitPlanMode` tool use, then extract the plan text.
-///
-/// Tries TextContent first; if it's too short (real SDK writes the plan to a
-/// file via Write tool), searches ALL entries for a Write tool targeting
-/// `.claude/plans/`.
-String? _extractPlanText(List<ChatEntry> entries) {
-  for (var i = entries.length - 1; i >= 0; i--) {
-    final entry = entries[i];
-    if (entry is ServerChatEntry && entry.message is AssistantServerMessage) {
-      final assistant = entry.message as AssistantServerMessage;
-      final contents = assistant.message.content;
-      final hasExitPlan = contents.any(
-        (c) => c is ToolUseContent && c.name == 'ExitPlanMode',
-      );
-      if (hasExitPlan) {
-        final textPlan = contents
-            .whereType<TextContent>()
-            .map((c) => c.text)
-            .join('\n\n');
-        if (textPlan.split('\n').length >= 10) return textPlan;
-        // Fall back: search ALL entries for a Write tool targeting .claude/plans/
-        final writtenPlan = findPlanFromWriteTool(entries);
-        return writtenPlan ?? textPlan;
-      }
-    }
-  }
-  return null;
-}
-
-/// Search all entries for a Write tool that targets `.claude/plans/` and
-/// return its `content` input.  The Write tool is often in a different
-/// [AssistantServerMessage] than the ExitPlanMode tool use.
-String? findPlanFromWriteTool(List<ChatEntry> entries) {
-  for (var i = entries.length - 1; i >= 0; i--) {
-    final entry = entries[i];
-    if (entry is! ServerChatEntry) continue;
-    final msg = entry.message;
-    if (msg is! AssistantServerMessage) continue;
-    for (final c in msg.message.content) {
-      if (c is! ToolUseContent || c.name != 'Write') continue;
-      final filePath = c.input['file_path']?.toString() ?? '';
-      if (!filePath.contains('.claude/plans/')) continue;
-      final content = c.input['content']?.toString();
-      if (content != null && content.isNotEmpty) return content;
-    }
-  }
-  return null;
 }
 
 Future<void> _openInTerminal(BuildContext context, String? projectPath) async {
@@ -1713,19 +1681,18 @@ Future<void> _openInTerminal(BuildContext context, String? projectPath) async {
   }
 }
 
+/// omp session names cannot be cleared, so the dialog never returns an
+/// empty name.
 Future<void> _renameSession(BuildContext context, String sessionId) async {
   final bridge = context.read<BridgeService>();
-  final sessions = bridge.sessions;
-  final session = sessions.where((s) => s.id == sessionId).firstOrNull;
+  final session = bridge.sessions.where((s) => s.id == sessionId).firstOrNull;
   final newName = await showRenameSessionDialog(
     context,
     currentName: session?.name,
+    allowClear: false,
   );
-  if (newName == null || !context.mounted) return;
-  bridge.renameSession(
-    sessionId: sessionId,
-    name: newName.isEmpty ? null : newName,
-  );
+  if (newName == null || newName.trim().isEmpty || !context.mounted) return;
+  bridge.renameSession(sessionId: sessionId, name: newName);
 }
 
 void _showUserMessageHistory(
@@ -1748,7 +1715,7 @@ void _showUserMessageHistory(
       onScrollToMessage: (msg) {
         scrollToUserEntry.value = msg;
       },
-      onRewindMessage: (msg) => _showRewindActionSheet(
+      onRewindMessage: (msg) => _showOmpRewindDialog(
         context,
         msg,
         sessionId: sessionId,
@@ -1759,7 +1726,9 @@ void _showUserMessageHistory(
   );
 }
 
-void _showRewindActionSheet(
+/// Conversation rewind (omp has no file rewind): the Bridge branches the
+/// session before the message and the message goes back to the composer.
+void _showOmpRewindDialog(
   BuildContext context,
   UserChatEntry message, {
   required String sessionId,
@@ -1768,39 +1737,22 @@ void _showRewindActionSheet(
 }) {
   final cubit = context.read<ChatSessionCubit>();
 
-  // Request dry-run preview
-  if (message.messageUuid != null) {
-    cubit.rewindDryRun(message.messageUuid!);
-  }
+  if (message.messageUuid == null) return;
 
-  showModalBottomSheet<void>(
+  showDialog<void>(
     context: context,
-    builder: (_) {
-      return StreamBuilder<ChatSessionState>(
-        stream: cubit.stream,
-        initialData: cubit.state,
-        builder: (ctx, snapshot) {
-          final preview = snapshot.data?.rewindPreview;
-
-          return RewindActionSheet(
-            userMessage: message,
-            preview: preview,
-            isLoadingPreview: preview == null,
-            onRewind: (mode) {
-              Navigator.of(ctx).pop();
-              if (message.messageUuid != null) {
-                if (mode != RewindMode.code) {
-                  _restoreRewindMessageToComposer(
-                    inputController: inputController,
-                    draftService: draftService,
-                    sessionId: sessionId,
-                    text: message.text,
-                  );
-                }
-                cubit.rewind(message.messageUuid!, mode.value);
-              }
-            },
+    builder: (dialogContext) {
+      return CodexRewindDialog(
+        messageText: message.text,
+        onConfirm: () {
+          Navigator.of(dialogContext).pop();
+          _restoreRewindMessageToComposer(
+            inputController: inputController,
+            draftService: draftService,
+            sessionId: sessionId,
+            text: message.text,
           );
+          cubit.rewind(message.messageUuid!, 'conversation');
         },
       );
     },
@@ -1818,13 +1770,4 @@ void _restoreRewindMessageToComposer({
     selection: TextSelection.collapsed(offset: text.length),
   );
   draftService.saveDraft(sessionId, text);
-}
-
-void _retryFailedMessages(BuildContext context, String sessionId) {
-  final cubit = context.read<ChatSessionCubit>();
-  for (final entry in cubit.state.entries) {
-    if (entry is UserChatEntry && entry.status == MessageStatus.failed) {
-      cubit.retryMessage(entry);
-    }
-  }
 }

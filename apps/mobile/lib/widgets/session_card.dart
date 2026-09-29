@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:expandable_page_view/expandable_page_view.dart';
 import 'package:flutter/material.dart';
 
+import '../features/omp_session/widgets/omp_settings_sheet.dart';
 import '../l10n/app_localizations.dart';
 import '../models/messages.dart';
 import '../theme/app_theme.dart';
@@ -119,6 +120,7 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
     final hasPermission = permission != null;
     final queuedInput = session.queuedInput;
     final isCodexSession = session.provider == Provider.codex.value;
+    final isOmpSession = session.provider == Provider.omp.value;
     final isPlanApproval =
         hasPermission && permission.toolName == 'ExitPlanMode';
     final isToolSuggestion = hasPermission && permission.isToolSuggestion;
@@ -267,7 +269,7 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                         : _ToolApprovalArea(
                             permission: permission,
                             statusColor: statusColor,
-                            isCodex: isCodexSession,
+                            sessionScopedAlways: true,
                             onApprove: () => widget.onApprove?.call(
                               permission.toolUseId,
                               clearContext: false,
@@ -314,7 +316,10 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                       _ => _ToolApprovalArea(
                         permission: permission,
                         statusColor: statusColor,
-                        isCodex: isCodexSession,
+                        sessionScopedAlways: isOmpSession,
+                        alwaysScopeNote: isOmpSession
+                            ? AppLocalizations.of(context).ompApproveAlwaysScope
+                            : null,
                         onApprove: () => widget.onApprove?.call(
                           permission.toolUseId,
                           clearContext: false,
@@ -439,6 +444,22 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                       sandboxMode: session.codexSandboxMode,
                       showDefaultReasoning: true,
                       compact: true,
+                    )
+                  else if (isOmpSession)
+                    Text(
+                      buildOmpSettingsSummary(
+                        AppLocalizations.of(context),
+                        model: session.ompModel,
+                        thinkingLevel: session.ompThinkingLevel,
+                        executionMode: session.resolvedExecutionMode,
+                      ),
+                      key: const ValueKey('omp_settings_summary'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: appColors.subtleText,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     )
                   else
                     Text(
@@ -682,7 +703,13 @@ class _ToolApprovalArea extends StatelessWidget {
   final VoidCallback onApprove;
   final VoidCallback? onApproveAlways;
   final VoidCallback onReject;
-  final bool isCodex;
+
+  /// Approve-always lasts for this session (Codex, omp): "This Session" /
+  /// "Approve" instead of Claude's "Permanently" / "Approve once".
+  final bool sessionScopedAlways;
+
+  /// Explains what approve-always covers (omp: every call of the tool).
+  final String? alwaysScopeNote;
 
   const _ToolApprovalArea({
     required this.permission,
@@ -690,7 +717,8 @@ class _ToolApprovalArea extends StatelessWidget {
     required this.onApprove,
     this.onApproveAlways,
     required this.onReject,
-    this.isCodex = false,
+    this.sessionScopedAlways = false,
+    this.alwaysScopeNote,
   });
 
   @override
@@ -777,14 +805,16 @@ class _ToolApprovalArea extends StatelessWidget {
               final rejectLabel = permission.showsCancelAction
                   ? l.cancel
                   : l.reject;
-              final alwaysMain = isCodex
+              final alwaysMain = sessionScopedAlways
                   ? l.approveSessionMain
                   : l.approveAlways;
-              final alwaysSub = isCodex
+              final alwaysSub = sessionScopedAlways
                   ? l.approveSessionSub
                   : l.approveAlwaysSub;
               Widget buildApproveLabel() {
-                final approveLabel = isCodex ? l.approve : l.approveOnce;
+                final approveLabel = sessionScopedAlways
+                    ? l.approve
+                    : l.approveOnce;
                 if (isWide || !approveLabel.contains(' ')) {
                   return Text(
                     approveLabel,
@@ -891,6 +921,21 @@ class _ToolApprovalArea extends StatelessWidget {
               );
             },
           ),
+          if (alwaysScopeNote != null && canApproveAlways) ...[
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                alwaysScopeNote!,
+                key: const ValueKey('approve_always_scope_note'),
+                textAlign: TextAlign.end,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2605,6 +2650,7 @@ class RecentSessionCard extends StatelessWidget {
     final provider = providerFromRaw(session.provider);
     final providerStyle = providerStyleFor(context, provider);
     final isCodex = session.provider == 'codex';
+    final isOmp = session.provider == Provider.omp.value;
     final agentLabel = _formatAgentLabel(
       session.agentNickname,
       session.agentRole,
@@ -2774,6 +2820,23 @@ class RecentSessionCard extends StatelessWidget {
                       compact: true,
                     ),
                   ],
+                  if (isOmp && session.ompModel != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      buildOmpSettingsSummary(
+                        AppLocalizations.of(context),
+                        model: session.ompModel,
+                        thinkingLevel: session.ompThinkingLevel,
+                      ),
+                      key: const ValueKey('omp_settings_summary'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: appColors.subtleText,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
 
                   const SizedBox(height: 8),
 
@@ -2919,6 +2982,22 @@ class RecentSessionCard extends StatelessWidget {
       return '';
     }
   }
+}
+
+/// Compact settings summary of an omp session card: "model · thinking" and,
+/// for running sessions, the approval mode chip label.
+String buildOmpSettingsSummary(
+  AppLocalizations l, {
+  String? model,
+  String? thinkingLevel,
+  ExecutionMode? executionMode,
+}) {
+  final name = ompModelDisplayName(model, const [], l);
+  final modelPart = thinkingLevel == null
+      ? name
+      : '$name · ${ompThinkingLevelLabel(thinkingLevel)}';
+  if (executionMode == null) return modelPart;
+  return '$modelPart  ${ompApprovalModeDetails(executionMode, l).chipLabel}';
 }
 
 /// Build a compact settings summary for Claude session cards.

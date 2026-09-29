@@ -13,6 +13,8 @@ import 'package:ccpocket/utils/diff_parser.dart';
 import 'package:ccpocket/widgets/chat_input_bar.dart';
 import 'package:ccpocket/widgets/ios_image_paste_context_menu.dart';
 
+import 'chat_screen/helpers/chat_test_helpers.dart';
+
 void main() {
   const nativePasteBridgeChannel = MethodChannel(
     'ccpocket/native_paste_bridge',
@@ -1120,5 +1122,69 @@ void main() {
         expect(find.textContaining('--- a/lib/a.dart'), findsNothing);
       },
     );
+  });
+
+  group('omp composer', () {
+    late MockBridgeService bridge;
+
+    setUp(() => bridge = MockBridgeService());
+    tearDown(() => bridge.dispose());
+
+    Future<void> pumpScreen(
+      WidgetTester tester,
+      Future<Widget> Function({required MockBridgeService bridge}) build,
+    ) async {
+      await tester.pumpWidget(await build(bridge: bridge));
+      await pumpN(tester);
+      await emitAndPump(tester, bridge, [
+        const StatusMessage(status: ProcessStatus.idle),
+      ]);
+      await pumpN(tester);
+    }
+
+    testWidgets('offers images but no Codex \$ button', (tester) async {
+      await pumpScreen(
+        tester,
+        ({required bridge}) => buildTestOmpSessionScreen(bridge: bridge),
+      );
+
+      expect(find.byKey(const ValueKey('attach_image_button')), findsOneWidget);
+      expect(find.byKey(const ValueKey('dollar_button')), findsNothing);
+    });
+
+    testWidgets('has no Claude fallback slash commands', (tester) async {
+      await pumpScreen(
+        tester,
+        ({required bridge}) => buildTestOmpSessionScreen(bridge: bridge),
+      );
+      await tester.enterText(find.byKey(const ValueKey('message_input')), '/');
+      await pumpN(tester);
+      expect(find.text('/compact'), findsNothing);
+
+      // omp's own commands arrive as supported_commands.
+      await emitAndPump(tester, bridge, [
+        const SystemMessage(
+          subtype: 'supported_commands',
+          provider: 'omp',
+          slashCommands: ['plan-review'],
+        ),
+      ]);
+      await tester.enterText(find.byKey(const ValueKey('message_input')), '');
+      await pumpN(tester);
+      await tester.enterText(find.byKey(const ValueKey('message_input')), '/');
+      await pumpN(tester);
+      expect(find.text('/plan-review'), findsOneWidget);
+      expect(find.text('/compact'), findsNothing);
+    });
+
+    testWidgets('Claude keeps its fallback slash commands', (tester) async {
+      await pumpScreen(
+        tester,
+        ({required bridge}) => buildTestClaudeSessionScreen(bridge: bridge),
+      );
+      await tester.enterText(find.byKey(const ValueKey('message_input')), '/');
+      await pumpN(tester);
+      expect(find.text('/compact'), findsOneWidget);
+    });
   });
 }
