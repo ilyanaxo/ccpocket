@@ -23,6 +23,7 @@ import { parseAllowedDirectories } from "./path-utils.js";
 import { parseBridgePort } from "./bridge-port.js";
 import { listenForStartup } from "./server-listen.js";
 import { createHttpRequestHandler } from "./http-handler.js";
+import { warmCodexSessionCache } from "./sessions-index.js";
 
 function startupErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -217,6 +218,20 @@ export async function startServer() {
   );
   mdns?.start(PORT, API_KEY);
   printStartupInfo(PORT, HOST, API_KEY);
+
+  const warmStartedAt = Date.now();
+  warmCodexSessionCache().then(
+    (files) => {
+      console.log(
+        `[bridge] Codex session cache ready: ${files} rollouts in ${Date.now() - warmStartedAt}ms`,
+      );
+    },
+    (err: unknown) => {
+      console.warn(
+        `[bridge] Codex session cache warm-up failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    },
+  );
 
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());

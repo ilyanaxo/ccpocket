@@ -1458,6 +1458,123 @@ describe("codex sessions integration", () => {
     expect(metadata.get(wantedThreadId)?.summary).toBe("done: fixed the bug");
   });
 
+  it("finds the latest Codex prompt behind megabytes of tool output in the recent list", async () => {
+    const threadId = "019c56c0-d4d8-7b22-9e3c-200664d68201";
+    const codexDir = join(tempHome, ".codex", "sessions", "2026", "02", "14");
+    mkdirSync(codexDir, { recursive: true });
+    const toolOutput = (n: number) =>
+      JSON.stringify({
+        timestamp: `2026-02-14T10:00:${String(n).padStart(2, "0")}.000Z`,
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          // Escaped inside a string, so neither may count as a user message.
+          output: `{"type":"user_message","role":"user"} ${"o".repeat(400_000)}`,
+        },
+      });
+    writeFileSync(
+      join(codexDir, `rollout-2026-02-14T10-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          timestamp: "2026-02-14T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: threadId, cwd: "/tmp/project-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T10:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "initial prompt" },
+        }),
+        ...[2, 3, 4].map(toolOutput),
+        JSON.stringify({
+          timestamp: "2026-02-14T10:00:05.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "latest prompt" },
+        }),
+        ...[6, 7, 8, 9].map(toolOutput),
+        JSON.stringify({
+          timestamp: "2026-02-14T10:00:10.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "latest answer" },
+        }),
+      ].join("\n") + "\n",
+    );
+
+    const result = await getAllRecentSessions({ provider: "codex", limit: 20 });
+
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0]).toMatchObject({
+      sessionId: threadId,
+      firstPrompt: "initial prompt",
+      lastPrompt: "latest prompt",
+      summary: "latest answer",
+      modified: "2026-02-14T10:00:10.000Z",
+    });
+  });
+
+  it("re-reads a Codex rollout after it changes and keeps list entries independent", async () => {
+    const threadId = "019c56c0-d4d8-7b22-9e3c-200664d68202";
+    const codexDir = join(tempHome, ".codex", "sessions", "2026", "02", "14");
+    mkdirSync(codexDir, { recursive: true });
+    const rolloutPath = join(
+      codexDir,
+      `rollout-2026-02-14T11-00-00-${threadId}.jsonl`,
+    );
+    const lines = [
+      JSON.stringify({
+        timestamp: "2026-02-14T11:00:00.000Z",
+        type: "session_meta",
+        payload: { id: threadId, cwd: "/tmp/project-a" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-14T11:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "first prompt" },
+      }),
+    ];
+    writeFileSync(rolloutPath, lines.join("\n") + "\n");
+    const indexPath = join(tempHome, ".codex", "session_index.jsonl");
+    writeFileSync(
+      indexPath,
+      JSON.stringify({ id: threadId, thread_name: "Named" }) + "\n",
+    );
+
+    const named = await getAllRecentSessions({ provider: "codex", limit: 20 });
+    expect(named.sessions[0]).toMatchObject({
+      name: "Named",
+      firstPrompt: "first prompt",
+    });
+    named.sessions[0].projectPath = "/mutated";
+
+    // Clearing the name must not leave it on a reused entry.
+    writeFileSync(
+      indexPath,
+      [
+        JSON.stringify({ id: threadId, thread_name: "Named" }),
+        JSON.stringify({ id: threadId, thread_name: "" }),
+      ].join("\n") + "\n",
+    );
+    const unnamed = await getAllRecentSessions({ provider: "codex", limit: 20 });
+    expect(unnamed.sessions[0].name).toBeUndefined();
+    expect(unnamed.sessions[0].projectPath).toBe("/tmp/project-a");
+
+    lines.push(
+      JSON.stringify({
+        timestamp: "2026-02-14T11:00:02.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "second prompt" },
+      }),
+    );
+    writeFileSync(rolloutPath, lines.join("\n") + "\n");
+
+    const updated = await getAllRecentSessions({ provider: "codex", limit: 20 });
+    expect(updated.sessions[0]).toMatchObject({
+      firstPrompt: "first prompt",
+      lastPrompt: "second prompt",
+      modified: "2026-02-14T11:00:02.000Z",
+    });
+  });
+
   it("uses the newest Codex continuation rollout for recent-session last prompt", async () => {
     const threadId = "019c56c0-d4d8-7b22-9e3c-200664d68103";
     const codexDir = join(tempHome, ".codex", "sessions", "2026", "02", "13");

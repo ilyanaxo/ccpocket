@@ -1594,9 +1594,25 @@ function parseCodexSessionJsonl(raw: string, fallbackSessionId: string): CodexSe
   return { threadId, entry };
 }
 
+/**
+ * Substrings every line accepted by {@link hasCodexUserMessage} contains: the
+ * `"user_message"` event type or the `"user"` role, as JSON string values.
+ * The same words inside another string are escaped (`\"user\"`) and do not
+ * match. Searching the raw bytes for them first lets the tail scan skip
+ * decoding and JSON-parsing large tool output that cannot hold a user message.
+ */
+const CODEX_USER_MESSAGE_MARKERS = ['"user_message"', '"user"'] as const;
+const CODEX_USER_MESSAGE_MARKER_BYTES = CODEX_USER_MESSAGE_MARKERS.map(
+  (marker) => Buffer.from(marker),
+);
+
+function mayContainCodexUserMessage(line: string): boolean {
+  return CODEX_USER_MESSAGE_MARKERS.some((marker) => line.includes(marker));
+}
+
 function hasCodexUserMessage(raw: string): boolean {
   for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
+    if (!line.trim() || !mayContainCodexUserMessage(line)) continue;
     let entry: Record<string, unknown>;
     try {
       entry = JSON.parse(line) as Record<string, unknown>;
@@ -1629,12 +1645,30 @@ function hasCodexUserMessage(raw: string): boolean {
   return false;
 }
 
+/** Tail text after its first, possibly partial, line. */
+function codexCleanTail(tailBuf: Buffer): string {
+  const tailRaw = tailBuf.toString("utf-8");
+  const firstNewline = tailRaw.indexOf("\n");
+  return firstNewline >= 0 ? tailRaw.slice(firstNewline + 1) : "";
+}
+
+/**
+ * {@link hasCodexUserMessage} on the clean tail. A tail without any marker
+ * byte sequence cannot hold a user message and is not decoded.
+ */
+function codexTailHasUserMessage(tailBuf: Buffer): boolean {
+  return (
+    CODEX_USER_MESSAGE_MARKER_BYTES.some((marker) => tailBuf.includes(marker))
+    && hasCodexUserMessage(codexCleanTail(tailBuf))
+  );
+}
+
 /**
  * Fast parse a Codex JSONL file for recent-session list metadata.
  * The first chunk contains session_meta / first prompt; the tail chunk contains
  * the latest prompt, latest assistant summary, and modified timestamp.
  */
-async function parseCodexSessionJsonlFast(
+async function readCodexSessionJsonlFast(
   filePath: string,
   fallbackSessionId: string,
 ): Promise<CodexSessionParseResult | null> {
@@ -1659,25 +1693,115 @@ async function parseCodexSessionJsonlFast(
     const headBuf = Buffer.alloc(CODEX_HEAD_BYTES);
     await fh.read(headBuf, 0, CODEX_HEAD_BYTES, 0);
 
-    let tailBytes = CODEX_TAIL_BYTES;
-    while (true) {
-      const tailBuf = Buffer.alloc(tailBytes);
-      await fh.read(tailBuf, 0, tailBytes, fileSize - tailBytes);
-      const tailRaw = tailBuf.toString("utf-8");
-      const firstNewline = tailRaw.indexOf("\n");
-      const cleanTail = firstNewline >= 0 ? tailRaw.slice(firstNewline + 1) : "";
-      const partialRaw = `${headBuf.toString("utf-8")}\n${cleanTail}`;
-      const parsed = parseCodexSessionJsonl(partialRaw, fallbackSessionId);
-      if (
-        hasCodexUserMessage(cleanTail)
-        || tailBytes >= Math.min(fileSize, CODEX_MAX_TAIL_BYTES)
-      ) {
-        return parsed;
-      }
-      tailBytes = Math.min(tailBytes * 2, fileSize, CODEX_MAX_TAIL_BYTES);
+    // Double the tail until it holds the latest user message. Each doubling
+    // reads only the newly covered bytes, and a tail without a marker byte
+    // sequence is not decoded: long agent turns put megabytes of tool output
+    // after the last prompt, and the list scans every rollout file.
+    const maxTailBytes = Math.min(fileSize, CODEX_MAX_TAIL_BYTES);
+    let tailBytes = Math.min(CODEX_TAIL_BYTES, maxTailBytes);
+    let tailBuf = Buffer.alloc(tailBytes);
+    await fh.read(tailBuf, 0, tailBytes, fileSize - tailBytes);
+    let found = codexTailHasUserMessage(tailBuf);
+    while (!found && tailBytes < maxTailBytes) {
+      const nextTailBytes = Math.min(tailBytes * 2, maxTailBytes);
+      const prefix = Buffer.alloc(nextTailBytes - tailBytes);
+      await fh.read(prefix, 0, prefix.length, fileSize - nextTailBytes);
+      tailBuf = Buffer.concat([prefix, tailBuf]);
+      tailBytes = nextTailBytes;
+      // The complete lines of the previous tail were checked already. Check
+      // the new bytes up to the end of the previous first line, which was
+      // partial and is complete now.
+      const previousFirstLineEnd = tailBuf.indexOf(0x0a, prefix.length);
+      found = codexTailHasUserMessage(
+        previousFirstLineEnd < 0
+          ? tailBuf
+          : tailBuf.subarray(0, previousFirstLineEnd),
+      );
     }
+    const partialRaw = `${headBuf.toString("utf-8")}\n${codexCleanTail(tailBuf)}`;
+    return parseCodexSessionJsonl(partialRaw, fallbackSessionId);
   } finally {
     await fh.close();
+  }
+}
+
+/**
+ * Parsed rollouts by path. The recent-session list parses every rollout on
+ * each request, and the tail scan above can read megabytes per file, so a
+ * result stays valid while the file keeps its size and mtime.
+ */
+const codexFastParseCache = new Map<
+  string,
+  {
+    size: number;
+    mtimeMs: number;
+    fallbackSessionId: string;
+    result: Promise<CodexSessionParseResult | null>;
+  }
+>();
+
+/**
+ * {@link readCodexSessionJsonlFast} through {@link codexFastParseCache}.
+ * Callers mutate the returned entry, so each call gets its own copy.
+ */
+async function parseCodexSessionJsonlFast(
+  filePath: string,
+  fallbackSessionId: string,
+): Promise<CodexSessionParseResult | null> {
+  let fileStat;
+  try {
+    fileStat = await stat(filePath);
+  } catch {
+    codexFastParseCache.delete(filePath);
+    return null;
+  }
+  let cached = codexFastParseCache.get(filePath);
+  if (
+    !cached
+    || cached.size !== fileStat.size
+    || cached.mtimeMs !== fileStat.mtimeMs
+    || cached.fallbackSessionId !== fallbackSessionId
+  ) {
+    const created = {
+      size: fileStat.size,
+      mtimeMs: fileStat.mtimeMs,
+      fallbackSessionId,
+      result: readCodexSessionJsonlFast(filePath, fallbackSessionId),
+    };
+    codexFastParseCache.set(filePath, created);
+    created.result.catch(() => {
+      if (codexFastParseCache.get(filePath) === created) {
+        codexFastParseCache.delete(filePath);
+      }
+    });
+    cached = created;
+  }
+  const parsed = await cached.result;
+  if (!parsed) return null;
+  const entry = { ...parsed.entry };
+  const repositoryUrl = codexRepositoryUrls.get(parsed.entry);
+  if (repositoryUrl) codexRepositoryUrls.set(entry, repositoryUrl);
+  return { threadId: parsed.threadId, entry };
+}
+
+/**
+ * Parse every Codex rollout into {@link codexFastParseCache}. The first scan
+ * of a large rollout directory can outlast the app's request timeout, so the
+ * Bridge runs it at startup; requests during the warm-up share its reads.
+ */
+export async function warmCodexSessionCache(): Promise<number> {
+  const files = await listCodexSessionFiles();
+  pruneCodexFastParseCache(files);
+  await parallelMap(files, PARALLEL_FILE_READ_LIMIT, (filePath) =>
+    parseCodexSessionJsonlFast(filePath, basename(filePath, ".jsonl")),
+  );
+  return files.length;
+}
+
+function pruneCodexFastParseCache(files: readonly string[]): void {
+  const listed = new Set(files);
+  for (const filePath of codexFastParseCache.keys()) {
+    if (!listed.has(filePath)) codexFastParseCache.delete(filePath);
   }
 }
 
@@ -2003,6 +2127,7 @@ export async function renameCodexSession(
 
 async function getAllRecentCodexSessions(options: CodexRecentOptions = {}): Promise<SessionIndexEntry[]> {
   const files = await listCodexSessionFiles();
+  pruneCodexFastParseCache(files);
   const entries: SessionIndexEntry[] = [];
   options.perfStats && (options.perfStats.filesTotal = files.length);
 
