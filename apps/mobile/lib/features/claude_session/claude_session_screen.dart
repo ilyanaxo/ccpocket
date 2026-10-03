@@ -1,3 +1,4 @@
+import '../chat_session/widgets/lite_mode_controls.dart';
 import '../explore/explore_screen.dart';
 import '../file_browser/file_browser_reference.dart';
 
@@ -1114,6 +1115,8 @@ class _ChatScreenBody extends HookWidget {
                         ),
                         onSelected: (value) {
                           switch (value) {
+                            case 'display_mode':
+                              showChatDisplayModeSheet(context, sessionId);
                             case 'history':
                               _showUserMessageHistory(
                                 context,
@@ -1144,6 +1147,19 @@ class _ChatScreenBody extends HookWidget {
                               .state
                               .terminalApp;
                           return [
+                            PopupMenuItem(
+                              key: const ValueKey('menu_display_mode'),
+                              value: 'display_mode',
+                              child: ListTile(
+                                leading: const Icon(
+                                  Icons.bolt_outlined,
+                                  size: 20,
+                                ),
+                                title: Text(l.chatDisplayMode),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
                             PopupMenuItem(
                               key: const ValueKey('menu_rename'),
                               value: 'rename',
@@ -1334,6 +1350,9 @@ class _ChatScreenBody extends HookWidget {
                       );
                     },
                     content: ChatMessageList(
+                      liteMode: context.select<SettingsCubit, bool>(
+                        (cubit) => cubit.state.liteModeForSession(sessionId),
+                      ),
                       sessionId: sessionId,
                       scrollController: scroll.controller,
                       httpBaseUrl: context.read<BridgeService>().httpBaseUrl,
@@ -1362,6 +1381,7 @@ class _ChatScreenBody extends HookWidget {
                     ),
                   ),
                 ),
+                LiteModeActivityBar(sessionId: sessionId),
                 if (approval is ApprovalNone)
                   ChatInputWithOverlays(
                     sessionId: sessionId,

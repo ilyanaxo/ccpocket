@@ -4,6 +4,32 @@ All notable changes to `@ccpocket/bridge` will be documented in this file.
 
 ## [Unreleased]
 
+## [1.88.0] - 2026-10-01
+
+### Added
+- Add opt-in Performance mode with per-client defaults and per-session overrides. Remove tool payloads, incidental screenshots, and thinking before WebSocket serialization while retaining generated images, attachments, approvals, plans, and lightweight activity updates.
+
+### Changed
+- Apply delivery filtering to live events, batched deltas, and restored histories without changing canonical agent history or other clients' delivery.
+- Acknowledge delivery preference changes and mark intentional history sequence gaps so clients can safely switch modes, reconnect, and restore full history in standard mode.
+
+## [1.87.0] - 2026-09-30
+
+### Added
+- Add opt-in, per-session Codex usage-limit recovery with reset-aware waiting, at most five automatic submissions per manual-input cycle, and cancellation and goal-budget guards.
+
+### Changed
+- Compress WebSocket traffic for supporting clients and use bounded tail reads for recent Codex session metadata while preserving paginated full history.
+
+### Fixed
+- Isolate recent Codex session discovery from active sessions so listing does not block behind an ongoing turn.
+- Restore local session names and the latest continuation metadata, including legacy image lookup compatibility.
+
+## [1.86.2] - 2026-09-30
+
+### Fixed
+- Preserve the Full Access permission profile when Codex sessions created or resumed in ccpocket are reopened in Desktop on Codex 0.157.0 or newer, while retaining legacy requests for older servers.
+
 ## [1.86.1] - 2026-09-29
 
 ### Fixed

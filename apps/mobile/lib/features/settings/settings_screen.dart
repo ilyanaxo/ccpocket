@@ -303,6 +303,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ? const ScrollCacheExtent.pixels(4096)
                 : null,
             children: [
+              // The support section can lie beyond the cache extent, where its
+              // own builder never runs; start the jump from the top instead.
+              Builder(
+                builder: (context) {
+                  final supportState = revenueCat.catalogState.value;
+                  if (supportState.isAvailable ||
+                      supportState.errorMessage != null) {
+                    _maybeFocusSupportSection();
+                  }
+                  return const SizedBox.shrink();
+                },
+              ),
               if (isConnected) ...[
                 Builder(
                   builder: (context) {
@@ -470,6 +482,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       indent: 16,
                       endIndent: 16,
                       color: cs.outlineVariant,
+                    ),
+                    SwitchListTile(
+                      key: const ValueKey('lite_mode_toggle'),
+                      secondary: Icon(Icons.bolt_outlined, color: cs.primary),
+                      title: Text(l.liteMode),
+                      subtitle: Text(l.liteModeDescription),
+                      value: state.liteMode,
+                      onChanged: context.read<SettingsCubit>().setLiteMode,
                     ),
                     // Voice Input
                     if (!state.hideVoiceInput) ...[

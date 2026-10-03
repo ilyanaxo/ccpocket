@@ -36,6 +36,7 @@ describe("getVersionInfo", () => {
   it("advertises the protocol capabilities, including provider_omp_v1", () => {
     const info = getVersionInfo(mockStartedAt);
     expect(info.protocolCapabilities).toEqual([
+      "performance_mode_v1",
       "project_request_correlation_v1",
       "session_context_v1",
       "provider_omp_v1",

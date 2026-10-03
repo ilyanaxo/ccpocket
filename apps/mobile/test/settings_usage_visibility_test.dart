@@ -1835,6 +1835,9 @@ void main() {
         ),
       );
       await tester.pump();
+      // The section lies beyond the cache extent: one frame for the jump to
+      // the end, then the ensureVisible animation.
+      await tester.pump(const Duration(milliseconds: 700));
       await tester.pump(const Duration(milliseconds: 700));
 
       final supportDy = tester
@@ -2063,6 +2066,8 @@ void main() {
       expect(toggle, findsOneWidget);
       expect(settingsCubit.state.openGalleryDirectly, isFalse);
 
+      await tester.ensureVisible(toggle);
+      await tester.pumpAndSettle();
       await tester.tap(toggle);
       await tester.pumpAndSettle();
 

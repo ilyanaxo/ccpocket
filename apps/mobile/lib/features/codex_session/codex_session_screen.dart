@@ -1,3 +1,4 @@
+import '../chat_session/widgets/lite_mode_controls.dart';
 import '../explore/explore_screen.dart';
 import '../file_browser/file_browser_reference.dart';
 
@@ -61,6 +62,7 @@ import '../claude_session/widgets/rewind_message_list_sheet.dart'
     show UserMessageHistorySheet;
 import 'state/codex_session_cubit.dart';
 import 'widgets/codex_goal_card.dart';
+import 'widgets/codex_recovery_panel.dart';
 import 'widgets/codex_rewind_dialog.dart';
 import 'widgets/tool_suggestion_card.dart';
 
@@ -1236,6 +1238,10 @@ class _CodexChatBody extends HookWidget {
                         ),
                         onSelected: (value) {
                           switch (value) {
+                            case 'recovery':
+                              showCodexRecoverySheet(context);
+                            case 'display_mode':
+                              showChatDisplayModeSheet(context, sessionId);
                             case 'history':
                               _showUserMessageHistory(
                                 context,
@@ -1267,6 +1273,29 @@ class _CodexChatBody extends HookWidget {
                               .terminalApp;
                           final l = AppLocalizations.of(context);
                           return [
+                            PopupMenuItem(
+                              key: const ValueKey('menu_display_mode'),
+                              value: 'display_mode',
+                              child: ListTile(
+                                leading: const Icon(
+                                  Icons.bolt_outlined,
+                                  size: 20,
+                                ),
+                                title: Text(l.chatDisplayMode),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              key: ValueKey('menu_codex_recovery'),
+                              value: 'recovery',
+                              child: ListTile(
+                                leading: Icon(Icons.autorenew, size: 20),
+                                title: Text('Automatic recovery'),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
                             const PopupMenuItem(
                               key: ValueKey('menu_rename'),
                               value: 'rename',
@@ -1466,6 +1495,9 @@ class _CodexChatBody extends HookWidget {
                       );
                     },
                     content: ChatMessageList(
+                      liteMode: context.select<SettingsCubit, bool>(
+                        (cubit) => cubit.state.liteModeForSession(sessionId),
+                      ),
                       sessionId: sessionId,
                       scrollController: scroll.controller,
                       httpBaseUrl: context.read<BridgeService>().httpBaseUrl,
@@ -1495,6 +1527,20 @@ class _CodexChatBody extends HookWidget {
                     ),
                   ),
                 ),
+                if (sessionState.recovery case final recovery?
+                    when recovery.enabled &&
+                        [
+                          'waiting',
+                          'blocked',
+                          'exhausted',
+                        ].contains(recovery.phase))
+                  CodexRecoveryStatus(
+                    recovery: recovery,
+                    onCancel: () =>
+                        context.read<ChatSessionCubit>().cancelCodexRecovery(),
+                    onSettings: () => showCodexRecoverySheet(context),
+                  ),
+                LiteModeActivityBar(sessionId: sessionId),
                 if (approval is ApprovalNone)
                   if (currentGoal != null)
                     CodexGoalCard(

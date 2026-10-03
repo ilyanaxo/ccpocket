@@ -1029,6 +1029,7 @@ sealed class ServerMessage {
         sessionId: json['sessionId'] as String,
         context: SessionInfo.fromJson(json['context'] as Map<String, dynamic>),
       ),
+      'session_activity' => SessionActivityMessage(),
       'status' => StatusMessage(
         status: ProcessStatus.fromString(json['status'] as String),
       ),
@@ -1038,6 +1039,7 @@ sealed class ServerMessage {
             .toList(),
       ),
       'history_delta' => HistoryDeltaMessage(
+        filtered: json['filtered'] == true,
         sessionId: json['sessionId'] as String?,
         fromSeq: json['fromSeq'] as int? ?? 0,
         toSeq: json['toSeq'] as int? ?? 0,
@@ -1071,6 +1073,12 @@ sealed class ServerMessage {
                 )
                 .toList() ??
             const [],
+      ),
+      'codex_recovery_state' => CodexRecoveryStateMessage(
+        sessionId: json['sessionId'] as String?,
+        recovery: CodexRecoveryInfo.fromJson(
+          json['recovery'] as Map<String, dynamic>,
+        ),
       ),
       'goal_state' => GoalStateMessage(
         notification: json['notification'] as String?,
@@ -2032,7 +2040,17 @@ class HistoryEntry {
   }
 }
 
+/// Local event ordered with history frames; never received from the wire.
+class SessionHistoryResetMessage implements ServerMessage {
+  const SessionHistoryResetMessage();
+}
+
+class SessionActivityMessage implements ServerMessage {
+  const SessionActivityMessage();
+}
+
 class HistoryDeltaMessage implements ServerMessage {
+  final bool filtered;
   final String? sessionId;
   final int fromSeq;
   final int toSeq;
@@ -2040,6 +2058,7 @@ class HistoryDeltaMessage implements ServerMessage {
   final ProcessStatus? status;
 
   const HistoryDeltaMessage({
+    this.filtered = false,
     this.sessionId,
     required this.fromSeq,
     required this.toSeq,
@@ -3528,6 +3547,42 @@ class ConversationQueueMessage implements ServerMessage {
   });
 }
 
+class CodexRecoveryInfo {
+  final bool enabled;
+  final String phase;
+  final int attempts;
+  final int maxAttempts;
+  final DateTime? retryAt;
+  final String? reason;
+  const CodexRecoveryInfo({
+    this.enabled = false,
+    this.phase = 'off',
+    this.attempts = 0,
+    this.maxAttempts = 5,
+    this.retryAt,
+    this.reason,
+  });
+  factory CodexRecoveryInfo.fromJson(Map<String, dynamic> json) =>
+      CodexRecoveryInfo(
+        enabled: json['enabled'] == true,
+        phase: json['phase'] as String? ?? 'off',
+        attempts: (json['attempts'] as num?)?.toInt() ?? 0,
+        maxAttempts: (json['maxAttempts'] as num?)?.toInt() ?? 5,
+        retryAt: json['retryAt'] is num
+            ? DateTime.fromMillisecondsSinceEpoch(
+                (json['retryAt'] as num).toInt(),
+              )
+            : null,
+        reason: json['reason'] as String?,
+      );
+}
+
+class CodexRecoveryStateMessage implements ServerMessage {
+  final String? sessionId;
+  final CodexRecoveryInfo recovery;
+  const CodexRecoveryStateMessage({this.sessionId, required this.recovery});
+}
+
 class GoalStateMessage implements ServerMessage {
   final String? notification;
   final String? sessionId;
@@ -4777,12 +4832,16 @@ class ClientMessage {
   String get type => _json['type'] as String;
 
   factory ClientMessage.clientCapabilities({
+    int? deliveryRevision,
+    bool performanceMode = false,
+    Map<String, bool> sessionPerformanceModes = const {},
     String? appVersion,
     int protocolVersion = appProtocolMaxVersion,
     int minimumProtocolVersion = appProtocolMinVersion,
     List<String> supportedServerMessages = const [
       'conversation_queue',
       'goal_state',
+      'codex_recovery_state',
       'guardian_approval',
       'history_delta',
       'history_snapshot',
@@ -4791,11 +4850,15 @@ class ClientMessage {
       'projects',
       'push_registration_result',
       'session_context',
+      'session_activity',
     ],
     List<String> supportedProviders = appSupportedProviders,
   }) {
     return ClientMessage._(<String, dynamic>{
       'type': 'client_capabilities',
+      'deliveryRevision': ?deliveryRevision,
+      'performanceMode': performanceMode,
+      'sessionPerformanceModes': sessionPerformanceModes,
       'protocolVersion': protocolVersion,
       'minimumProtocolVersion': minimumProtocolVersion,
       'appVersion': ?appVersion,
@@ -5030,6 +5093,17 @@ class ClientMessage {
       'thinkingLevel': ?thinkingLevel,
     });
   }
+  factory ClientMessage.setCodexRecovery(String sessionId, bool enabled) =>
+      ClientMessage._({
+        'type': 'set_codex_recovery',
+        'sessionId': sessionId,
+        'enabled': enabled,
+      });
+  factory ClientMessage.cancelCodexRecovery(String sessionId) =>
+      ClientMessage._({
+        'type': 'cancel_codex_recovery',
+        'sessionId': sessionId,
+      });
 
   factory ClientMessage.getGoal(String sessionId, {bool background = false}) =>
       ClientMessage._({

@@ -63,6 +63,7 @@ sends the same list (`BRIDGE_PROTOCOL_CAPABILITIES` in
 
 | Capability | Meaning |
 | --- | --- |
+| `performance_mode_v1` | the Bridge honours `performanceMode` / `sessionPerformanceModes` in `client_capabilities` and trims delivery for those sessions (`docs/performance-mode.md`) |
 | `project_request_correlation_v1` | project-scoped requests echo `requestId` / scope metadata |
 | `session_context_v1` | `get_session_context` / `session_context` are available |
 | `provider_omp_v1` | the Bridge accepts `provider:"omp"` wherever a provider is accepted, `thinkingLevel` on `start` / `resume_session`, `providers[]` on `list_recent_sessions` and the `set_omp_model` command, and sends omp data to clients that declare omp |

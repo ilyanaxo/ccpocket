@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.140.1] - 2026-10-03
+
+### Changed
+- Compact the Performance mode activity indicator into a single line, with the full text available on long press.
+- Display observed and last-received durations with at most two units, including days for long-running goal sessions.
+
+## [1.140.0] - 2026-10-01
+
+### Added
+- Add an offline demo from the connection screen so anyone can try a sample prompt, tool approval, and code diff without setting up a Bridge or an AI account.
+- Localize the demo walkthrough in English, Japanese, Korean, and Simplified Chinese, with clear sample-only labeling and restart controls.
+
+## [1.139.0] - 2026-10-01
+
+### Added
+- Add Performance mode with a default setting and per-session overrides for Claude and Codex chats. Hide tool history and work-in-progress screenshots while retaining generated images, attachments, Explorer images, approvals, and questions.
+- Show session status, observed elapsed time, and recent agent activity without rebuilding the transcript every second.
+
+### Changed
+- Recommend Bridge 1.88.0 to reduce tool and image payloads before transmission. Older Bridges retain local display filtering and show an update notice.
+- Restore complete history when returning to standard mode, including safe handling of reconnects and rapid mode changes.
+
+### Fixed
+- Keep the Performance mode activity indicator within the safe area while approval controls are visible.
+
+## [1.138.0] - 2026-09-30
+
+### Added
+- Add Automatic recovery to the Codex session menu. It is off by default, applies to the current Bridge session, and permits at most five automatic submissions after usage-limit failures. Waiting state and cancellation remain available after reconnecting.
+- Explain potential additional usage and repeated work before enabling recovery; manual input, stopping, pending human decisions, and goal budgets prevent automatic submission.
+
+### Changed
+- Recommend Bridge 1.87.0 for automatic recovery, responsive recent-session discovery, and improved large-session metadata and transfer.
+
 ## [1.137.1] - 2026-09-29
 
 ### Fixed

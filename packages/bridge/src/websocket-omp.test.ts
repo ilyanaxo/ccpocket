@@ -616,6 +616,7 @@ describe("omp capability and visibility", () => {
     const ws = await connect(true);
     const list = lastOf(ws, (m) => m.type === "session_list")!;
     expect(list.protocolCapabilities).toEqual([
+      "performance_mode_v1",
       "project_request_correlation_v1",
       "session_context_v1",
       "provider_omp_v1",

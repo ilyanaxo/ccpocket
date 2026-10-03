@@ -220,6 +220,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         }
       }
     });
+    _bridge.retainSessionHistory(sessionId);
     // Subscribe to messages for this session
     _subscription = _bridge.messagesForSession(sessionId).listen(_onMessage);
 
@@ -301,7 +302,68 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     emit(state.copyWith(queuedInput: item));
   }
 
+  // Observation time, not a fabricated server-side execution start time.
+  DateTime? _activityObservedSince = DateTime.now();
+  DateTime? _lastAgentActivityAt;
+  String? _latestActivityTool;
+  DateTime? get activityObservedSince => _activityObservedSince;
+  DateTime? get lastAgentActivityAt => _lastAgentActivityAt;
+  String? get latestActivityTool => _latestActivityTool;
+
+  @override
+  void emit(ChatSessionState state) {
+    if (state.status == ProcessStatus.idle) {
+      _activityObservedSince = null;
+      _latestActivityTool = null;
+    } else if (this.state.status == ProcessStatus.idle ||
+        _activityObservedSince == null) {
+      _activityObservedSince = DateTime.now();
+      _lastAgentActivityAt = null;
+      _latestActivityTool = null;
+    }
+    super.emit(state);
+  }
+
+  bool get supportsPerformanceMode => _bridge.supportsPerformanceMode;
+
+  void _recordAgentActivity(ServerMessage msg) {
+    if (msg is AssistantServerMessage ||
+        msg is ToolResultMessage ||
+        msg is StreamDeltaMessage ||
+        msg is ThinkingDeltaMessage) {
+      final now = DateTime.now();
+      _lastAgentActivityAt = now;
+      _activityObservedSince ??= now;
+      if (msg case AssistantServerMessage(:final message)) {
+        final tools = message.content.whereType<ToolUseContent>();
+        _latestActivityTool = tools.lastOrNull?.name;
+      } else if (msg is ToolResultMessage ||
+          msg is StreamDeltaMessage ||
+          msg is ThinkingDeltaMessage) {
+        _latestActivityTool = null;
+      }
+    }
+  }
+
   void _onMessage(ServerMessage msg) {
+    if (msg is SessionHistoryResetMessage) {
+      final localUsers = state.entries
+          .skip(_pastEntryCount)
+          .whereType<UserChatEntry>()
+          .toList();
+      _pastEntryCount = 0;
+      _pastHistoryLoaded = false;
+      // Full histories from different delivery modes must not enrich each other.
+      emit(state.copyWith(entries: localUsers, pastHistoryLoaded: false));
+      _restoreDeliveryPendingInput();
+      return;
+    }
+    if (msg is SessionActivityMessage) {
+      _lastAgentActivityAt = DateTime.now();
+      _activityObservedSince ??= _lastAgentActivityAt;
+      _latestActivityTool = null;
+      return;
+    }
     if (msg is SessionContextMessage) {
       _applySessionContext(msg.context);
       return;
@@ -337,6 +399,10 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       emit(state.copyWith(rewindPreview: msg));
       return;
     }
+    if (msg is CodexRecoveryStateMessage) {
+      emit(state.copyWith(recovery: msg.recovery));
+      return;
+    }
     if (msg is GoalStateMessage) {
       emit(state.copyWith(goal: msg.goal));
       final effect = goalNotificationEffect(msg.notification);
@@ -358,6 +424,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         ignoredToolUseIds: _respondedToolUseIds,
       );
       _applyUpdate(update, msg);
+      _recordAgentActivity(msg);
       if (msg is HistoryMessage && _latestSessionContext != null) {
         _applySessionContext(_latestSessionContext!);
       }
@@ -1586,6 +1653,18 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     }
   }
 
+  void setCodexRecovery(bool enabled) {
+    if (isCodex) {
+      _bridge.send(ClientMessage.setCodexRecovery(sessionId, enabled));
+    }
+  }
+
+  void cancelCodexRecovery() {
+    if (isCodex) {
+      _bridge.send(ClientMessage.cancelCodexRecovery(sessionId));
+    }
+  }
+
   void requestGoal({bool background = false}) {
     if (!isCodex) return;
     _bridge.send(ClientMessage.getGoal(sessionId, background: background));
@@ -2555,6 +2634,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     }
     _deliveryPendingTimers.clear();
     _deliveryPendingInputs.clear();
+    _bridge.releaseSessionHistory(sessionId);
     _subscription?.cancel();
     _sessionContextSubscription?.cancel();
     _sideEffectsController.close();

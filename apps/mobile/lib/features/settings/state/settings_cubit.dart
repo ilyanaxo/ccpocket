@@ -104,6 +104,7 @@ class SettingsCubit extends Cubit<SettingsState> {
                (appIconService ?? AppIconService()).isSupportedPlatform,
          ),
        ) {
+    _syncPerformanceMode();
     final bridge = _bridge;
     if (bridge != null) {
       _bridgeMessagesSub = bridge.messages.listen((message) {
@@ -277,6 +278,14 @@ class SettingsCubit extends Cubit<SettingsState> {
     }
 
     return SettingsState(
+      liteMode: prefs.getBool('settings_lite_mode') ?? false,
+      sessionLiteModes: {
+        for (final key in prefs.getKeys().where(
+          (key) => key.startsWith('settings_session_lite_mode:'),
+        ))
+          key.substring('settings_session_lite_mode:'.length):
+              prefs.getBool(key) ?? false,
+      },
       localUrlSettings: {
         for (final key in prefs.getKeys().where(
           (key) => key.startsWith(_localUrlKeyPrefix),
@@ -315,6 +324,30 @@ class SettingsCubit extends Cubit<SettingsState> {
       autoRenameClaudeSessions: autoRenameClaudeSessions,
       autoRenameOmpSessions: autoRenameOmpSessions,
     );
+  }
+
+  void _syncPerformanceMode() {
+    _bridge?.configurePerformanceMode(state.liteMode, state.sessionLiteModes);
+  }
+
+  void setLiteMode(bool enabled) {
+    _prefs.setBool('settings_lite_mode', enabled);
+    emit(state.copyWith(liteMode: enabled));
+    _syncPerformanceMode();
+  }
+
+  void setSessionLiteMode(String sessionId, bool? enabled) {
+    final overrides = Map<String, bool>.from(state.sessionLiteModes);
+    final key = 'settings_session_lite_mode:$sessionId';
+    if (enabled == null) {
+      overrides.remove(sessionId);
+      _prefs.remove(key);
+    } else {
+      overrides[sessionId] = enabled;
+      _prefs.setBool(key, enabled);
+    }
+    emit(state.copyWith(sessionLiteModes: overrides));
+    _syncPerformanceMode();
   }
 
   static UsageDisplayMode _usageDisplayModeFromRaw(String? raw) {

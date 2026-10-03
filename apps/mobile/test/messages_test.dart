@@ -714,6 +714,7 @@ void main() {
       expect(json['supportedServerMessages'], [
         'conversation_queue',
         'goal_state',
+        'codex_recovery_state',
         'guardian_approval',
         'history_delta',
         'history_snapshot',
@@ -722,6 +723,7 @@ void main() {
         'projects',
         'push_registration_result',
         'session_context',
+        'session_activity',
       ]);
     });
 

@@ -1,3 +1,4 @@
+import type { CodexRecoveryState } from "./codex-recovery.js";
 import type { GoalNotification } from "./goal-notifications.js";
 import type { GalleryImageInfo } from "./gallery-store.js";
 import type { ImageRef } from "./image-store.js";
@@ -112,6 +113,9 @@ export type ClientMessage =
       supportedServerMessages?: string[];
       /** Providers the client can show; absent means `claude` and `codex`. */
       supportedProviders?: string[];
+      deliveryRevision?: number;
+      performanceMode?: boolean;
+      sessionPerformanceModes?: Record<string, boolean>;
     }
   | {
       type: "start";
@@ -210,6 +214,8 @@ export type ClientMessage =
       model?: string;
       thinkingLevel?: OmpThinkingLevel;
     }
+  | { type: "set_codex_recovery"; sessionId: string; enabled: boolean }
+  | { type: "cancel_codex_recovery"; sessionId: string }
   | { type: "get_goal"; sessionId: string; background?: boolean }
   | {
       type: "set_goal";
@@ -734,10 +740,13 @@ export type ServerMessage =
       sessionId: string;
       context: Record<string, unknown>;
     }
+  | { type: "session_activity"; sessionId?: string; at: string; historySeq?: number }
+  | { type: "performance_mode_state"; deliveryRevision: number }
   | { type: "status"; status: ProcessStatus }
   | { type: "history"; messages: ServerMessage[] }
   | {
       type: "history_delta";
+      filtered?: boolean;
       sessionId?: string;
       fromSeq: number;
       toSeq: number;
@@ -746,6 +755,7 @@ export type ServerMessage =
     }
   | {
       type: "history_snapshot";
+      filtered?: boolean;
       sessionId?: string;
       fromSeq: number;
       toSeq: number;
@@ -759,6 +769,7 @@ export type ServerMessage =
       limit: number;
       items: QueuedInputItem[];
     }
+  | { type: "codex_recovery_state"; sessionId?: string; recovery: CodexRecoveryState }
   | {
       type: "goal_state";
       notification?: GoalNotification;
@@ -1356,6 +1367,21 @@ export function parseClientMessage(data: string): ClientMessage | null {
 
     switch (msg.type) {
       case "client_capabilities":
+        if (
+          msg.deliveryRevision !== undefined &&
+          (!Number.isSafeInteger(msg.deliveryRevision) || Number(msg.deliveryRevision) < 0)
+        ) return null;
+        if (
+          msg.performanceMode !== undefined && typeof msg.performanceMode !== "boolean"
+        ) return null;
+        if (
+          msg.sessionPerformanceModes !== undefined && (
+            msg.sessionPerformanceModes === null ||
+            typeof msg.sessionPerformanceModes !== "object" ||
+            Array.isArray(msg.sessionPerformanceModes) ||
+            Object.values(msg.sessionPerformanceModes).some((value) => typeof value !== "boolean")
+          )
+        ) return null;
         if (msg.appVersion !== undefined && typeof msg.appVersion !== "string")
           return null;
         if (
@@ -1541,6 +1567,13 @@ export function parseClientMessage(data: string): ClientMessage | null {
           return null;
         if (msg.sessionId !== undefined && typeof msg.sessionId !== "string")
           return null;
+        break;
+      case "set_codex_recovery":
+        if (typeof msg.enabled !== "boolean") return null;
+        if (typeof msg.sessionId !== "string" || !msg.sessionId) return null;
+        break;
+      case "cancel_codex_recovery":
+        if (typeof msg.sessionId !== "string" || !msg.sessionId) return null;
         break;
       case "get_goal":
         if (msg.background !== undefined && typeof msg.background !== "boolean") return null;

@@ -13,6 +13,7 @@ import {
   type Server as NetServer,
   type Socket,
 } from "node:net";
+import { randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, type ClientOptions } from "ws";
@@ -155,6 +156,14 @@ describe("BridgeWebSocketServer connections", () => {
     return (ws as any)._socket as Socket;
   }
 
+  /**
+   * Text that permessage-deflate cannot shrink much, so it occupies the link
+   * like real traffic (images, file contents) does.
+   */
+  function incompressible(bytes: number): string {
+    return randomBytes(Math.ceil((bytes * 3) / 4)).toString("base64");
+  }
+
   function tick(): void {
     vi.advanceTimersByTime(BridgeWebSocketServer.KEEPALIVE_INTERVAL_MS);
   }
@@ -281,7 +290,7 @@ describe("BridgeWebSocketServer connections", () => {
       const server = await bridgeEnd();
 
       link.toClient.hold();
-      server.send("x".repeat(1_000_000));
+      server.send(incompressible(1_000_000));
       tick();
       tick();
       expect(server.readyState).toBe(WebSocket.OPEN);
@@ -304,7 +313,9 @@ describe("BridgeWebSocketServer connections", () => {
 
       link.toClient.hold();
       link.bridgeSide.pause();
-      server.send("x".repeat(16 * 1024 * 1024));
+      server.send(incompressible(16 * 1024 * 1024));
+      // Compression is asynchronous; tick once the frame reached the socket.
+      await waitFor(() => rawSocket(server).writableLength > 0);
       tick();
       // The ping waits in the Bridge's write queue behind the message.
       expect(rawSocket(server).writableLength).toBeGreaterThan(0);
@@ -329,7 +340,9 @@ describe("BridgeWebSocketServer connections", () => {
       const server = await bridgeEnd();
 
       link.bridgeSide.pause();
-      server.send("x".repeat(16 * 1024 * 1024));
+      server.send(incompressible(16 * 1024 * 1024));
+      // Compression is asynchronous; tick once the frame reached the socket.
+      await waitFor(() => rawSocket(server).writableLength > 0);
       tick();
       expect(rawSocket(server).writableLength).toBeGreaterThan(0);
       tick();
@@ -347,7 +360,9 @@ describe("BridgeWebSocketServer connections", () => {
       const server = await bridgeEnd();
 
       link.toBridge.hold();
-      ws.send(JSON.stringify({ type: "keepalive_padding", padding: "x".repeat(1_000_000) }));
+      ws.send(JSON.stringify({ type: "keepalive_padding", padding: incompressible(1_000_000) }));
+      // Compression is asynchronous; wait until the upload sits in the link.
+      await waitFor(() => ws.bufferedAmount === 0);
       const pinged = once(ws, "ping");
       tick();
       // The automatic pong is now queued behind the upload.

@@ -1,5 +1,7 @@
 {
   "type": "client_capabilities",
+  "performanceMode": false,
+  "sessionPerformanceModes": {},
   "protocolVersion": 1,
   "minimumProtocolVersion": 1,
   "supportedServerMessages": ["conversation_queue", "session_context"],

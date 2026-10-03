@@ -12,6 +12,7 @@ export const LEGACY_PROTOCOL_VERSION = 1;
  * contains `"omp"` (docs/protocol-versioning.md).
  */
 export const BRIDGE_PROTOCOL_CAPABILITIES = [
+  "performance_mode_v1",
   "project_request_correlation_v1",
   "session_context_v1",
   "provider_omp_v1",
